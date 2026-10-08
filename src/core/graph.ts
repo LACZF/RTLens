@@ -111,6 +111,8 @@ export interface GraphOptions {
   ancestors?: HierarchyNode[];
   /** Instance paths that should not be expanded below (collapsed). */
   collapsed?: Set<string> | string[];
+  /** Whether to draw net nodes as separate nodes (default true). */
+  showNetNodes?: boolean;
 }
 
 const DEFAULT_MAX_NODES = 800;
@@ -148,12 +150,14 @@ class GraphBuilder {
   private overflowed = false;
 
   private readonly collapsed: Set<string>;
+  private readonly showNetNodes: boolean;
 
   constructor(
     private readonly index: HdlIndex,
     private readonly opts: Required<GraphOptions>,
   ) {
     this.collapsed = new Set(opts.collapsed);
+    this.showNetNodes = opts.showNetNodes;
   }
 
   build(root: HierarchyNode): Graph {
@@ -276,7 +280,10 @@ class GraphBuilder {
     }
   }
 
-  private addNetNode(scope: string, signal: string, depth: number, info: NetInfo): string {
+  private addNetNode(scope: string, signal: string, depth: number, info: NetInfo): string | undefined {
+    if (!this.showNetNodes) {
+      return GraphBuilder.netIds(scope, signal);
+    }
     const id = GraphBuilder.netIds(scope, signal);
     const width = info.netWidth ?? info.width;
     const existing = this.nodes.get(id);
@@ -451,9 +458,13 @@ class GraphBuilder {
       if (conn.shorthand && conn.portName === '*') {
         // `.*` binds every child port to the same-named signal of the parent.
         for (const p of childDef?.ports ?? []) {
-          this.addNetNode(parent.path, p.name, parent.depth, this.netInfo(parentDef, p.name, scope));
+          const nid = this.addNetNode(parent.path, p.name, parent.depth, this.netInfo(parentDef, p.name, scope));
+          if (!nid && this.showNetNodes) {
+            continue;
+          }
+          const fromId = this.showNetNodes ? nid : GraphBuilder.netIds(parent.path, p.name);
           this.addEdge({
-            from: GraphBuilder.netIds(parent.path, p.name),
+            from: fromId!,
             to: childId,
             kind: 'port',
             port: p.name,
@@ -469,9 +480,13 @@ class GraphBuilder {
       if (conn.shorthand) {
         // `.name` (SystemVerilog implicit port connection).
         const port = childDef?.ports.find((p) => p.name === conn.portName);
-        this.addNetNode(parent.path, conn.portName, parent.depth, this.netInfo(parentDef, conn.portName, scope));
+        const nid = this.addNetNode(parent.path, conn.portName, parent.depth, this.netInfo(parentDef, conn.portName, scope));
+        if (!nid && this.showNetNodes) {
+          continue;
+        }
+        const fromId = this.showNetNodes ? nid : GraphBuilder.netIds(parent.path, conn.portName);
         this.addEdge({
-          from: GraphBuilder.netIds(parent.path, conn.portName),
+          from: fromId!,
           to: childId,
           kind: 'port',
           port: conn.portName,
@@ -480,6 +495,7 @@ class GraphBuilder {
           width: port ? widthOfPort(port, scope) : undefined,
           file: parentDef.file,
           range: inst.range,
+          select: undefined,
         });
         continue;
       }
@@ -504,6 +520,9 @@ class GraphBuilder {
           info.direction = flow === 'output' ? 'input' : flow === 'input' ? 'output' : flow;
         }
         const netId = this.addNetNode(parent.path, ref.fullPath, parent.depth, info);
+        if (!netId) {
+          continue;
+        }
         this.addEdge({
           from: netId,
           to: childId,
@@ -574,6 +593,9 @@ class GraphBuilder {
             continue;
           }
           const rhsId = this.addNetNode(parent.path, rhs.fullPath, parent.depth, rhsInfo);
+          if (!rhsId || !lhsId) {
+            continue;
+          }
           this.addEdge({
             from: rhsId,
             to: lhsId,
@@ -758,6 +780,7 @@ export function buildGraph(index: HdlIndex, root: HierarchyNode, opts: GraphOpti
     portWiringOnly: opts.portWiringOnly ?? false,
     ancestors: opts.ancestors ?? [],
     collapsed: opts.collapsed ?? [],
+    showNetNodes: opts.showNetNodes ?? true,
   });
   return builder.build(root);
 }
