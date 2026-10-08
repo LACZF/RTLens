@@ -586,9 +586,30 @@ const SCRIPT = String.raw`
         'stroke-dasharray': e.dashed ? '4 3' : '',
         'stroke-width': e.kind === 'containment' ? 0.8 : 1.1,
       });
-      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-      const nx = -(b.y - a.y) * 0.12, ny = (b.x - a.x) * 0.12;
-      path.setAttribute('d', 'M' + a.x + ',' + a.y + ' Q' + (mx + nx) + ',' + (my + ny) + ' ' + b.x + ',' + b.y);
+      // Anchor to instance rectangle edges based on port direction to look like
+      // pin-to-pin wiring (module port -> signal) rather than center-to-center.
+      function edgePoint(n, other, dir) {
+        const isInst = n.kind === 'instance' || n.kind === 'root';
+        if (!isInst) return { x: n.x, y: n.y };
+        const w = Math.max(34, Math.min(190, (n.label || '').length * 6.4 + 16));
+        const h = 22;
+        // Decide side by direction: input ports enter on the left, outputs leave
+        // on the right. If direction unknown, prefer the side facing the other node.
+        let side = 'left';
+        if (dir === 'output') side = 'right';
+        else if (dir === 'inout') side = other && other.x > n.x ? 'right' : 'left';
+        else { // input or undefined
+          side = other && other.x < n.x ? 'right' : 'left';
+        }
+        if (side === 'left') return { x: n.x - w / 2, y: n.y };
+        if (side === 'right') return { x: n.x + w / 2, y: n.y };
+        return { x: n.x, y: n.y };
+      }
+      const pa = edgePoint(a, b, e.direction === 'output' ? 'output' : (e.kind === 'port' ? 'input' : undefined));
+      const pb = edgePoint(b, a, e.direction);
+      const mx = (pa.x + pb.x) / 2, my = (pa.y + pb.y) / 2;
+      const nx = -(pb.y - pa.y) * 0.12, ny = (pb.x - pa.x) * 0.12;
+      path.setAttribute('d', 'M' + pa.x + ',' + pa.y + ' Q' + (mx + nx) + ',' + (my + ny) + ' ' + pb.x + ',' + pb.y);
       path.addEventListener('mouseenter', (ev) => showTip(ev, edgeTip(e)));
       path.addEventListener('mousemove', moveTip);
       path.addEventListener('mouseleave', hideTip);
