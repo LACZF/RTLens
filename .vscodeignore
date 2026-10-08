@@ -1,0 +1,31 @@
+# What the extension does not need at run time. vsce includes everything that
+# is not matched here, so this list is the difference between a 40 KB vsix and a
+# repository dump. The runtime is exactly:
+#   out/extension.js, out/core/*.js (minus e2e), out/vscode/*.js,
+#   package.json, language-configuration.json, syntaxes/, resources/
+
+src/**
+test/**
+dist/**
+node_modules/**
+.git/**
+.github/**
+.vscode/**
+
+out/test/**
+out/tools/**
+out/core/e2e.js
+out/core/e2e.js.map
+
+# Source maps point at files that are not shipped.
+out/**/*.js.map
+
+tsconfig.json
+package-lock.json
+Makefile
+DESIGN.md
+.gitignore
+.vscodeignore
+*.vsix
+**/*.ts
+**/.DS_Store

@@ -1,0 +1,7 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "SystemVerilog",
+  "scopeName": "source.systemverilog",
+  "comment": "SystemVerilog is Verilog plus extras; the patterns live in source.verilog so both languages stay in sync.",
+  "patterns": [{ "include": "source.verilog" }]
+}

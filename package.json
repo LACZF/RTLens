@@ -1,0 +1,406 @@
+{
+  "name": "hdl-connect-view",
+  "displayName": "HDL Connect View",
+  "description": "Read Verilog/SystemVerilog with syntax highlighting, signal & module go-to-definition, and visual connectivity / composition / wrapper generation.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Visualization",
+    "Snippets"
+  ],
+  "keywords": [
+    "verilog",
+    "systemverilog",
+    "hdl",
+    "rtl",
+    "fpga"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:verilog",
+    "onLanguage:systemverilog",
+    "workspaceContains:**/*.v",
+    "workspaceContains:**/*.sv"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "verilog",
+        "aliases": [
+          "Verilog",
+          "verilog"
+        ],
+        "extensions": [
+          ".v"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "systemverilog",
+        "aliases": [
+          "SystemVerilog",
+          "systemverilog",
+          "sv"
+        ],
+        "extensions": [
+          ".sv",
+          ".svh"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "verilog",
+        "scopeName": "source.verilog",
+        "path": "./syntaxes/verilog.tmLanguage.json"
+      },
+      {
+        "language": "systemverilog",
+        "scopeName": "source.systemverilog",
+        "path": "./syntaxes/systemverilog.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "HDL Connect View",
+      "properties": {
+        "hdl.connectView.files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/*.{v,sv,svh,vh,vlt}"
+          ],
+          "markdownDescription": "Glob patterns of files to index. Relative to each workspace folder.",
+          "scope": "resource"
+        },
+        "hdl.connectView.includeDirs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "include",
+            "inc",
+            "../include",
+            "../inc"
+          ],
+          "markdownDescription": "Extra directories searched for `` `include `` directives.",
+          "scope": "resource"
+        },
+        "hdl.connectView.exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/tb/**",
+            "**/testbench/**",
+            "**/*_tb.v",
+            "**/*_tb.sv",
+            "**/build/**",
+            "**/output/**"
+          ],
+          "markdownDescription": "Glob patterns excluded from indexing. Testbenches are excluded by default because they are usually leaves of the hierarchy.",
+          "scope": "resource"
+        },
+        "hdl.connectView.topModules": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Explicit top module names. When empty, the extension infers top modules (modules never instantiated).",
+          "scope": "resource"
+        },
+        "hdl.connectView.maxDepth": {
+          "type": "number",
+          "default": 32,
+          "minimum": 1,
+          "maximum": 256,
+          "description": "Maximum hierarchy expansion depth (guards against recursive generate loops)."
+        },
+        "hdl.connectView.maxInstances": {
+          "type": "number",
+          "default": 20000,
+          "minimum": 100,
+          "description": "Maximum number of hierarchy nodes materialised in one expansion."
+        },
+        "hdl.connectView.graph.maxNodes": {
+          "type": "number",
+          "default": 800,
+          "minimum": 50,
+          "description": "Maximum nodes rendered in the connectivity graph before degrading to a neighbourhood view."
+        },
+        "hdl.connectView.graph.showContainment": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show parent/child containment edges in the connectivity graph."
+        },
+        "hdl.connectView.followDefinition": {
+          "type": "boolean",
+          "default": true,
+          "description": "F12 on an instance name jumps to that instance's module definition (otherwise it reveals it in the Composition tree)."
+        },
+        "hdl.connectView.enableSemanticHighlighting": {
+          "type": "boolean",
+          "default": true,
+          "description": "Additionally highlight module instance names, port names and declared signals using semantic analysis."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "hdl.connectView.refreshIndex",
+        "title": "HDL: Refresh Index",
+        "category": "HDL"
+      },
+      {
+        "command": "hdl.connectView.showGraph",
+        "title": "HDL: Show Connectivity Graph",
+        "category": "HDL",
+        "icon": "$(type-hierarchy-sub)"
+      },
+      {
+        "command": "hdl.connectView.showGraphForSelection",
+        "title": "HDL: Show Connectivity Graph for Current Module",
+        "category": "HDL"
+      },
+      {
+        "command": "hdl.connectView.setGraphRoot",
+        "title": "HDL: Set Graph Root to Current Module",
+        "category": "HDL"
+      },
+      {
+        "command": "hdl.connectView.generateWrapper",
+        "title": "HDL: Generate Wrapper Module for Instance",
+        "category": "HDL",
+        "icon": "$(wand)"
+      },
+      {
+        "command": "hdl.connectView.revealInComposition",
+        "title": "HDL: Reveal Current Module in Composition Tree",
+        "category": "HDL"
+      },
+      {
+        "command": "hdl.connectView.copyInstancePath",
+        "title": "HDL: Copy Hierarchical Path of Current Instance",
+        "category": "HDL"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "hdl-connect-view",
+          "title": "HDL Connect View",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "hdl-connect-view": [
+        {
+          "id": "hdl.composition",
+          "name": "Composition"
+        },
+        {
+          "id": "hdl.nets",
+          "name": "Nets"
+        },
+        {
+          "id": "hdl.problems",
+          "name": "Problems"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "hdl.connectView.refreshIndex",
+          "when": "view == hdl.composition",
+          "group": "navigation@1"
+        },
+        {
+          "command": "hdl.connectView.showGraph",
+          "when": "view == hdl.composition",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "hdl.connectView.showGraph",
+          "when": "view == hdl.composition && viewItem =~ /hdl.instance/",
+          "group": "inline@1"
+        },
+        {
+          "command": "hdl.connectView.generateWrapper",
+          "when": "view == hdl.composition && viewItem =~ /hdl.instance/",
+          "group": "1_generate@1"
+        },
+        {
+          "command": "hdl.connectView.setGraphRoot",
+          "when": "view == hdl.composition && viewItem =~ /hdl.instance/",
+          "group": "2_graph@1"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "hdl.connectView.showGraphForSelection",
+          "when": "editorLangId == verilog || editorLangId == systemverilog",
+          "group": "hdl@1"
+        },
+        {
+          "command": "hdl.connectView.generateWrapper",
+          "when": "editorLangId == verilog || editorLangId == systemverilog",
+          "group": "hdl@2"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "hdl.connectView.showGraphForSelection",
+        "key": "ctrl+alt+g",
+        "mac": "cmd+alt+g",
+        "when": "editorTextFocus && (editorLangId == verilog || editorLangId == systemverilog)"
+      }
+    ],
+    "semanticTokenTypes": [
+      {
+        "id": "hdlModule",
+        "superType": "type",
+        "description": "entity.name.type.module.verilog"
+      },
+      {
+        "id": "hdlInstance",
+        "superType": "variable",
+        "description": "entity.name.type.instance.verilog"
+      },
+      {
+        "id": "hdlPort",
+        "superType": "variable",
+        "description": "variable.other.port.verilog"
+      },
+      {
+        "id": "hdlSignal",
+        "superType": "variable",
+        "description": "variable.other.signal.verilog"
+      },
+      {
+        "id": "hdlParameter",
+        "superType": "variable",
+        "description": "variable.parameter.verilog"
+      },
+      {
+        "id": "hdlFunction",
+        "superType": "variable",
+        "description": "entity.name.function.verilog"
+      },
+      {
+        "id": "hdlGenvar",
+        "superType": "variable",
+        "description": "variable.other.genvar.verilog"
+      },
+      {
+        "id": "hdlType",
+        "superType": "type",
+        "description": "support.type.verilog"
+      },
+      {
+        "id": "hdlSystemId",
+        "superType": "variable",
+        "description": "support.constant.system.verilog"
+      }
+    ],
+    "semanticTokenModifiers": [
+      {
+        "id": "declaration",
+        "description": "declaration"
+      },
+      {
+        "id": "definition",
+        "description": "definition"
+      },
+      {
+        "id": "readonly",
+        "description": "readonly"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "verilog",
+        "scopes": {
+          "type": [
+            "support.type",
+            "entity.name.type"
+          ],
+          "class": [
+            "entity.name.type.module",
+            "entity.name.type.class"
+          ],
+          "enum": [
+            "entity.name.type.enum"
+          ],
+          "interface": [
+            "entity.name.type.interface"
+          ],
+          "namespace": [
+            "entity.name.type.module",
+            "entity.name.namespace"
+          ],
+          "typeParameter": [
+            "variable.parameter"
+          ],
+          "parameter": [
+            "variable.parameter"
+          ],
+          "variable": [
+            "variable",
+            "meta.definition.variable.name"
+          ],
+          "property": [
+            "variable.other.property",
+            "variable.other.member"
+          ],
+          "function": [
+            "entity.name.function",
+            "support.function"
+          ],
+          "method": [
+            "entity.name.function.member"
+          ],
+          "macro": [
+            "variable.macro",
+            "entity.name.function.preprocessor"
+          ],
+          "label": [
+            "entity.name.label"
+          ],
+          "comment": [
+            "comment",
+            "punctuation.definition.comment"
+          ]
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "check": "npm run compile && node out/tools/e2e.js",
+    "test": "npm run compile && node --test out/test/",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  },
+  "icon": "resources/icon.png"
+}

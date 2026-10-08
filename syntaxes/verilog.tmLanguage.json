@@ -1,0 +1,246 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Verilog / SystemVerilog",
+  "scopeName": "source.verilog",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#attributes" },
+    { "include": "#directives" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#module-instantiation" },
+    { "include": "#declarations" },
+    { "include": "#types" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.verilog",
+          "begin": "/\\*",
+          "end": "\\*/"
+        },
+        {
+          "name": "comment.line.double-slash.verilog",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "directives": {
+      "patterns": [
+        {
+          "name": "meta.preprocessor.verilog",
+          "begin": "^\\s*(`(?:begin_keywords|end_keywords|ifdef|ifndef|elsif|else|endif|include|define|undef|timescale|default_nettype|celldefine|endcelldefine|resetall|unconnected_drive|nounconnected_drive|line|resetall|pragma|protect|endprotect|protected|endprotected|unprotected))",
+          "beginCaptures": {
+            "1": { "name": "keyword.control.directive.verilog" }
+          },
+          "end": "$",
+          "patterns": [
+            {
+              "name": "string.quoted.double.verilog",
+              "begin": "\"",
+              "end": "\"",
+              "patterns": [
+                { "name": "constant.character.escape.verilog", "match": "\\\\." }
+              ]
+            },
+            {
+              "name": "constant.numeric.verilog",
+              "match": "\\b\\d+'[sS]?[bodhBODH]\\w+\\b"
+            }
+          ]
+        }
+      ]
+    },
+    "attributes": {
+      "name": "meta.attribute.verilog",
+      "begin": "\\(\\*",
+      "end": "\\*\\)"
+    },
+    "strings": {
+      "name": "string.quoted.double.verilog",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        { "name": "constant.character.escape.verilog", "match": "\\\\." }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.integer.verilog",
+          "match": "\\b\\d*'[sS]?[bodhBODH]\\s?[0-9a-fA-FxXzZ_?]+|\\b\\d+'[01]\\s?[xXzZ]+|\\b[0-9][0-9_]*\\b"
+        },
+        {
+          "name": "constant.numeric.real.verilog",
+          "match": "\\b[0-9][0-9_]*\\.[0-9_]*([eE][-+]?[0-9]+)?\\b|\\b[0-9][0-9_]*[eE][-+]?[0-9]+\\b"
+        },
+        {
+          "name": "constant.numeric.time.verilog",
+          "match": "\\b\\d+(fs|ps|ns|us|ms|s)\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.module.verilog",
+          "match": "\\b(module|endmodule|macromodule|primitive|endprimitive|interface|endinterface|program|endprogram|package|endpackage|class|endclass|primitive|config|endconfig|checker|endchecker)\\b"
+        },
+        {
+          "name": "keyword.control.conditional.verilog",
+          "match": "\\b(if|else|case|casex|casez|endcase|casex|endcasex|casez|endcasez|default|unique|priority)\\b"
+        },
+        {
+          "name": "keyword.control.loop.verilog",
+          "match": "\\b(for|while|do|repeat|forever|break|continue|return|foreach)\\b"
+        },
+        {
+          "name": "keyword.control.flow.verilog",
+          "match": "\\b(begin|end|fork|join|join_any|join_none|disable|wait|assert|assume|cover|restrict)\\b"
+        },
+        {
+          "name": "keyword.other.sensitivity.verilog",
+          "match": "\\b(always|always_comb|always_ff|always_latch|initial|final|posedge|negedge|edge|or)\\b"
+        },
+        {
+          "name": "keyword.declaration.verilog",
+          "match": "\\b(input|output|inout|ref|wire|tri|tri0|tri1|wand|wor|reg|logic|bit|byte|int|integer|longint|shortint|real|realtime|time|timescale|shortreal|struct|union|enum|var|const|static|automatic|rand|randc|supply0|supply1|string|chandle|event|signed|unsigned|genvar)\\b"
+        },
+        {
+          "name": "storage.modifier.verilog",
+          "match": "\\b(parameter|localparam|specparam|defparam|typedef|import|export)\\b"
+        },
+        {
+          "name": "keyword.other.assign.verilog",
+          "match": "\\b(assign|alias)\\b"
+        },
+        {
+          "name": "keyword.other.generate.verilog",
+          "match": "\\b(generate|endgenerate|genvar)\\b"
+        },
+        {
+          "name": "keyword.other.task.verilog",
+          "match": "\\b(function|endfunction|task|endtask|automatic|void)\\b"
+        },
+        {
+          "name": "keyword.other.gate.verilog",
+          "match": "\\b(and|nand|or|nor|xor|xnor|buf|not|bufif0|bufif1|notif0|notif1|pmos|nmos|rpmos|rnmos|cmos|rcmos|tran|tranif0|tranif1|rtran|rtranif0|rtranif1|pullup|pulldown)\\b"
+        },
+        {
+          "name": "keyword.other.config.verilog",
+          "match": "\\b(cell|config|design|enddesign|instance|liblist|incdir|include|instance|use|liblist)\\b"
+        },
+        {
+          "name": "keyword.cast.verilog",
+          "match": "\\b(signed|unsigned|shortint|int|longint|integer|bit|logic|byte|real|shortreal|chandle|string|void)\\b"
+        }
+      ]
+    },
+    "module-instantiation": {
+      "patterns": [
+        {
+          "match": "^\\s*(?:\\w+\\s+)?(?:\\w+\\s+)?(\\w+)\\s+(#\\s*\\()",
+          "captures": {
+            "1": { "name": "entity.name.type.module.verilog" },
+            "2": { "name": "punctuation.definition.parameters.verilog" }
+          }
+        },
+        {
+          "match": "^\\s*(?:\\w+\\s+)?(\\w+)\\s+(\\w+)\\s*(\\()",
+          "captures": {
+            "1": { "name": "entity.name.type.module.verilog" },
+            "2": { "name": "entity.name.label.module.verilog" },
+            "3": { "name": "punctuation.definition.port-list.verilog" }
+          }
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(input|output|inout)\\b\\s*(?:\\w+)?\\s*(?:\\[[^\\]]*\\]\\s*)?(\\w+)\\s*(?=[,);=])",
+          "captures": {
+            "1": { "name": "storage.type.verilog" },
+            "2": { "name": "variable.parameter.verilog" }
+          }
+        },
+        {
+          "match": "\\b(wire|reg|logic|bit|int|integer|real|realtime|time|genvar)\\b\\s*(?:\\[[^\\]]*\\]\\s*)?(\\w+)\\s*(?=[,);=])",
+          "captures": {
+            "1": { "name": "storage.type.verilog" },
+            "2": { "name": "variable.other.verilog" }
+          }
+        },
+        {
+          "match": "\\b(parameter|localparam|specparam)\\b\\s*(?:\\w+)?\\s*(?:\\[[^\\]]*\\]\\s*)?(\\w+)\\s*(?==)",
+          "captures": {
+            "1": { "name": "storage.modifier.verilog" },
+            "2": { "name": "variable.parameter.verilog" }
+          }
+        },
+        {
+          "name": "entity.name.type.module.verilog",
+          "match": "\\b(module|interface|package|class|program)\\s+(\\w+)"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.verilog",
+          "match": "\\b(logic|bit|byte|int|longint|shortint|integer|real|shortreal|realtime|time|string|chandle|event|void|any|interface)\\b"
+        },
+        {
+          "name": "entity.name.type.verilog",
+          "match": "\\b[A-Za-z_]\\w*(?:_t)\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.assignment.verilog",
+          "match": "<=|=>|:=|\\*\\*>|\\+\\+|\\?\\?=|\\?\\?="
+        },
+        {
+          "name": "keyword.operator.arrow.verilog",
+          "match": "->|->>"
+        },
+        {
+          "name": "keyword.operator.comparison.verilog",
+          "match": "===|!==|==|!=|===|!==|<=|>=|&&|\\|\\||\\^~|~\\^|==\\?|!=\\?"
+        },
+        {
+          "name": "keyword.operator.ternary.verilog",
+          "match": "\\?|:"
+        },
+        {
+          "name": "keyword.operator.arithmetic.verilog",
+          "match": "\\+|-|\\*|/|%|\\*\\*"
+        },
+        {
+          "name": "keyword.operator.bitwise.verilog",
+          "match": "~|&|\\||\\^|~\\^|<<|>>|<<<|>>>"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        { "name": "punctuation.section.parens.begin.verilog", "match": "\\(" },
+        { "name": "punctuation.section.parens.end.verilog", "match": "\\)" },
+        { "name": "punctuation.section.brackets.begin.verilog", "match": "\\[" },
+        { "name": "punctuation.section.brackets.end.verilog", "match": "\\]" },
+        { "name": "punctuation.section.braces.begin.verilog", "match": "\\{" },
+        { "name": "punctuation.section.braces.end.verilog", "match": "\\}" },
+        { "name": "punctuation.terminator.verilog", "match": ";" },
+        { "name": "punctuation.separator.comma.verilog", "match": "," },
+        { "name": "punctuation.separator.dot.verilog", "match": "\\." },
+        { "name": "punctuation.definition.port-list.verilog", "match": "#\\s*\\(" }
+      ]
+    }
+  }
+}

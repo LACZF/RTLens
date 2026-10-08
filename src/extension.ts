@@ -1,0 +1,290 @@
+import * as vscode from 'vscode';
+
+import { IndexService } from './vscode/indexService';
+import { SECTION } from './vscode/config';
+import {
+  HdlDefinitionProvider,
+  HdlDocumentSymbolProvider,
+  HdlHoverProvider,
+  HdlReferenceProvider,
+  HdlRenameProvider,
+  range,
+  selectionAt,
+} from './vscode/providers';
+import { HdlSemanticTokensProvider } from './vscode/semantic';
+import {
+  CompositionTreeProvider,
+  NetsTreeProvider,
+  ProblemsTreeProvider,
+  type CompositionItem,
+  type NetsItem,
+  type ProblemsItem,
+} from './vscode/views';
+import { GraphPanel } from './vscode/graphPanel';
+import { runGenerateWrapper } from './vscode/generate';
+import type { HierarchyNode } from './core/ast';
+import { findByPath } from './core/hierarchy';
+
+const LANGUAGES = ['verilog', 'systemverilog'];
+
+export function activate(context: vscode.ExtensionContext): void {
+  const log = vscode.window.createOutputChannel('HDL Connect View');
+  context.subscriptions.push(log);
+  log.appendLine('HDL Connect View activating');
+
+  const svc = new IndexService(log);
+  context.subscriptions.push(svc);
+
+  // --- views -------------------------------------------------------------
+  const composition = new CompositionTreeProvider(svc);
+  const nets = new NetsTreeProvider(svc);
+  const problems = new ProblemsTreeProvider(svc);
+
+  const compositionView = vscode.window.createTreeView('hdl.composition', {
+    treeDataProvider: composition,
+    showCollapseAll: true,
+  });
+  const netsView = vscode.window.createTreeView('hdl.nets', { treeDataProvider: nets });
+  const problemsView = vscode.window.createTreeView('hdl.problems', { treeDataProvider: problems });
+  context.subscriptions.push(compositionView, netsView, problemsView);
+
+  // Nodes selected (multi-select) in the composition view, in tree order.
+  let selected: HierarchyNode[] = [];
+  context.subscriptions.push(
+    compositionView.onDidChangeSelection((e) => {
+      selected = e.selection
+        .map((item) => (item instanceof Object && 'node' in item ? item.node : undefined))
+        .filter((n): n is HierarchyNode => n !== undefined);
+    }),
+  );
+
+  // --- language features -------------------------------------------------
+  const selector: vscode.DocumentSelector = LANGUAGES.map((language) => ({ language, scheme: 'file' }));
+  const legend = HdlSemanticTokensProvider.legend;
+  context.subscriptions.push(
+    vscode.languages.registerDocumentSemanticTokensProvider(selector, new HdlSemanticTokensProvider(svc), legend),
+    vscode.languages.registerDefinitionProvider(selector, new HdlDefinitionProvider(svc)),
+    vscode.languages.registerHoverProvider(selector, new HdlHoverProvider(svc)),
+    vscode.languages.registerReferenceProvider(selector, new HdlReferenceProvider(svc)),
+    vscode.languages.registerRenameProvider(selector, new HdlRenameProvider(svc)),
+    vscode.languages.registerDocumentSymbolProvider(selector, new HdlDocumentSymbolProvider(svc)),
+  );
+
+  // --- editor tracking ---------------------------------------------------
+  const syncEditor = (editor: vscode.TextEditor | undefined) => {
+    if (!editor || !LANGUAGES.includes(editor.document.languageId)) {
+      nets.setContext(undefined, undefined);
+      return;
+    }
+    // The nets view resolves the module around the line itself, so it does not
+    // need the cursor to be on an instance.
+    nets.setContext(editor.document.fileName, editor.selection.active.line);
+  };
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor(syncEditor),
+    vscode.window.onDidChangeTextEditorSelection((e) => {
+      if (e.textEditor === vscode.window.activeTextEditor) {
+        syncEditor(e.textEditor);
+      }
+    }),
+    vscode.workspace.onDidOpenTextDocument((doc) => context.subscriptions.push(svc.watchDocument(doc))),
+    // Closing a document discards its unsaved edits; the index still holds the
+    // buffer text, so the file has to be re-read from disk.
+    vscode.workspace.onDidCloseTextDocument((doc) => {
+      if (doc.uri.scheme === 'file') {
+        svc.revertToDisk(doc.fileName);
+      }
+    }),
+  );
+
+  // --- index lifecycle ---------------------------------------------------
+  void svc.ensureReady().then(() => {
+    syncEditor(vscode.window.activeTextEditor);
+    const stats = svc.stats;
+    log.appendLine(
+      `indexed ${stats.modules} module(s) in ${stats.files} file(s) in ${stats.parseMs} ms` +
+        (stats.unresolved ? `, ${stats.unresolved} unresolved instance(s)` : ''),
+    );
+    // Missing modules are reported by the Problems view, which refreshes on the
+    // same event - a toast on every activation only repeated (and disagreed
+    // with) what the tree already shows.
+  });
+
+  // --- commands ----------------------------------------------------------
+  // Commands receive their arguments from the manifest, so the handlers take
+  // `any` and narrow themselves.
+  const reg = (id: string, fn: (...args: any[]) => unknown) =>
+    context.subscriptions.push(vscode.commands.registerCommand(id, fn));
+
+  reg('hdl.connectView.refreshIndex', async () => {
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Window, title: 'HDL: reindexing workspace' },
+      () => svc.refresh(),
+    );
+    composition.refresh();
+    problems.refresh();
+    syncEditor(vscode.window.activeTextEditor);
+  });
+
+  reg('hdl.connectView.showGraph', async (item?: CompositionItem) => {
+    const node = item ? item.node : await pickRoot(svc);
+    if (node) {
+      GraphPanel.show(svc, context.extensionUri, node, node.path);
+    }
+  });
+
+  reg('hdl.connectView.showGraphForSelection', async () => {
+    const node = editorNode(svc) ?? (await pickRoot(svc));
+    if (node) {
+      GraphPanel.show(svc, context.extensionUri, node, node.path);
+    }
+  });
+
+  reg('hdl.connectView.setGraphRoot', async (item: CompositionItem) => {
+    // Focus the existing graph panel on this subtree, or open one.
+    GraphPanel.show(svc, context.extensionUri, item.node, composition.root ?? item.node.path);
+  });
+
+  reg('hdl.connectView.generateWrapper', async (item?: CompositionItem) => {
+    const selection = item ? [item.node] : selected;
+    await runGenerateWrapper(svc, selection.length ? selection : editorNodes(svc), composition.hierarchyRoot);
+  });
+
+  reg('hdl.connectView.revealInComposition', async (uri?: vscode.Uri) => {
+    const target = uri ?? vscode.window.activeTextEditor?.document.uri;
+    if (!target) {
+      return;
+    }
+    const item = expandTo(target.fsPath, svc, composition);
+    if (item) {
+      await compositionView.reveal(item, { select: true, focus: true, expand: true });
+    }
+  });
+
+  reg('hdl.connectView.copyInstancePath', async (item?: CompositionItem) => {
+    const node = item?.node ?? editorNode(svc);
+    if (!node) {
+      return;
+    }
+    await vscode.env.clipboard.writeText(node.path);
+    void vscode.window.setStatusBarMessage(`HDL: copied ${node.path}`, 3000);
+  });
+
+  // `revealInstance` is the click target of the composition and nets rows. The
+  // two row types do not carry the same data - a composition row knows the
+  // hierarchy node it came from, a nets row only knows a line - so both shapes
+  // are handled instead of assuming the node is there.
+  reg('hdl.connectView.revealInstance', async (item: CompositionItem | NetsItem) => {
+    if (!item?.file) {
+      return;
+    }
+    const node = 'node' in item ? item.node : undefined;
+    const target = node ? node.moduleNameRange ?? node.nameRange : undefined;
+    const line = target?.start.line ?? ('line' in item ? item.line : 0);
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(item.file));
+    const editor = await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One, preview: true });
+    const position = new vscode.Position(line, 0);
+    editor.selection = new vscode.Selection(position, position);
+    editor.revealRange(
+      target ? range(target) : new vscode.Range(position, position),
+      vscode.TextEditorRevealType.InCenter,
+    );
+  });
+
+  // Problems rows open the offending name.
+  reg('hdl.connectView.openProblem', async (item: ProblemsItem) => {
+    if (!item?.file) {
+      return;
+    }
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(item.file));
+    const editor = await vscode.window.showTextDocument(doc, { preview: true });
+    const position = new vscode.Position(item.line, item.character);
+    editor.selection = new vscode.Selection(position, position);
+    editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+  });
+
+  reg('hdl.connectView.showLog', () => log.show(true));
+
+  // `IndexService` does not watch the configuration itself: rescanning from two
+  // places at once would index the workspace twice per change. This is the only
+  // path, and it re-indexes, refreshes the views and shows progress.
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration(SECTION)) {
+        void vscode.commands.executeCommand('hdl.connectView.refreshIndex');
+      }
+    }),
+    { dispose: () => GraphPanel.disposeAll() },
+  );
+}
+
+export function deactivate(): void {
+  GraphPanel.disposeAll();
+}
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+/** Ask for a top module and expand it. */
+async function pickRoot(svc: IndexService): Promise<HierarchyNode | undefined> {
+  await svc.ensureReady();
+  const tops = svc.tops();
+  if (!tops.length) {
+    void vscode.window.showInformationMessage('HDL: no modules found in this workspace.');
+    return undefined;
+  }
+  const pick = await vscode.window.showQuickPick(tops, {
+    title: 'HDL: choose the top module',
+    placeHolder: 'Top module',
+  });
+  if (!pick) {
+    return undefined;
+  }
+  const def = (pick as vscode.QuickPickItem & { def?: { def: { file: string } } }).def;
+  return svc.hierarchy(pick.label, def?.def.file)?.root;
+}
+
+/** Hierarchy root containing the module under the cursor, plus the cursor instance. */
+function editorNode(svc: IndexService): HierarchyNode | undefined {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    return undefined;
+  }
+  const sel = selectionAt(svc, editor.document, editor.selection.active);
+  if (!sel) {
+    return undefined;
+  }
+  const result = svc.hierarchy(sel.mod.name, sel.file);
+  if (!result) {
+    return undefined;
+  }
+  if (sel.instancePath) {
+    return findByPath(result.root, sel.instancePath) ?? result.root;
+  }
+  return result.root;
+}
+
+/** Nodes to generate for: the one under the cursor, or the whole design. */
+function editorNodes(svc: IndexService): HierarchyNode[] {
+  const node = editorNode(svc);
+  return node ? [node] : [];
+}
+
+/** Expand the composition view around the module that owns `file`. */
+function expandTo(
+  file: string,
+  svc: IndexService,
+  composition: CompositionTreeProvider,
+): CompositionItem | undefined {
+  const def = svc.index.allModules().find((m) => m.file === file);
+  if (!def) {
+    return;
+  }
+  const result = svc.hierarchy(def.name, def.file);
+  if (!result) {
+    return;
+  }
+  composition.setRoot(result.root, def.name);
+  return composition.modelFor(result.root.path);
+}
