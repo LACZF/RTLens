@@ -101,6 +101,16 @@ export interface GraphOptions {
   includeRoot?: boolean;
   /** Skip `assign` edges; only keep instance port wiring. */
   portWiringOnly?: boolean;
+  /**
+   * Tree nodes that contain the graph root, from the containing design top down
+   * to the root's parent. They render as instance nodes above the root, each
+   * wired to the level below it, so a mid-tree module no longer looks like it
+   * lives on its own: the modules that instantiate it, and the signals they
+   * feed into it, are part of the graph.
+   */
+  ancestors?: HierarchyNode[];
+  /** Instance paths that should not be expanded below (collapsed). */
+  collapsed?: Set<string> | string[];
 }
 
 const DEFAULT_MAX_NODES = 800;
@@ -137,10 +147,14 @@ class GraphBuilder {
   private maxDepthSeen = 0;
   private overflowed = false;
 
+  private readonly collapsed: Set<string>;
+
   constructor(
     private readonly index: HdlIndex,
     private readonly opts: Required<GraphOptions>,
-  ) {}
+  ) {
+    this.collapsed = new Set(opts.collapsed);
+  }
 
   build(root: HierarchyNode): Graph {
     // The root is the only node that exists before any instance is visited, so
@@ -148,6 +162,7 @@ class GraphBuilder {
     if (this.opts.includeRoot) {
       this.addInstanceNode(root, true);
     }
+    this.addAncestors(root);
     this.visit(root);
     this.nodes = this.prune(this.nodes);
     this.edges = this.edges.filter(
@@ -311,8 +326,46 @@ class GraphBuilder {
     this.edges.push({ id, ...e });
   }
 
+  /**
+   * The tree nodes containing the graph root, from the design root down to the
+   * root's parent. Each becomes an instance node above the graph root and is
+   * wired to the level below it through the nets of its own scope, so the
+   * modules that instantiate the current one show up with the signals they feed
+   * into it. Only the chain is drawn - siblings stay out, and nothing below an
+   * ancestor is expanded.
+   */
+  private addAncestors(root: HierarchyNode): void {
+    for (let i = 0; i < this.opts.ancestors.length; i++) {
+      if (this.nodes.size >= this.opts.maxNodes) {
+        this.overflowed = true;
+        return;
+      }
+      const anc = this.opts.ancestors[i];
+      this.addInstanceNode(anc);
+      const child = i + 1 < this.opts.ancestors.length ? this.opts.ancestors[i + 1] : root;
+      const parentDef = this.index.resolveModule(anc.moduleName, anc.file);
+      this.connectInstance(anc, child, parentDef);
+      if (this.opts.showContainment) {
+        this.addEdge({
+          from: GraphBuilder.ids(anc.path),
+          to: GraphBuilder.ids(child.path),
+          kind: 'containment',
+          label: child.moduleName,
+          dashed: true,
+        });
+      }
+    }
+  }
+
   private visit(node: HierarchyNode): void {
     this.maxDepthSeen = Math.max(this.maxDepthSeen, node.depth);
+    // Collapsed: the node box stays (its parent added it) but nothing inside
+    // it is expanded - no child instances, no nets of its own scope. The view
+    // sends the collapsed paths back with every request, so this is where the
+    // hierarchy actually shrinks.
+    if (this.collapsed.has(node.path)) {
+      return;
+    }
     if (node.depth >= this.opts.maxDepth) {
       if (node.children?.length) {
         this.truncatedPaths.add(node.path);
@@ -703,6 +756,8 @@ export function buildGraph(index: HdlIndex, root: HierarchyNode, opts: GraphOpti
     showContainment: opts.showContainment ?? false,
     includeRoot: opts.includeRoot ?? true,
     portWiringOnly: opts.portWiringOnly ?? false,
+    ancestors: opts.ancestors ?? [],
+    collapsed: opts.collapsed ?? [],
   });
   return builder.build(root);
 }

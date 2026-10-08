@@ -405,6 +405,8 @@ export class IndexService implements vscode.Disposable {
       maxNodes: this.configValue.graphMaxNodes,
       showContainment: this.configValue.graphShowContainment,
       maxDepth: opts.maxDepth ?? 8,
+      ancestors: opts.ancestors,
+      collapsed: opts.collapsed,
     });
   }
 

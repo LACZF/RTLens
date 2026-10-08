@@ -2,7 +2,7 @@ import * as assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { HdlIndex } from '../core/index';
-import { buildHierarchy, findByPath, subtree } from '../core/hierarchy';
+import { buildHierarchy, findByPath, pathChain, subtree } from '../core/hierarchy';
 import { buildGraph } from '../core/graph';
 import { parseSource } from '../core/parser';
 import type { GraphEdge, GraphNode } from '../core/graph';
@@ -431,4 +431,77 @@ endmodule`,
   assert.equal(g.edges.find((e) => e.to.endsWith(':sel'))?.width, 8);
   assert.equal(g.edges.find((e) => e.to.endsWith(':mem'))?.width, 8);
   assert.equal(g.edges.find((e) => e.to.endsWith(':buf'))?.width, 32, 'no select, the whole net');
+});
+
+test('graph: the modules that instantiate the root are included above it', () => {
+  // A graph rooted at a mid-tree instance used to be a closed box: the parent
+  // that instantiates it and the signals it feeds in from outside never appeared.
+  // With the ancestor chain the parent instance shows up, wired through the nets
+  // of its own scope, and siblings of the root still stay out.
+  const { index, h, g } = graph();
+  const root = findByPath(h.root, 'top.u_mid')!;
+  const chain = pathChain(h.root, root.path).slice(0, -1);
+  const gf = buildGraph(index, root, { maxDepth: 8, maxNodes: 500, showContainment: true, ancestors: chain });
+
+  const top = gf.nodes.find((n) => n.id === 'i:top');
+  assert.ok(top, 'the containing module is a node');
+  assert.equal(top?.kind, 'instance', 'ancestors render as instances, not the root');
+  assert.equal(top?.label, 'top');
+
+  // The input of the root is fed from top's scope net `din`.
+  const feed = gf.edges.find((e) => e.to === 'i:top.u_mid' && e.port === 'x');
+  assert.ok(feed, 'the parent wire drives the root input port');
+  assert.equal(feed?.from, 'n:top::din');
+  assert.equal(feed?.width, 8);
+
+  // The root's output reaches a net of top's scope (`mid_out`), not just a net
+  // inside the root. Port edges always run net -> instance: the parent's scope
+  // net is the node, and the instance box is where the port lives.
+  const outEdge = gf.edges.find((e) => e.to === 'i:top.u_mid' && e.port === 'y');
+  assert.ok(outEdge, 'the root output port drives a parent-scope net');
+  assert.equal(outEdge?.from, 'n:top::mid_out');
+
+  // Siblings of the root are not part of the chain and stay invisible.
+  assert.equal(gf.nodes.find((n) => n.id === 'i:top.u_leaf'), undefined, 'no siblings');
+  assert.equal(gf.nodes.find((n) => n.id === 'i:top.u_narrow'), undefined, 'no siblings');
+
+  // The root's own subtree is still there.
+  assert.ok(gf.nodes.find((n) => n.id === 'i:top.u_mid.u_inner'), 'the root subtree is intact');
+
+  // Top-level graphs (no ancestors) keep the old shape: one root-kind node.
+  const roots = g.nodes.filter((n) => n.kind === 'root');
+  assert.equal(roots.length, 1, 'the design root is the only root-kind node');
+  assert.deepEqual(roots.map((n) => n.path), ['top']);
+});
+
+test('graph: a collapsed instance keeps its box but hides everything inside it', () => {
+  // Collapsing is how the graph shrinks to the hierarchy the user cares about:
+  // the instance box stays, wired exactly as before, but its children and the
+  // nets of its own scope are gone. It is an intentional state, not a depth or
+  // node-budget truncation, so no "truncated" issue may appear for it.
+  const { g } = graph({ collapsed: ['top.u_mid'] });
+
+  const mid = g.nodes.find((n) => n.id === 'i:top.u_mid');
+  assert.ok(mid, 'the collapsed instance itself is still a node');
+  assert.equal(mid?.truncated, false, 'collapsing is not truncation');
+
+  assert.equal(g.nodes.find((n) => n.id === 'i:top.u_mid.u_inner'), undefined, 'no children below it');
+  assert.equal(g.nodes.find((n) => n.id === 'n:top.u_mid::t'), undefined, 'its internal net is hidden');
+  assert.equal(g.nodes.find((n) => n.id === 'n:top.u_mid::x'), undefined, 'its port nets are hidden too');
+
+  // Everything outside the collapsed box is untouched: the parent still feeds
+  // the box, and siblings keep their full subtrees.
+  const feed = g.edges.find((e) => e.to === 'i:top.u_mid' && e.port === 'x');
+  assert.equal(feed?.from, 'n:top::din', 'the parent wire still drives the box');
+  assert.ok(g.nodes.find((n) => n.id === 'i:top.u_leaf'), 'siblings are unaffected');
+  assert.ok(g.nodes.find((n) => n.id === 'n:top::mid_out'), 'parent-scope nets stay');
+  assert.ok(g.edges.find((e) => e.to === 'i:top.u_leaf' && e.from === 'n:top::mid_out'),
+    'sibling wiring across the boundary is intact');
+
+  assert.equal(g.truncated, false, 'no truncation issue for a deliberate collapse');
+  assert.deepEqual(g.issues.filter((i) => i.kind === 'truncated'), [], 'no truncated issues at all');
+
+  // Expanding again (no collapsed option) restores the subtree.
+  const open = graph();
+  assert.ok(open.g.nodes.find((n) => n.id === 'i:top.u_mid.u_inner'), 'nothing collapsed by default');
 });

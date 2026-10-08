@@ -28,9 +28,9 @@ import { findByPath } from './core/hierarchy';
 const LANGUAGES = ['verilog', 'systemverilog'];
 
 export function activate(context: vscode.ExtensionContext): void {
-  const log = vscode.window.createOutputChannel('HDL Connect View');
+  const log = vscode.window.createOutputChannel('RTLens');
   context.subscriptions.push(log);
-  log.appendLine('HDL Connect View activating');
+  log.appendLine('RTLens activating');
 
   const svc = new IndexService(log);
   context.subscriptions.push(svc);
@@ -129,20 +129,33 @@ export function activate(context: vscode.ExtensionContext): void {
   reg('hdl.connectView.showGraph', async (item?: CompositionItem) => {
     const node = item ? item.node : await pickRoot(svc);
     if (node) {
-      GraphPanel.show(svc, context.extensionUri, node, node.path);
+      GraphPanel.show(
+        svc,
+        context.extensionUri,
+        node,
+        node.path,
+        item ? composition.hierarchyRoot ?? node : node,
+      );
     }
   });
 
   reg('hdl.connectView.showGraphForSelection', async () => {
-    const node = editorNode(svc) ?? (await pickRoot(svc));
+    const sel = editorSelection(svc);
+    const node = sel ? sel.node : await pickRoot(svc);
     if (node) {
-      GraphPanel.show(svc, context.extensionUri, node, node.path);
+      GraphPanel.show(svc, context.extensionUri, node, node.path, sel ? sel.root : node);
     }
   });
 
   reg('hdl.connectView.setGraphRoot', async (item: CompositionItem) => {
     // Focus the existing graph panel on this subtree, or open one.
-    GraphPanel.show(svc, context.extensionUri, item.node, composition.root ?? item.node.path);
+    GraphPanel.show(
+      svc,
+      context.extensionUri,
+      item.node,
+      composition.root ?? item.node.path,
+      composition.hierarchyRoot ?? item.node,
+    );
   });
 
   reg('hdl.connectView.generateWrapper', async (item?: CompositionItem) => {
@@ -247,6 +260,15 @@ async function pickRoot(svc: IndexService): Promise<HierarchyNode | undefined> {
 
 /** Hierarchy root containing the module under the cursor, plus the cursor instance. */
 function editorNode(svc: IndexService): HierarchyNode | undefined {
+  return editorSelection(svc)?.node;
+}
+
+/**
+ * The cursor's instance (or the module under it) together with the hierarchy
+ * root it was expanded from. The root lets the graph command walk up: a module
+ * is shown with the instances that contain it, not just its own signals.
+ */
+function editorSelection(svc: IndexService): { node: HierarchyNode; root: HierarchyNode } | undefined {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
     return undefined;
@@ -259,10 +281,10 @@ function editorNode(svc: IndexService): HierarchyNode | undefined {
   if (!result) {
     return undefined;
   }
-  if (sel.instancePath) {
-    return findByPath(result.root, sel.instancePath) ?? result.root;
-  }
-  return result.root;
+  const node = sel.instancePath
+    ? findByPath(result.root, sel.instancePath) ?? result.root
+    : result.root;
+  return { node, root: result.root };
 }
 
 /** Nodes to generate for: the one under the cursor, or the whole design. */

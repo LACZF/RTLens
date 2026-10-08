@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 
 import type { IndexService } from './indexService';
 import type { Graph } from '../core/graph';
-import { findByPath } from '../core/hierarchy';
+import { findByPath, pathChain } from '../core/hierarchy';
 import type { HierarchyNode } from '../core/ast';
 
 /**
@@ -21,13 +21,28 @@ export class GraphPanel {
   private readonly disposables: vscode.Disposable[] = [];
   private node?: HierarchyNode;
   private focus: string | undefined;
+  /**
+   * The top of the hierarchy the node was picked from. The graph shows the
+   * nodes that contain the root above it, so a mid-tree module keeps the
+   * context of who instantiates it.
+   */
+  private chainRoot: HierarchyNode;
+  private ancestors: HierarchyNode[] = [];
+  /**
+   * Instance paths the user collapsed in the webview. Sent back with every
+   * request so the graph itself shrinks: nothing below a collapsed box is
+   * expanded, and the webview only has to hide what it is told about.
+   */
+  private readonly collapsed = new Set<string>();
 
   private constructor(
     private readonly panel: vscode.WebviewPanel,
     private readonly svc: IndexService,
     private readonly extensionUri: vscode.Uri,
     readonly rootPath: string,
+    chainRoot: HierarchyNode,
   ) {
+    this.chainRoot = chainRoot;
     this.panel.webview.html = this.html();
     this.disposables.push(
       this.panel.webview.onDidReceiveMessage((msg) => this.onMessage(msg)),
@@ -40,10 +55,12 @@ export class GraphPanel {
     extensionUri: vscode.Uri,
     node: HierarchyNode,
     rootPath: string,
+    chainRoot?: HierarchyNode,
   ): GraphPanel {
     const existing = GraphPanel.panels.get(rootPath);
     if (existing) {
       existing.panel.reveal(vscode.ViewColumn.Beside, true);
+      existing.setChainRoot(chainRoot ?? node);
       existing.setNode(node);
       return existing;
     }
@@ -53,7 +70,7 @@ export class GraphPanel {
       vscode.ViewColumn.Beside,
       { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [] },
     );
-    const p = new GraphPanel(panel, svc, extensionUri, rootPath);
+    const p = new GraphPanel(panel, svc, extensionUri, rootPath, chainRoot ?? node);
     GraphPanel.panels.set(rootPath, p);
     p.setNode(node);
     return p;
@@ -70,9 +87,23 @@ export class GraphPanel {
     return this.panel.viewColumn;
   }
 
+  /** Change the containing hierarchy the next setNode walks up. */
+  setChainRoot(root: HierarchyNode): void {
+    this.chainRoot = root;
+  }
+
   setNode(node: HierarchyNode, focus?: string): void {
     this.node = node;
     this.focus = focus ?? node.path;
+    this.ancestors = pathChain(this.chainRoot, node.path).slice(0, -1);
+    // A collapse that would hide the new root (or anything on its ancestor
+    // chain) is meaningless once we zoom there - drop it instead of drawing an
+    // empty graph.
+    for (const c of [...this.collapsed]) {
+      if (node.path === c || node.path.startsWith(c + '.') || node.path.startsWith(c + '::')) {
+        this.collapsed.delete(c);
+      }
+    }
     void this.refresh();
   }
 
@@ -81,7 +112,7 @@ export class GraphPanel {
     if (!this.node) {
       return;
     }
-    const n = findByPath(this.node, path);
+    const n = findByPath(this.chainRoot, path);
     if (n) {
       this.setNode(n, n.path);
     }
@@ -91,9 +122,18 @@ export class GraphPanel {
     if (!this.node) {
       return;
     }
-    const graph = this.svc.graphFor(this.node, { maxDepth: 8 });
+    const graph = this.svc.graphFor(this.node, {
+      maxDepth: 8,
+      ancestors: this.ancestors,
+      collapsed: [...this.collapsed],
+    });
     this.panel.title = `Connectivity: ${graph.root}`;
-    await this.panel.webview.postMessage({ type: 'graph', graph, focus: this.focus });
+    await this.panel.webview.postMessage({
+      type: 'graph',
+      graph,
+      focus: this.focus,
+      collapsed: [...this.collapsed],
+    });
     this.panel.webview.postMessage({ type: 'stats', text: statsLine(graph) });
   }
 
@@ -118,11 +158,24 @@ export class GraphPanel {
       case 'focus': {
         const path = String(msg.path ?? '');
         if (this.node && path && path !== this.node.path) {
-          const n = findByPath(this.node, path);
+          const n = findByPath(this.chainRoot, path);
           if (n) {
             this.setNode(n, n.path);
           }
         }
+        return;
+      }
+      case 'collapse': {
+        const path = String(msg.path ?? '');
+        if (!path) {
+          return;
+        }
+        if (msg.collapsed) {
+          this.collapsed.add(path);
+        } else {
+          this.collapsed.delete(path);
+        }
+        void this.refresh();
         return;
       }
       case 'error':
@@ -154,6 +207,7 @@ export class GraphPanel {
   <label><input type="checkbox" id="neighbourhood"> neighbourhood only</label>
   <label><input type="checkbox" id="containment"> containment edges</label>
   <label><input type="checkbox" id="assigns" checked> continuous assigns</label>
+  <label><input type="checkbox" id="hierarchy" checked> hierarchy layout</label>
   <span id="stats"></span>
 </header>
 <svg id="canvas" tabindex="0"></svg>
@@ -253,12 +307,20 @@ const SCRIPT = String.raw`
   const cbNeigh = document.getElementById('neighbourhood');
   const cbCont = document.getElementById('containment');
   const cbAssign = document.getElementById('assigns');
+  const cbHier = document.getElementById('hierarchy');
   const stats = document.getElementById('stats');
 
   let model = null;
   let nodes = [];
   let edges = [];
+  // Paths the user collapsed. Doubled with the set the extension sends back on
+  // every graph, so the webview can hide a box the moment it is clicked even
+  // before the trimmed model arrives.
+  let collapsed = new Set();
   let view = { x: 0, y: 0, k: 1 };
+  // Whether the user has panned/zoomed/dragged since the last graph, which
+  // stops the initial fit-to-view from yanking the graph out from under them.
+  var interacted = false;
   let drag = null;
   let highlight = null;
   // Redraws are coalesced into one per frame: a rebuild of the whole graph costs
@@ -272,6 +334,9 @@ const SCRIPT = String.raw`
   // Set once the pointer has travelled far enough to count as a drag, so the
   // click that follows a drag does not also open or zoom into the node.
   var dragged = false;
+  // Focus on a single click is deferred: a double-click collapses/expands the
+  // node instead, and re-rooting the graph first would make that impossible.
+  var clickTimer = null;
 
   const NS = 'http://www.w3.org/2000/svg';
   const el = (name, attrs) => {
@@ -296,6 +361,17 @@ const SCRIPT = String.raw`
       || (n.path || '').toLowerCase().includes(s);
   }
 
+  // A collapsed box hides everything whose path lives inside it: its child
+  // instances and the nets of its own scope. Instance paths nest with '.', net
+  // paths hang off their scope with '::'.
+  function insideCollapsed(path) {
+    for (const c of collapsed) {
+      if (path === c) continue;
+      if (path.startsWith(c + '.') || path.startsWith(c + '::')) return true;
+    }
+    return false;
+  }
+
   function visible() {
     if (!model) return { n: [], e: [] };
     const q = search.value.trim();
@@ -308,16 +384,18 @@ const SCRIPT = String.raw`
         if (keep.has(e.to)) keep.add(e.from);
       }
     }
-    let ns = model.nodes.filter(n => keep.has(n.id));
     if (cbNeigh.checked && highlight) {
       const near = new Set([highlight]);
       for (const e of model.edges) {
         if (e.from === highlight) near.add(e.to);
         if (e.to === highlight) near.add(e.from);
       }
-      ns = model.nodes.filter(n => near.has(n.id));
       keep = near;
     }
+    if (collapsed.size) {
+      for (const n of model.nodes) if (insideCollapsed(n.path)) keep.delete(n.id);
+    }
+    const ns = model.nodes.filter(n => keep.has(n.id));
     const es = model.edges.filter(e => keep.has(e.from) && keep.has(e.to)
       && (cbAssign.checked || e.kind !== 'net')
       && (cbCont.checked || e.kind !== 'containment'));
@@ -418,16 +496,70 @@ const SCRIPT = String.raw`
     requestAnimationFrame(step);
   }
 
+  /**
+   * One column per hierarchy depth, so the wiring reads top-down (or left-right)
+   * through the instance tree instead of wherever the force layout happened to
+   * settle. Instances come first in a column, then the nets of their scope;
+   * rows are centered on the column so a shallow layer does not drag the whole
+   * graph off-axis. Deterministic: same graph, same picture.
+   */
+  function layoutHierarchical(ns) {
+    var layers = new Map();
+    for (const n of ns) {
+      var d = n.depth || 0;
+      if (!layers.has(d)) layers.set(d, []);
+      layers.get(d).push(n);
+    }
+    var depths = Array.from(layers.keys()).sort(function (a, b) { return a - b; });
+    var COL = 240, ROW = 36;
+    for (var c = 0; c < depths.length; c++) {
+      var layer = layers.get(depths[c]).sort(function (a, b) {
+        if ((a.kind === 'net') !== (b.kind === 'net')) return a.kind === 'net' ? 1 : -1;
+        if ((a.path || '') === (b.path || '')) return 0;
+        return (a.path || '') < (b.path || '') ? -1 : 1;
+      });
+      for (var i = 0; i < layer.length; i++) {
+        var n = layer[i];
+        // A node the user dragged keeps its dropped position; the column only
+        // owns the nodes nobody has moved.
+        if (n.__moved) continue;
+        n.x = c * COL;
+        n.y = (i - (layer.length - 1) / 2) * ROW;
+        n.seed = i + 1;
+      }
+    }
+  }
+
+  /**
+   * Collapse or expand one hierarchy level. The local set flips immediately so
+   * the box reacts on the spot; the extension then rebuilds the model without
+   * the hidden subtree and sends the authoritative set back with it.
+   */
+  function toggleCollapse(n) {
+    const had = collapsed.has(n.path);
+    if (had) collapsed.delete(n.path);
+    else collapsed.add(n.path);
+    // Collapsing only removes nodes, so the survivors keep their positions.
+    // Expanding brings nodes back that may never have been laid out, so the
+    // whole model needs a pass - the graph message resets these flags anyway.
+    if (!had && model) for (const m of model.nodes) m.__laid = 0;
+    vscode.postMessage({ type: 'collapse', path: n.path, collapsed: !had });
+    scheduleDraw();
+  }
+
   function draw() {
     while (svg.firstChild) svg.removeChild(svg.firstChild);
     if (!model) return;
     const sel = visible();
     nodes = sel.n; edges = sel.e;
     if (!nodes.length) return;
-    if (!nodes[0].__laid) {
+    if (cbHier.checked) {
+      layoutHierarchical(nodes);
+      if (!interacted) fitView();
+    } else if (!nodes[0].__laid) {
       // The layout runs over several frames; render what is settled so far and
       // mark the nodes as laid out so a redraw does not restart it.
-      layout(nodes, edges, function () { draw(); });
+      layout(nodes, edges, function () { if (!interacted) fitView(); draw(); });
       for (const n of nodes) n.__laid = 1;
       const pending = el('text', {
         x: 12, y: 24, fill: 'currentColor', opacity: .75, 'font-size': 12,
@@ -486,26 +618,65 @@ const SCRIPT = String.raw`
         wTag.textContent = n.width + 'b';
         grp.appendChild(wTag);
       }
+      // A collapsed box wears a '+' so the hierarchy level it hides is visible
+      // without hovering; double-clicking puts it back.
+      if (!isNet && n.childCount && collapsed.has(n.path)) {
+        const mark = el('text', { x: -w / 2 + 6, y: 4, 'text-anchor': 'start', fill: 'currentColor', opacity: .85, 'font-size': 11 });
+        mark.textContent = '+';
+        grp.appendChild(mark);
+      }
       grp.addEventListener('mouseenter', (ev) => showTip(ev, nodeTip(n)));
       grp.addEventListener('mousemove', moveTip);
       grp.addEventListener('mouseleave', hideTip);
-      grp.addEventListener('mousedown', (ev) => { drag = { n, ev: ev }; highlight = n.id; dragged = false; });
+      grp.addEventListener('mousedown', (ev) => { ev.stopPropagation(); drag = { n, ev }; highlight = n.id; dragged = false; });
       grp.addEventListener('click', () => {
         if (dragged) { dragged = false; return; }
         if (n.kind === 'net') {
           if (n.file) vscode.postMessage({ type: 'open', file: n.file, line: n.range ? n.range.start.line : 0, character: n.range ? n.range.start.character : 0 });
-        } else {
-          vscode.postMessage({ type: 'focus', path: n.path });
+          return;
         }
+        if (clickTimer) clearTimeout(clickTimer);
+        clickTimer = setTimeout(() => {
+          clickTimer = null;
+          vscode.postMessage({ type: 'focus', path: n.path });
+        }, 200);
+      });
+      grp.addEventListener('dblclick', (ev) => {
+        ev.stopPropagation();
+        if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
+        if (n.kind === 'net' || !n.childCount) return;
+        toggleCollapse(n);
       });
       nodeLayer.appendChild(grp);
       nodeEls.push({ n, grp, w, h });
     }
-    drag = null;
     api._els = { nodeEls, edgeEls, byId };
   }
 
   const api = { _els: null, redraw: draw };
+
+  // The layout is centred on the origin, which maps to the top-left corner of
+  // the SVG once translated by the identity view, so half the graph would sit
+  // off-screen to the left. After the layout settles, shift and scale the view
+  // so the whole graph fills the canvas.
+  function fitView() {
+    if (!nodes.length) return;
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i];
+      if (n.x < minX) minX = n.x;
+      if (n.x > maxX) maxX = n.x;
+      if (n.y < minY) minY = n.y;
+      if (n.y > maxY) maxY = n.y;
+    }
+    var pad = 40;
+    var bw = Math.max(1, maxX - minX), bh = Math.max(1, maxY - minY);
+    var w = Math.max(1, svg.clientWidth - pad * 2), h = Math.max(1, svg.clientHeight - pad * 2);
+    var k = Math.max(0.15, Math.min(1.5, Math.min(w / bw, h / bh)));
+    view.k = k;
+    view.x = svg.clientWidth / 2 - (minX + bw / 2) * k;
+    view.y = svg.clientHeight / 2 - (minY + bh / 2) * k;
+  }
 
   function truncate(s, n) { return s.length > n ? s.slice(0, n - 1) + '…' : s; }
   function nodeTip(n) {
@@ -514,7 +685,10 @@ const SCRIPT = String.raw`
     if (n.width) lines.push(n.width + ' bit' + (n.width === 1 ? '' : 's') + (n.direction ? '  ' + n.direction : ''));
     if (n.truncated) lines.push('(subtree not expanded)');
     if (n.unresolved) lines.push('(module not found in the index)');
-    if (n.childCount) lines.push(n.childCount + ' child instance(s) - click to focus');
+    if (n.childCount) {
+      lines.push(n.childCount + ' child instance(s) - click to focus, double-click to '
+        + (collapsed.has(n.path) ? 'expand' : 'collapse'));
+    }
     return lines.join('\n');
   }
   function edgeTip(e) {
@@ -556,20 +730,26 @@ const SCRIPT = String.raw`
   window.addEventListener('mousemove', (ev) => {
     if (!drag) return;
     if (drag.pan) {
+      interacted = true;
       view.x = drag.ox + (ev.clientX - drag.sx);
       view.y = drag.oy + (ev.clientY - drag.sy);
       scheduleDraw();
     } else if (drag.n) {
+      interacted = true;
       var dx = (ev.clientX - drag.ev.clientX) / view.k, dy = (ev.clientY - drag.ev.clientY) / view.k;
       if (Math.abs(ev.clientX - drag.ev.clientX) + Math.abs(ev.clientY - drag.ev.clientY) > 3) dragged = true;
       drag.n.x += dx;
       drag.n.y += dy;
+      // In hierarchy mode the column would re-place it on the next frame, so a
+      // dragged node opts out of the layout until the model or mode changes.
+      drag.n.__moved = 1;
       drag.ev = ev;
       scheduleDraw();
     }
   });
   svg.addEventListener('wheel', (ev) => {
     ev.preventDefault();
+    interacted = true;
     const f = ev.deltaY < 0 ? 1.12 : 1 / 1.12;
     const k = Math.max(0.15, Math.min(6, view.k * f));
     view.x = ev.clientX - (ev.clientX - view.x) * (k / view.k);
@@ -577,12 +757,22 @@ const SCRIPT = String.raw`
     view.k = k;
     scheduleDraw();
   }, { passive: false });
-  svg.addEventListener('dblclick', () => { view = { x: 0, y: 0, k: 1 }; draw(); });
+  svg.addEventListener('dblclick', () => { interacted = true; fitView(); draw(); });
 
   for (const el of [search, cbNeigh, cbCont, cbAssign]) {
     el.addEventListener('input', () => { draw(); });
     el.addEventListener('change', () => { draw(); });
   }
+
+  // The layout mode owns the node positions, so switching it clears whatever
+  // the other mode wrote and refits: force -> hierarchy re-columns the nodes,
+  // hierarchy -> force starts a fresh relaxation instead of freezing the
+  // column positions in place.
+  cbHier.addEventListener('change', () => {
+    if (model) for (const n of model.nodes) { n.__laid = 0; n.__moved = 0; }
+    interacted = false;
+    draw();
+  });
 
   window.addEventListener('message', (ev) => {
     const msg = ev.data;
@@ -590,7 +780,11 @@ const SCRIPT = String.raw`
       model = msg.graph;
       highlight = null;
       nodes = []; edges = [];
-      for (const n of model.nodes) n.__laid = 0;
+      interacted = false;
+      // The extension owns the collapse set once it has answered; a message
+      // without the field (older hosts) keeps whatever we toggled locally.
+      if (msg.collapsed !== undefined) collapsed = new Set(msg.collapsed || []);
+      for (const n of model.nodes) { n.__laid = 0; n.__moved = 0; }
       // The root's path is the empty string, so this has to be an undefined
       // check - otherwise opening a graph for a top module highlights nothing.
       if (msg.focus !== undefined && msg.focus !== null) {
