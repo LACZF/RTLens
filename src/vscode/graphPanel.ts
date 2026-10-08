@@ -9,9 +9,10 @@ import type { HierarchyNode } from '../core/ast';
  * Connectivity graph panel.
  *
  * The webview is a single self-contained HTML document: the graph model arrives
- * as JSON, a small force-directed layout runs in the webview script, and the
- * result is drawn as SVG. No CDN, no web worker, no bundler - the payload is
- * the model itself.
+ * as JSON and is drawn as SVG, grouped the way the picture reads - one box per
+ * module, its signals as rows inside that box, and every wire attached to the
+ * signal row it belongs to rather than to the module outline. No CDN, no web
+ * worker, no bundler - the payload is the model itself.
  */
 export class GraphPanel {
   private static panels = new Map<string, GraphPanel>();
@@ -212,13 +213,14 @@ export class GraphPanel {
 </header>
 <svg id="canvas" tabindex="0"></svg>
 <footer id="legend">
-  <span class="k inst">module instance</span>
-  <span class="k net">net</span>
+  <span class="k inst">module group</span>
+  <span class="k net">signal</span>
   <span class="k root">graph root</span>
   <span class="k in">input port</span>
   <span class="k out">output port</span>
   <span class="k inout">inout</span>
   <span class="k bad">unresolved</span>
+  <span class="hint">chevron folds a module's signals · double-click a header collapses its subtree</span>
 </footer>
 <script>${SCRIPT}</script>
 </body>
@@ -281,9 +283,19 @@ const STYLE = `
   }
   .k.inst { color: #4d9de0; } .k.net { color: #c9a227; } .k.root { color: #8f5fd0; }
   .k.in { color: #57b97b; } .k.out { color: #e0655f; } .k.inout { color: #b07de0; } .k.bad { color: #e0a03f; }
-  .node { cursor: pointer; }
-  .node rect, .node circle { stroke-width: 1.2; }
-  .node text { font-size: 10px; pointer-events: none; }
+  .hint { opacity: .6; }
+  .grp { cursor: pointer; }
+  .grp .mod { stroke-width: 1.4; }
+  .grp text { pointer-events: none; }
+  .grp text.chev { pointer-events: all; cursor: pointer; }
+  .hit { fill: transparent; }
+  .sep { stroke: var(--vscode-panel-border, #454545); stroke-width: 1; opacity: .8; }
+  .rsep { stroke: var(--vscode-panel-border, #454545); stroke-width: 1; opacity: .45; }
+  .hd { font-size: 11.5px; font-weight: 600; fill: currentColor; }
+  .hm { font-size: 10.5px; fill: currentColor; opacity: .6; }
+  .sig { font-size: 10.5px; fill: currentColor; }
+  .wt { font-size: 9px; fill: currentColor; opacity: .55; }
+  .chev { font-size: 11px; fill: currentColor; opacity: .8; }
   .edge { fill: none; stroke-width: 1.1; opacity: .55; }
   .edge:hover { opacity: 1; stroke-width: 2; }
   .dim { opacity: .12; }
@@ -296,7 +308,13 @@ const STYLE = `
   }
 `;
 
-const SCRIPT = String.raw`
+/**
+ * The whole view, as one script. Exported so the test suite can run it against
+ * a stub DOM: the webview is the only part of the extension with no other way
+ * to check it, and the grouping/anchoring rules below are easy to get subtly
+ * wrong.
+ */
+export const SCRIPT = String.raw`
 (function () {
   const vscode = acquireVsCodeApi();
   const svg = document.getElementById('canvas');
@@ -313,9 +331,19 @@ const SCRIPT = String.raw`
   let model = null;
   let nodes = [];
   let edges = [];
-  // Paths the user collapsed. Doubled with the set the extension sends back on
-  // every graph, so the webview can hide a box the moment it is clicked even
-  // before the trimmed model arrives.
+  // The picture, grouped the way it is drawn: one group per module scope, the
+  // instance as the header and the signals the scope declares as rows below it.
+  let groups = [];
+  // node id -> its group, for edge anchoring and drag.
+  let gm = new Map();
+  // Layout state per group, keyed by scope path. A group is rebuilt from the
+  // nodes on every frame, so where it settled (or was dragged to) lives here.
+  let gpos = new Map();
+  // Groups whose signal rows are folded away. Webview-local: folding hides the
+  // rows but keeps the signals in the model, so their edges reroute to the
+  // module header instead of disappearing with them.
+  let folded = new Set();
+  // Instance paths the extension told us are hierarchy-collapsed.
   let collapsed = new Set();
   let view = { x: 0, y: 0, k: 1 };
   // Whether the user has panned/zoomed/dragged since the last graph, which
@@ -323,19 +351,19 @@ const SCRIPT = String.raw`
   var interacted = false;
   let drag = null;
   let highlight = null;
-  // Redraws are coalesced into one per frame: a rebuild of the whole graph costs
-  // more than a frame at the default 800 node budget, and mousemove fires far
-  // more often than the display refreshes.
+  // Redraws are coalesced into one per frame: a rebuild of the whole graph
+  // costs more than a frame, and mousemove fires far more often than the
+  // display refreshes.
   var queued = 0;
   function scheduleDraw() {
     if (queued) return;
     queued = requestAnimationFrame(function () { queued = 0; draw(); });
   }
   // Set once the pointer has travelled far enough to count as a drag, so the
-  // click that follows a drag does not also open or zoom into the node.
+  // click that follows a drag does not also open or zoom into the group.
   var dragged = false;
   // Focus on a single click is deferred: a double-click collapses/expands the
-  // node instead, and re-rooting the graph first would make that impossible.
+  // module instead, and re-rooting the graph first would make that impossible.
   var clickTimer = null;
 
   const NS = 'http://www.w3.org/2000/svg';
@@ -345,6 +373,17 @@ const SCRIPT = String.raw`
     return e;
   };
   const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+  // One module group is a rounded box: a header row for the instance, then one
+  // row per signal of its scope. Edges attach to those rows, so a wire lands on
+  // the signal it belongs to instead of somewhere on the module outline.
+  const HEAD_H = 26, ROW_H = 22, GAP_V = 40, GAP_H = 90, MIN_W = 168, MAX_W = 340;
+  // Signals read down the group: inputs first, then the ones that flow both
+  // ways, then the outputs a scope drives.
+  const DIR_ORDER = { input: 0, inout: 1, output: 2 };
+
+  function labelW(s, fs) { return (s || '').length * fs * 0.62; }
+  function truncate(s, n) { return s.length > n ? s.slice(0, n - 1) + '…' : s; }
 
   function colorFor(n) {
     if (n.unresolved) return css('--vscode-editorWarning-foreground') || '#e0a03f';
@@ -361,15 +400,130 @@ const SCRIPT = String.raw`
       || (n.path || '').toLowerCase().includes(s);
   }
 
-  // A collapsed box hides everything whose path lives inside it: its child
-  // instances and the nets of its own scope. Instance paths nest with '.', net
-  // paths hang off their scope with '::'.
+  // A hierarchy-collapsed box hides everything whose path lives inside it: its
+  // child instances and the nets of its own scope. Instance paths nest with
+  // '.', net paths hang off their scope with '::'.
   function insideCollapsed(path) {
     for (const c of collapsed) {
       if (path === c) continue;
       if (path.startsWith(c + '.') || path.startsWith(c + '::')) return true;
     }
     return false;
+  }
+
+  /** The module scope a node belongs to: the instance path, or the net's scope. */
+  function scopeOf(n) {
+    if (n.kind !== 'net') return n.path;
+    const i = n.path.lastIndexOf('::');
+    return i < 0 ? '' : n.path.slice(0, i);
+  }
+
+  /** Last path segment, for a group whose instance box was filtered away. */
+  function scopeLabel(key) {
+    if (!key) return 'signals';
+    const i = key.lastIndexOf('.');
+    return i < 0 ? key : key.slice(i + 1);
+  }
+
+  function headerParts(g) {
+    if (!g.head) return { title: scopeLabel(g.key), mod: '' };
+    return { title: g.head.label, mod: g.head.detail || g.head.moduleName || '' };
+  }
+
+  function sizeGroup(g) {
+    const p = headerParts(g);
+    const show = !folded.has(g.key) && g.nets.length > 0;
+    let w = labelW(p.mod ? p.title + ' : ' + p.mod : p.title, 11.5) + 44;
+    if (show) {
+      for (const n of g.nets) {
+        let rw = labelW(n.label, 10.5) + 40;
+        if (n.width && n.width > 1) rw += labelW(n.width + 'b', 9) + 8;
+        if (rw > w) w = rw;
+      }
+    }
+    g.w = Math.max(MIN_W, Math.min(MAX_W, Math.ceil(w)));
+    g.h = HEAD_H + (show ? g.nets.length * ROW_H + 4 : 0);
+  }
+
+  /** Group the visible nodes: every instance box owns the signals of its scope. */
+  function buildGroups(ns) {
+    const map = new Map();
+    const grab = (key) => {
+      let g = map.get(key);
+      if (!g) { g = { key, head: null, nets: [], depth: 0, w: MIN_W, h: HEAD_H }; map.set(key, g); }
+      return g;
+    };
+    for (const n of ns) {
+      if (n.kind === 'net') grab(scopeOf(n)).nets.push(n);
+      else { const g = grab(n.path); g.head = n; g.depth = n.depth; }
+    }
+    const gs = [];
+    for (const g of map.values()) {
+      if (!g.head) {
+        // The instance was pruned away but its signals survived; the group
+        // still needs a column, so it takes the deepest signal's.
+        for (const n of g.nets) if ((n.depth || 0) > g.depth) g.depth = n.depth || 0;
+      }
+      g.nets.sort((a, b) => {
+        const da = DIR_ORDER[a.direction] == null ? 3 : DIR_ORDER[a.direction];
+        const db = DIR_ORDER[b.direction] == null ? 3 : DIR_ORDER[b.direction];
+        if (da !== db) return da - db;
+        return (a.label || '') < (b.label || '') ? -1 : (a.label || '') > (b.label || '') ? 1 : 0;
+      });
+      sizeGroup(g);
+      gs.push(g);
+    }
+    gm = new Map();
+    for (const g of gs) {
+      if (g.head) gm.set(g.head.id, g);
+      for (const n of g.nets) gm.set(n.id, g);
+    }
+    return gs;
+  }
+
+  function ensurePos(g) {
+    let st = gpos.get(g.key);
+    if (!st) { st = { x: (g.depth || 0) * 320, y: 0, moved: false, laid: false }; gpos.set(g.key, st); }
+    return st;
+  }
+
+  /** Park the group's nodes on the group box the layout just placed. */
+  function placeGroup(g) {
+    const st = ensurePos(g);
+    g.x = st.x; g.y = st.y;
+    const top = g.y - g.h / 2;
+    if (g.head) { g.head.x = g.x; g.head.y = top + HEAD_H / 2; }
+    const show = !folded.has(g.key) && g.nets.length > 0;
+    const bodyTop = top + HEAD_H + 2;
+    for (let i = 0; i < g.nets.length; i++) {
+      const n = g.nets[i];
+      n.x = g.x;
+      n.y = show ? bodyTop + ROW_H / 2 + i * ROW_H : top + HEAD_H / 2;
+    }
+  }
+
+  /** One-hop neighbours of a node id. */
+  function nearOf(id) {
+    const s = new Set([id]);
+    for (const e of model.edges) {
+      if (e.from === id) s.add(e.to);
+      if (e.to === id) s.add(e.from);
+    }
+    return s;
+  }
+
+  /**
+   * Signals belong to their module: any set of kept nodes that touches a group
+   * takes the whole group. A search for one signal then shows the module it
+   * lives in instead of a bare row floating without its box, and highlighting a
+   * module shows all of its signals, not only the wired ones.
+   */
+  function withGroups(keep) {
+    const scopes = new Set();
+    for (const n of model.nodes) if (keep.has(n.id)) scopes.add(scopeOf(n));
+    const out = new Set(keep);
+    for (const n of model.nodes) if (scopes.has(scopeOf(n))) out.add(n.id);
+    return out;
   }
 
   function visible() {
@@ -383,14 +537,10 @@ const SCRIPT = String.raw`
         if (keep.has(e.from)) keep.add(e.to);
         if (keep.has(e.to)) keep.add(e.from);
       }
+      keep = withGroups(keep);
     }
     if (cbNeigh.checked && highlight) {
-      const near = new Set([highlight]);
-      for (const e of model.edges) {
-        if (e.from === highlight) near.add(e.to);
-        if (e.to === highlight) near.add(e.from);
-      }
-      keep = near;
+      keep = withGroups(nearOf(highlight));
     }
     if (collapsed.size) {
       for (const n of model.nodes) if (insideCollapsed(n.path)) keep.delete(n.id);
@@ -402,12 +552,10 @@ const SCRIPT = String.raw`
     return { n: ns, e: es };
   }
 
-  // Repulsion is only worth computing for nodes that are close together, so the
-  // nodes are bucketed into a grid and each one only looks at its own cell and
-  // the eight around it. The force is 900/d^2, i.e. below 0.05 beyond ~130 units,
-  // so a 140 unit cell covers everything that still matters. That turns the
-  // quadratic sweep into roughly linear work and keeps an 800 node graph (the
-  // default budget) responsive.
+  // Repulsion is only worth computing for boxes that are close together, so the
+  // groups are bucketed into a grid and each one only looks at its own cell and
+  // the eight around it. That turns the quadratic sweep into roughly linear
+  // work and keeps a large graph responsive.
   var CELL = 140;
 
   function repel(n) {
@@ -438,6 +586,11 @@ const SCRIPT = String.raw`
             }
             var d = Math.sqrt(d2);
             var f = 900 / d2;
+            // Groups are boxes, not points: when two of them overlap, add a
+            // push proportional to the overlap so they part instead of nesting.
+            var ra = Math.sqrt((a.w || 160) * (a.h || 60)) * 0.6;
+            var rb = Math.sqrt((b2.w || 160) * (b2.h || 60)) * 0.6;
+            if (d < ra + rb) f += (ra + rb - d) * 0.5;
             a.vx += (dx / d) * f; a.vy += (dy / d) * f;
           }
         }
@@ -446,42 +599,53 @@ const SCRIPT = String.raw`
   }
 
   /**
-   * Deterministic radial seeding, then relaxation passes. The work is sliced
-   * across animation frames so a large graph never freezes the webview; done()
-   * runs once the layout has settled.
+   * The optional force layout, run over module groups rather than single
+   * nodes. Positions are written straight into the per-group layout state, so
+   * the relaxation keeps its progress across the frames it is sliced over.
    */
-  function layout(n, e, done) {
-    var cx = 0, cy = 0;
-    n.forEach(function (x, i) {
-      var a = (i / n.length) * Math.PI * 2;
-      var r = 60 + 40 * Math.sqrt(i);
-      x.x = cx + Math.cos(a) * r;
-      x.y = cy + Math.sin(a) * r;
-      x.vx = 0; x.vy = 0;
-      x.seed = i + 1;
+  function runForce(gs, done) {
+    var sts = [];
+    for (var i = 0; i < gs.length; i++) {
+      var st = ensurePos(gs[i]);
+      st.w = gs[i].w; st.h = gs[i].h;
+      sts.push(st);
+    }
+    sts.forEach(function (s, i) {
+      var a = (i / sts.length) * Math.PI * 2;
+      var r = 90 + 55 * Math.sqrt(i);
+      s.x = Math.cos(a) * r;
+      s.y = Math.sin(a) * r;
+      s.vx = 0; s.vy = 0;
+      s.seed = i + 1;
     });
-    CELL = Math.max(90, Math.min(220, 40 * Math.sqrt(n.length)));
-    var idx = new Map(n.map(function (x) { return [x.id, x]; }));
-    var links = e.filter(function (x) { return idx.has(x.from) && idx.has(x.to); })
-      .map(function (x) { return [idx.get(x.from), idx.get(x.to), x.kind === 'containment' ? 0.25 : 1]; });
-    // Fewer passes for big graphs: they start further apart and converge faster.
-    var iters = n.length > 400 ? 70 : n.length > 120 ? 130 : 260;
+    CELL = Math.max(150, Math.min(340, 80 * Math.sqrt(sts.length)));
+    var seen = new Set(), links = [];
+    for (var i = 0; i < edges.length; i++) {
+      var e = edges[i];
+      var a = gm.get(e.from), b = gm.get(e.to);
+      if (!a || !b || a === b) continue;
+      var k = a.key < b.key ? a.key + ' ' + b.key : b.key + ' ' + a.key;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      links.push([gpos.get(a.key), gpos.get(b.key), e.kind === 'containment' ? 0.25 : 1]);
+    }
+    var iters = sts.length > 120 ? 60 : sts.length > 40 ? 110 : 180;
     var iter = 0;
     function step() {
       var t0 = Date.now();
       while (iter < iters) {
         var cool = 1 - iter / iters;
-        repel(n);
+        repel(sts);
         for (var l = 0; l < links.length; l++) {
           var a = links[l][0], b = links[l][1], w = links[l][2];
           var dx = b.x - a.x, dy = b.y - a.y;
           var d = Math.max(0.01, Math.hypot(dx, dy));
-          var f = (d - 78) * 0.06 * w;
+          var f = (d - 220) * 0.05 * w;
           var ux = dx / d * f, uy = dy / d * f;
           a.vx += ux; a.vy += uy; b.vx -= ux; b.vy -= uy;
         }
-        for (var i = 0; i < n.length; i++) {
-          var p = n[i];
+        for (var i = 0; i < sts.length; i++) {
+          var p = sts[i];
           p.vx -= p.x * 0.012; p.vy -= p.y * 0.012;
           p.x += Math.max(-14, Math.min(14, p.vx)) * cool;
           p.y += Math.max(-14, Math.min(14, p.vy)) * cool;
@@ -497,37 +661,49 @@ const SCRIPT = String.raw`
   }
 
   /**
-   * One column per hierarchy depth, so the wiring reads top-down (or left-right)
-   * through the instance tree instead of wherever the force layout happened to
-   * settle. Instances come first in a column, then the nets of their scope;
-   * rows are centered on the column so a shallow layer does not drag the whole
-   * graph off-axis. Deterministic: same graph, same picture.
+   * One column per hierarchy depth, so the wiring reads left to right through
+   * the instance tree. A column stacks the module groups of that depth, centred
+   * on the column axis; a group the user dragged keeps its dropped position.
+   * Deterministic: same graph, same picture.
    */
-  function layoutHierarchical(ns) {
-    var layers = new Map();
-    for (const n of ns) {
-      var d = n.depth || 0;
-      if (!layers.has(d)) layers.set(d, []);
-      layers.get(d).push(n);
+  function layoutHierarchical(gs) {
+    var cols = new Map();
+    for (const g of gs) {
+      var d = g.depth || 0;
+      if (!cols.has(d)) cols.set(d, []);
+      cols.get(d).push(g);
     }
-    var depths = Array.from(layers.keys()).sort(function (a, b) { return a - b; });
-    var COL = 240, ROW = 36;
+    var depths = Array.from(cols.keys()).sort(function (a, b) { return a - b; });
+    var x = 0;
     for (var c = 0; c < depths.length; c++) {
-      var layer = layers.get(depths[c]).sort(function (a, b) {
-        if ((a.kind === 'net') !== (b.kind === 'net')) return a.kind === 'net' ? 1 : -1;
-        if ((a.path || '') === (b.path || '')) return 0;
-        return (a.path || '') < (b.path || '') ? -1 : 1;
+      var col = cols.get(depths[c]).sort(function (a, b) {
+        return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
       });
-      for (var i = 0; i < layer.length; i++) {
-        var n = layer[i];
-        // A node the user dragged keeps its dropped position; the column only
-        // owns the nodes nobody has moved.
-        if (n.__moved) continue;
-        n.x = c * COL;
-        n.y = (i - (layer.length - 1) / 2) * ROW;
-        n.seed = i + 1;
+      var maxW = 0, total = -GAP_V;
+      for (var i = 0; i < col.length; i++) {
+        if (col[i].w > maxW) maxW = col[i].w;
+        total += col[i].h + GAP_V;
       }
+      var y = -total / 2;
+      for (var i = 0; i < col.length; i++) {
+        var g = col[i];
+        var st = ensurePos(g);
+        if (!st.moved) { st.x = x + maxW / 2; st.y = y + g.h / 2; }
+        y += g.h + GAP_V;
+      }
+      x += maxW + GAP_H;
     }
+  }
+
+  /**
+   * Fold or unfold one module's signal rows. Purely local: the signals stay in
+   * the model, so the wiring that used to end on a row ends on the module
+   * header instead and nothing silently vanishes.
+   */
+  function toggleFold(g) {
+    if (folded.has(g.key)) folded.delete(g.key);
+    else folded.add(g.key);
+    draw();
   }
 
   /**
@@ -539,12 +715,57 @@ const SCRIPT = String.raw`
     const had = collapsed.has(n.path);
     if (had) collapsed.delete(n.path);
     else collapsed.add(n.path);
-    // Collapsing only removes nodes, so the survivors keep their positions.
-    // Expanding brings nodes back that may never have been laid out, so the
-    // whole model needs a pass - the graph message resets these flags anyway.
-    if (!had && model) for (const m of model.nodes) m.__laid = 0;
     vscode.postMessage({ type: 'collapse', path: n.path, collapsed: !had });
     scheduleDraw();
+  }
+
+  /** The row inside an instance's group that names the port the edge connects. */
+  function portRow(g, e) {
+    if (e.kind !== 'port') return null;
+    const names = [];
+    if (e.port) names.push(e.port);
+    if (e.signal) {
+      names.push(e.signal);
+      const parts = e.signal.split('.');
+      names.push(parts[parts.length - 1]);
+    }
+    for (const n of g.nets) if (names.indexOf(n.label) >= 0) return n;
+    return null;
+  }
+
+  /**
+   * Where an edge touches its node, on the side of the group box that faces the
+   * other end. A signal anchors on the side at the height of its own row; an
+   * instance anchors on the row inside it that names the port the edge
+   * connects, so a wire reads as signal -> signal across module boxes. Folded
+   * rows and edges that name no signal fall back to the module header.
+   */
+  function anchorOf(n, other, e) {
+    const g = gm.get(n.id);
+    if (!g) return { x: n.x, y: n.y };
+    const og = other ? gm.get(other.id) : null;
+    const ocx = og ? og.x : (other ? other.x : g.x + 1);
+    const side = ocx > g.x + 0.5 ? 1 : ocx < g.x - 0.5 ? -1 : 1;
+    const x = g.x + side * g.w / 2;
+    const headerY = g.y - g.h / 2 + HEAD_H / 2;
+    if (folded.has(g.key)) return { x: x, y: headerY };
+    if (n.kind !== 'net') {
+      const row = portRow(g, e);
+      return { x: x, y: row ? row.y : headerY };
+    }
+    return { x: x, y: n.y };
+  }
+
+  function curve(pa, pb, sameGroup) {
+    const mx = (pa.x + pb.x) / 2, my = (pa.y + pb.y) / 2;
+    if (sameGroup) {
+      // Both ends sit on one box: bow the wire out past its right edge instead
+      // of drawing a flat line over the rows.
+      const ox = Math.max(pa.x, pb.x) + 26 + Math.abs(pb.y - pa.y) * 0.25;
+      return 'M' + pa.x + ',' + pa.y + ' Q' + ox + ',' + my + ' ' + pb.x + ',' + pb.y;
+    }
+    const nx = -(pb.y - pa.y) * 0.12, ny = (pb.x - pa.x) * 0.12;
+    return 'M' + pa.x + ',' + pa.y + ' Q' + (mx + nx) + ',' + (my + ny) + ' ' + pb.x + ',' + pb.y;
   }
 
   function draw() {
@@ -553,26 +774,30 @@ const SCRIPT = String.raw`
     const sel = visible();
     nodes = sel.n; edges = sel.e;
     if (!nodes.length) return;
+    groups = buildGroups(nodes);
     if (cbHier.checked) {
-      layoutHierarchical(nodes);
+      layoutHierarchical(groups);
       if (!interacted) fitView();
-    } else if (!nodes[0].__laid) {
+    } else if (groups.some(g => !ensurePos(g).laid)) {
       // The layout runs over several frames; render what is settled so far and
-      // mark the nodes as laid out so a redraw does not restart it.
-      layout(nodes, edges, function () { if (!interacted) fitView(); draw(); });
-      for (const n of nodes) n.__laid = 1;
+      // mark the groups as laid out so a redraw does not restart it.
+      runForce(groups, function () { if (!interacted) fitView(); draw(); });
+      for (const g of groups) ensurePos(g).laid = 1;
       const pending = el('text', {
         x: 12, y: 24, fill: 'currentColor', opacity: .75, 'font-size': 12,
       });
-      pending.textContent = 'laying out ' + nodes.length + ' nodes...';
+      pending.textContent = 'laying out ' + groups.length + ' module groups...';
       svg.appendChild(pending);
       return;
     }
-    const g = el('g', { transform: 'translate(' + view.x + ',' + view.y + ') scale(' + view.k + ')' });
-    svg.appendChild(g);
+    for (const g of groups) placeGroup(g);
+
+    const gRoot = el('g', { transform: 'translate(' + view.x + ',' + view.y + ') scale(' + view.k + ')' });
+    svg.appendChild(gRoot);
+    const edgeLayer = el('g', {}), boxLayer = el('g', {});
+    gRoot.appendChild(edgeLayer); gRoot.appendChild(boxLayer);
     const byId = new Map(nodes.map(n => [n.id, n]));
-    const edgeLayer = el('g', {}), nodeLayer = el('g', {});
-    g.appendChild(edgeLayer); g.appendChild(nodeLayer);
+
     const edgeEls = [];
     for (const e of edges) {
       const a = byId.get(e.from), b = byId.get(e.to);
@@ -586,30 +811,9 @@ const SCRIPT = String.raw`
         'stroke-dasharray': e.dashed ? '4 3' : '',
         'stroke-width': e.kind === 'containment' ? 0.8 : 1.1,
       });
-      // Anchor to instance rectangle edges based on port direction to look like
-      // pin-to-pin wiring (module port -> signal) rather than center-to-center.
-      function edgePoint(n, other, dir) {
-        const isInst = n.kind === 'instance' || n.kind === 'root';
-        if (!isInst) return { x: n.x, y: n.y };
-        const w = Math.max(34, Math.min(190, (n.label || '').length * 6.4 + 16));
-        const h = 22;
-        // Decide side by direction: input ports enter on the left, outputs leave
-        // on the right. If direction unknown, prefer the side facing the other node.
-        let side = 'left';
-        if (dir === 'output') side = 'right';
-        else if (dir === 'inout') side = other && other.x > n.x ? 'right' : 'left';
-        else { // input or undefined
-          side = other && other.x < n.x ? 'right' : 'left';
-        }
-        if (side === 'left') return { x: n.x - w / 2, y: n.y };
-        if (side === 'right') return { x: n.x + w / 2, y: n.y };
-        return { x: n.x, y: n.y };
-      }
-      const pa = edgePoint(a, b, e.direction === 'output' ? 'output' : (e.kind === 'port' ? 'input' : undefined));
-      const pb = edgePoint(b, a, e.direction);
-      const mx = (pa.x + pb.x) / 2, my = (pa.y + pb.y) / 2;
-      const nx = -(pb.y - pa.y) * 0.12, ny = (pb.x - pa.x) * 0.12;
-      path.setAttribute('d', 'M' + pa.x + ',' + pa.y + ' Q' + (mx + nx) + ',' + (my + ny) + ' ' + pb.x + ',' + pb.y);
+      const pa = anchorOf(a, b, e);
+      const pb = anchorOf(b, a, e);
+      path.setAttribute('d', curve(pa, pb, gm.get(a.id) === gm.get(b.id)));
       path.addEventListener('mouseenter', (ev) => showTip(ev, edgeTip(e)));
       path.addEventListener('mousemove', moveTip);
       path.addEventListener('mouseleave', hideTip);
@@ -617,78 +821,164 @@ const SCRIPT = String.raw`
         if (e.file) vscode.postMessage({ type: 'open', file: e.file, line: e.range ? e.range.start.line : 0, character: e.range ? e.range.start.character : 0 });
       });
       edgeLayer.appendChild(path);
-      edgeEls.push({ e, el: path, a, b });
+      edgeEls.push({ e, el: path });
     }
-    const nodeEls = [];
-    for (const n of nodes) {
-      const isNet = n.kind === 'net';
-      const w = Math.max(34, Math.min(190, (n.label || '').length * 6.4 + 16));
-      const h = 22;
-      const grp = el('g', { class: 'node', transform: 'translate(' + n.x + ',' + n.y + ')' });
-      const box = el('rect', {
-        x: -w / 2, y: -h / 2, width: w, height: h, rx: 5,
-        fill: 'var(--vscode-editorWidget-background, #252526)',
-        stroke: colorFor(n),
-      });
-      grp.appendChild(box);
-      const label = el('text', { x: 0, y: 4, 'text-anchor': 'middle', fill: 'currentColor' });
-      label.textContent = truncate(n.label || '', Math.floor(w / 6.4));
-      grp.appendChild(label);
-      if (n.width && n.width > 1) {
-        const wTag = el('text', { x: w / 2 + 4, y: 4, 'text-anchor': 'start', fill: 'currentColor', opacity: .6 });
-        wTag.textContent = n.width + 'b';
-        grp.appendChild(wTag);
-      }
-      // A collapsed box wears a '+' so the hierarchy level it hides is visible
-      // without hovering; double-clicking puts it back.
-      if (!isNet && n.childCount && collapsed.has(n.path)) {
-        const mark = el('text', { x: -w / 2 + 6, y: 4, 'text-anchor': 'start', fill: 'currentColor', opacity: .85, 'font-size': 11 });
-        mark.textContent = '+';
-        grp.appendChild(mark);
-      }
-      grp.addEventListener('mouseenter', (ev) => showTip(ev, nodeTip(n)));
-      grp.addEventListener('mousemove', moveTip);
-      grp.addEventListener('mouseleave', hideTip);
-      grp.addEventListener('mousedown', (ev) => { ev.stopPropagation(); drag = { n, ev }; highlight = n.id; dragged = false; });
-      grp.addEventListener('click', () => {
-        if (dragged) { dragged = false; return; }
-        if (n.kind === 'net') {
-          if (n.file) vscode.postMessage({ type: 'open', file: n.file, line: n.range ? n.range.start.line : 0, character: n.range ? n.range.start.character : 0 });
-          return;
+
+    const drawn = [];
+    for (const g of groups) {
+      const gd = drawGroup(g);
+      boxLayer.appendChild(gd.el);
+      drawn.push(gd);
+    }
+    api._els = { groups: drawn, edgeEls };
+    applyHighlight();
+  }
+
+  /** One module box: header for the instance, one row per signal of its scope. */
+  function drawGroup(g) {
+    const isFolded = folded.has(g.key);
+    const top = g.y - g.h / 2;
+    const left = g.x - g.w / 2, right = g.x + g.w / 2;
+    const hy = top + HEAD_H / 2;
+    const grp = el('g', { class: 'grp' });
+    grp.appendChild(el('rect', {
+      x: left, y: top, width: g.w, height: g.h, rx: 6,
+      fill: 'var(--vscode-editorWidget-background, #252526)',
+      stroke: g.head ? colorFor(g.head) : '#4d9de0',
+      class: 'mod',
+    }));
+
+    const els = [];
+    const headg = el('g', { class: 'headg' });
+    const hit = el('rect', { x: left + 1, y: top + 1, width: g.w - 2, height: HEAD_H - 1, rx: 5, class: 'hit' });
+    headg.appendChild(hit);
+    headg.appendChild(el('line', {
+      x1: left, y1: top + HEAD_H, x2: right, y2: top + HEAD_H, class: 'sep',
+    }));
+
+    const hasChev = g.nets.length > 0;
+    const hasPlus = !!(g.head && g.head.childCount && collapsed.has(g.head.path));
+    if (hasPlus) {
+      const plus = el('text', { x: left + 13, y: hy + 4, 'text-anchor': 'middle', class: 'chev' });
+      plus.textContent = '+';
+      headg.appendChild(plus);
+    } else if (hasChev) {
+      const chev = el('text', { x: left + 13, y: hy + 4, 'text-anchor': 'middle', class: 'chev' });
+      chev.textContent = isFolded ? '▸' : '▾';
+      chev.addEventListener('mousedown', (ev) => ev.stopPropagation());
+      chev.addEventListener('click', (ev) => { ev.stopPropagation(); toggleFold(g); });
+      chev.addEventListener('mouseenter', (ev) => showTip(ev, (isFolded ? 'Show ' : 'Fold ') + g.nets.length + ' signal(s)'));
+      chev.addEventListener('mousemove', moveTip);
+      chev.addEventListener('mouseleave', hideTip);
+      headg.appendChild(chev);
+    }
+
+    const p = headerParts(g);
+    const markW = hasChev || hasPlus ? 30 : 16;
+    const modW = p.mod ? labelW(p.mod, 10.5) + 8 : 0;
+    const avail = Math.max(4, Math.floor((g.w - markW - modW) / 6.6));
+    const title = el('text', { x: left + markW - 4, y: hy + 4, 'text-anchor': 'start', class: 'hd' });
+    title.textContent = truncate(p.title, avail);
+    headg.appendChild(title);
+    if (p.mod) {
+      const mt = el('text', { x: right - 10, y: hy + 4, 'text-anchor': 'end', class: 'hm' });
+      mt.textContent = truncate(p.mod, Math.max(4, Math.floor((g.w - markW - labelW(p.title, 11.5)) / 6)));
+      headg.appendChild(mt);
+    }
+    attachHead(hit, g);
+    grp.appendChild(headg);
+    if (g.head) els.push({ n: g.head, el: headg });
+
+    if (!isFolded) {
+      for (let i = 0; i < g.nets.length; i++) {
+        const n = g.nets[i];
+        const ry = n.y;
+        const rowg = el('g', { class: 'rowg' });
+        if (i) {
+          rowg.appendChild(el('line', {
+            x1: left + 10, y1: ry - ROW_H / 2, x2: right - 10, y2: ry - ROW_H / 2, class: 'rsep',
+          }));
         }
-        if (clickTimer) clearTimeout(clickTimer);
-        clickTimer = setTimeout(() => {
-          clickTimer = null;
-          vscode.postMessage({ type: 'focus', path: n.path });
-        }, 200);
-      });
-      grp.addEventListener('dblclick', (ev) => {
-        ev.stopPropagation();
-        if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
-        if (n.kind === 'net' || !n.childCount) return;
-        toggleCollapse(n);
-      });
-      nodeLayer.appendChild(grp);
-      nodeEls.push({ n, grp, w, h });
+        rowg.appendChild(el('circle', { cx: left + 14, cy: ry, r: 3.2, fill: colorFor(n) }));
+        const t = el('text', { x: left + 25, y: ry + 3.5, 'text-anchor': 'start', class: 'sig' });
+        t.textContent = truncate(n.label || '', Math.max(4, Math.floor((g.w - (n.width && n.width > 1 ? 66 : 42)) / 6)));
+        rowg.appendChild(t);
+        if (n.width && n.width > 1) {
+          const wt = el('text', { x: right - 10, y: ry + 3.5, 'text-anchor': 'end', class: 'wt' });
+          wt.textContent = n.width + 'b';
+          rowg.appendChild(wt);
+        }
+        const rhit = el('rect', { x: left + 2, y: ry - ROW_H / 2, width: g.w - 4, height: ROW_H, class: 'hit' });
+        rowg.appendChild(rhit);
+        attachRow(rhit, n, g);
+        grp.appendChild(rowg);
+        els.push({ n, el: rowg });
+      }
     }
-    api._els = { nodeEls, edgeEls, byId };
+    return { el: grp, g, els };
+  }
+
+  function attachHead(hit, g) {
+    hit.addEventListener('mouseenter', (ev) => showTip(ev, nodeTip(g.head || { label: scopeLabel(g.key), path: g.key }, g)));
+    hit.addEventListener('mousemove', moveTip);
+    hit.addEventListener('mouseleave', hideTip);
+    hit.addEventListener('mousedown', (ev) => {
+      ev.stopPropagation();
+      drag = { key: g.key, ev };
+      highlight = g.head ? g.head.id : null;
+      dragged = false;
+    });
+    hit.addEventListener('click', () => {
+      if (dragged) { dragged = false; return; }
+      if (!g.head) return;
+      if (clickTimer) clearTimeout(clickTimer);
+      clickTimer = setTimeout(() => {
+        clickTimer = null;
+        vscode.postMessage({ type: 'focus', path: g.head.path });
+      }, 200);
+    });
+    hit.addEventListener('dblclick', (ev) => {
+      ev.stopPropagation();
+      if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
+      if (g.head && g.head.childCount) toggleCollapse(g.head);
+    });
+  }
+
+  function attachRow(hit, n, g) {
+    hit.addEventListener('mouseenter', (ev) => showTip(ev, nodeTip(n, g)));
+    hit.addEventListener('mousemove', moveTip);
+    hit.addEventListener('mouseleave', hideTip);
+    hit.addEventListener('mousedown', (ev) => {
+      ev.stopPropagation();
+      drag = { key: g.key, ev };
+      highlight = n.id;
+      dragged = false;
+    });
+    hit.addEventListener('click', () => {
+      if (dragged) { dragged = false; return; }
+      if (n.file) vscode.postMessage({ type: 'open', file: n.file, line: n.range ? n.range.start.line : 0, character: n.range ? n.range.start.character : 0 });
+    });
+    hit.addEventListener('dblclick', (ev) => { ev.stopPropagation(); });
   }
 
   const api = { _els: null, redraw: draw };
+  // A handle on the rendered model, for the test suite and for poking at a live
+  // panel from the devtools console.
+  svg.__api = api;
 
   // The layout is centred on the origin, which maps to the top-left corner of
   // the SVG once translated by the identity view, so half the graph would sit
   // off-screen to the left. After the layout settles, shift and scale the view
   // so the whole graph fills the canvas.
   function fitView() {
-    if (!nodes.length) return;
+    if (!groups.length) return;
     var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (var i = 0; i < nodes.length; i++) {
-      var n = nodes[i];
-      if (n.x < minX) minX = n.x;
-      if (n.x > maxX) maxX = n.x;
-      if (n.y < minY) minY = n.y;
-      if (n.y > maxY) maxY = n.y;
+    for (var i = 0; i < groups.length; i++) {
+      var g = groups[i], st = ensurePos(g);
+      if (st.x - g.w / 2 < minX) minX = st.x - g.w / 2;
+      if (st.x + g.w / 2 > maxX) maxX = st.x + g.w / 2;
+      if (st.y - g.h / 2 < minY) minY = st.y - g.h / 2;
+      if (st.y + g.h / 2 > maxY) maxY = st.y + g.h / 2;
     }
     var pad = 40;
     var bw = Math.max(1, maxX - minX), bh = Math.max(1, maxY - minY);
@@ -699,8 +989,8 @@ const SCRIPT = String.raw`
     view.y = svg.clientHeight / 2 - (minY + bh / 2) * k;
   }
 
-  function truncate(s, n) { return s.length > n ? s.slice(0, n - 1) + '…' : s; }
-  function nodeTip(n) {
+  function nodeTip(n, g) {
+    if (!n) return '';
     const lines = [n.label + (n.detail ? '  :  ' + n.detail : '')];
     if (n.path) lines.push(n.path);
     if (n.width) lines.push(n.width + ' bit' + (n.width === 1 ? '' : 's') + (n.direction ? '  ' + n.direction : ''));
@@ -709,6 +999,10 @@ const SCRIPT = String.raw`
     if (n.childCount) {
       lines.push(n.childCount + ' child instance(s) - click to focus, double-click to '
         + (collapsed.has(n.path) ? 'expand' : 'collapse'));
+    }
+    if (g && g.nets.length && n.kind !== 'net') {
+      lines.push(g.nets.length + ' signal(s) - use the chevron to '
+        + (folded.has(g.key) ? 'show them' : 'fold them'));
     }
     return lines.join('\n');
   }
@@ -729,19 +1023,25 @@ const SCRIPT = String.raw`
   }
   function hideTip() { tip.style.display = 'none'; }
 
+  /**
+   * Dim everything that is not part of the highlighted node's neighbourhood.
+   * The neighbourhood is grouped: highlighting one signal keeps its whole
+   * module legible, and the edges that run between two lit groups stay lit too.
+   */
   function applyHighlight() {
-    if (!api._els) return;
-    const near = new Set();
-    if (highlight) {
-      near.add(highlight);
-      for (const e of model.edges) {
-        if (e.from === highlight) near.add(e.to);
-        if (e.to === highlight) near.add(e.from);
+    if (!api._els || !model) return;
+    const near = highlight ? withGroups(nearOf(highlight)) : null;
+    for (const gd of api._els.groups) {
+      const inNear = !!near && gd.els.some(x => near.has(x.n.id));
+      const dimGrp = !!near && !inNear;
+      gd.el.classList.toggle('dim', dimGrp);
+      for (const x of gd.els) {
+        x.el.classList.toggle('dim', !dimGrp && !!near && !near.has(x.n.id));
       }
     }
-    for (const { n, grp } of api._els.nodeEls) grp.classList.toggle('dim', !!highlight && !near.has(n.id));
-    for (const { e, el: path } of api._els.edgeEls) {
-      path.classList.toggle('dim', !!highlight && !(e.from === highlight || e.to === highlight));
+    for (const ed of api._els.edgeEls) {
+      const bright = !near || (near.has(ed.e.from) && near.has(ed.e.to));
+      ed.el.classList.toggle('dim', !bright);
     }
   }
 
@@ -755,15 +1055,14 @@ const SCRIPT = String.raw`
       view.x = drag.ox + (ev.clientX - drag.sx);
       view.y = drag.oy + (ev.clientY - drag.sy);
       scheduleDraw();
-    } else if (drag.n) {
+    } else if (drag.key !== undefined) {
       interacted = true;
       var dx = (ev.clientX - drag.ev.clientX) / view.k, dy = (ev.clientY - drag.ev.clientY) / view.k;
       if (Math.abs(ev.clientX - drag.ev.clientX) + Math.abs(ev.clientY - drag.ev.clientY) > 3) dragged = true;
-      drag.n.x += dx;
-      drag.n.y += dy;
-      // In hierarchy mode the column would re-place it on the next frame, so a
-      // dragged node opts out of the layout until the model or mode changes.
-      drag.n.__moved = 1;
+      // Moving a group moves every row in it: the layout state is the only
+      // thing that changes, and placeGroup parks the signals back on it.
+      var st = gpos.get(drag.key);
+      if (st) { st.x += dx; st.y += dy; st.moved = 1; }
       drag.ev = ev;
       scheduleDraw();
     }
@@ -785,12 +1084,12 @@ const SCRIPT = String.raw`
     el.addEventListener('change', () => { draw(); });
   }
 
-  // The layout mode owns the node positions, so switching it clears whatever
-  // the other mode wrote and refits: force -> hierarchy re-columns the nodes,
+  // The layout mode owns the group positions, so switching it clears whatever
+  // the other mode wrote and refits: force -> hierarchy re-columns the groups,
   // hierarchy -> force starts a fresh relaxation instead of freezing the
   // column positions in place.
   cbHier.addEventListener('change', () => {
-    if (model) for (const n of model.nodes) { n.__laid = 0; n.__moved = 0; }
+    for (const st of gpos.values()) { st.laid = false; st.moved = false; }
     interacted = false;
     draw();
   });
@@ -801,11 +1100,15 @@ const SCRIPT = String.raw`
       model = msg.graph;
       highlight = null;
       nodes = []; edges = [];
+      groups = [];
       interacted = false;
       // The extension owns the collapse set once it has answered; a message
       // without the field (older hosts) keeps whatever we toggled locally.
       if (msg.collapsed !== undefined) collapsed = new Set(msg.collapsed || []);
-      for (const n of model.nodes) { n.__laid = 0; n.__moved = 0; }
+      // A new model may settle differently under the force layout. The
+      // hierarchy layout ignores the flag and re-columns on the next frame,
+      // while a group the user dragged keeps its position either way.
+      for (const st of gpos.values()) st.laid = false;
       // The root's path is the empty string, so this has to be an undefined
       // check - otherwise opening a graph for a top module highlights nothing.
       if (msg.focus !== undefined && msg.focus !== null) {

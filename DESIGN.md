@@ -15,7 +15,7 @@
 |---|------|----------|
 | 1 | 语法高亮 | TextMate 语法（`syntaxes/verilog.tmLanguage.json`）+ 语言配置（注释、括号、折叠、缩进） |
 | 2 | 信号跳转、module 跳转 | `DocumentSymbolProvider` / `DefinitionProvider` / `ReferenceProvider` / `RenameProvider` / `HoverProvider`，基于全工作区索引 + 层次化名字解析 |
-| 3 | 可视化查看信号与 module 的连接关系 | Webview 交互图（SVG 力导向布局），边为端口连接/网络，节点为实例 |
+| 3 | 可视化查看信号与 module 的连接关系 | Webview 交互图（SVG，层次分列默认、力导向可切），一个 module 一个容器框、信号是框内行，边为端口连接/网络 |
 | 4 | 已生成 module 之间的组成关系 | 侧边栏 "Composition" 树视图（层次树）+ 层次路径面包屑 |
 | 5 | 可视化生成 module | 从图中选中实例 → 自动生成包装 module（wrapper）源码，含端口方向/位宽推导 |
 
@@ -398,15 +398,17 @@ resolve(name, scope) 优先级从高到低：
 
 ### 5.3 连接关系可视化（Webview 图）
 
-**数据流**：extension 侧 `buildGraph(hierarchy, depth, filters)` → JSON → webview `renderGraph()`。
+**数据流**：extension 侧 `buildGraph(hierarchy, depth, filters)` → JSON → webview 里 `graphPanel.ts` 的内联脚本 `renderGraph()`。
 
-**节点**
-- module 实例（矩形，标注实例名 + module 名 + 解析状态）
-- 当前文件所在 module 高亮
-- 悬停显示 ports 摘要
-- **例化当前 module 的模块**：图的根不在设计顶部时，根在所选 module 内的同时，其祖先链（从设计顶层到根的父实例）以实例节点挂在根之上，每级通过**父作用域里的 net**连到下一级——一个 mid-tree module 不再画成无父无外源信号的封闭盒子，喂进它端口的信号可见，兄弟实例不画。
+**以 module 为单位分组**
+- 图里不再"一个信号一个盒子"：**一个 module 一个容器框**，框的 header 是该实例（实例名 + module 名 + 解析状态），框内**一行一个信号**（名 + 位宽 + 方向），行序 input → inout → output
+- 分组键 = 节点 id 的 `::` 前缀（instance path / net path 的作用域），`buildGroups()` 每次 `draw()` 重算——core 的 `Graph` 模型不变，分组纯粹是画法
+- 当前文件所在 module 高亮；悬停显示 ports 摘要
+- **例化当前 module 的模块**：图的根不在设计顶部时，根在所选 module 内的同时，其祖先链（从设计顶层到根的父实例）以实例容器挂在根之上，每级通过**父作用域里的 net**连到下一级——一个 mid-tree module 不再画成无父无外源信号的封闭盒子，喂进它端口的信号可见，兄弟实例不画
 
-**边**
+**边锚到框里的信号行**
+- `anchorOf(node, other, edge)`：按对端容器中心选**朝向对方的那一侧**，x 取框的左/右边缘；net 端的 y 是它在框里那一行的行中心，instance 端按 `e.port`/`e.signal` 在**对端框内**找同名信号行（`portRow`），命中就锚到那一行，找不到才落到 header 中心——线因此接进模块内部的那根信号，而不是撞在外框上
+- 同一框内的连线（`assign`/`always` 这类 net→net）画成框右侧外凸的弓形，两端都从右边缘出去，不穿框
 - 端口连接边（实线，颜色 = 方向：input/output/inout；宽度 ∝ 位宽）
 - `assign` 别名边（虚线，label `assign`）
 - **过程赋值边**（同样虚线，label `always`）：`always … q <= d;` 不是一根线，但它是时钟化设计唯一的“数据怎么走”的说明；只画 `assign` 时整个寄存器文件、每个 comb block 在图里都是一堆互不相连的 net
@@ -414,22 +416,25 @@ resolve(name, scope) 优先级从高到低：
 
 边的 id 由 `from>to:kind:port:signal:select` 生成，重复的赋值落在同一对 net 上会合并，因此过程赋值边不会把图按语句条数放大。条件的读（`if (en) …`）目前只进 Nets 视图，不画成边：它是控制依赖，不是数据通路，画成数据边会误导（见 §11.3）。
 
+**两层折叠**
+- **信号折叠（webview 本地）**：点 header 上的 chevron 折叠/展开该 module 的信号行，框缩成 header（`HEAD_H`）；行上的连线**回退锚到 header**，连接不会消失。状态只是脚本里的一个 `Set`，只改画法，不惊动扩展
+- **层次折叠（扩展）**：双击 header → `toggleCollapse` → `buildGraph` 收起子树与该作用域的 net，框上标 `+`（无信号的框只有 `+` 没有 chevron）；两个集合各自独立，互不覆盖
+
 **布局**：层次分列为默认，力导向可切回
-1. 层次深度 → 按列排布（列 = 层次层级，列内实例在前、作用域 net 在后，行居中），连线沿列从左到右走
-2. `hierarchy layout` 关掉时退回力导向：确定性径向播种 + Fruchterman-Reingold（分帧迭代，收敛早停）
-3. 力导向下边作为弹簧约束；层次布局下用户拖过的节点保留原位（`__moved`）
+1. 层次深度 → 按列排布（列 = 层次层级，**列里堆的是容器框**，列内按 key 排序、列居中），连线沿列从左到右走
+2. `hierarchy layout` 关掉时退回力导向：**按容器框跑**（`runForce(groups)`，框宽高参与斥力），确定性径向播种 + Fruchterman-Reingold（分帧迭代，收敛早停）
+3. 布局状态按 scope 记在 `gpos`（`{x, y, moved, laid}`）：graph 消息只重置 `laid`（用户拖过的位置留着），切换布局开关才连 `moved` 一起重置，否则列坐标会被当成已收敛结果冻住
 
 **交互**
-- 滚轮缩放 / 拖拽平移 / 拖节点（固定该节点，重跑布局）
-- **层次布局（默认）**：按 hierarchy depth 分列（实例列在前、其作用域的 net 随后），连线沿列从左到右穿过实例树，同图同结果；可切回力导向布局
-- **按层次折叠**：双击实例 → 只留盒子（子树与盒子内部的 net 不再展开，盒上标 `+`），再双击展开；折叠状态随每次请求交给 core，图本身随之收缩
-- 悬停节点 → 高亮其一跳邻居，弱化其余
-- 点击节点 → 右侧面板列出该实例的 ports 与连接对端（**可点击跳转到 RTL 对应行**）
-- 搜索框：按信号名/端口名过滤，命中节点自动聚焦并高亮相关边
+- 滚轮缩放 / 拖拽平移 / 拖框（固定该框，重跑布局）
+- 悬停 / 搜索：`withGroups()` 把命中集扩成**整容器**（搜一个信号，它所在的 module 连同全部信号一起画出来），过滤与邻域都走这一条；`applyHighlight()` 在 `draw()` 末尾重放，重绘不再丢掉 dim
+- **双击 header 按层次折叠**（见上），单击仍延迟 200ms 才发 `focus`
+- 图例带一行 hint，说明 chevron / `+` 各自是什么
 - "只看选中子树" / "展开全层次" / "以 C 风格连线（Bus）显示" 等开关
+- 点击节点 → 右侧面板列出该实例的 ports 与连接对端（**可点击跳转到 RTL 对应行**）
 - 导出 SVG / PNG
 
-**性能**：节点 > 800 时默认只画当前 module 的直接邻居（2 跳内），并提示"图过大，已降级"；JSON 分批 postMessage（每 200 节点一批）避免单条消息过大。
+**性能**：节点 > 800 时默认只画当前 module 的直接邻居（2 跳内），并提示"图过大，已降级"；单条 postMessage 投递（800 节点规模足够）。
 
 ### 5.4 组成关系视图（TreeView）
 
@@ -559,9 +564,10 @@ resolve(name, scope) 优先级从高到低：
    | `tokens.test.ts` | 语义 token：模块类型/实例名/端口/信号/参数/函数/typedef/系统标识符着色、点号路径只着色叶子、作用域限定偏移、排序与去重、未解析名字不着色、**类型位置的名字即使跨文件无法解析也着色**、**enum 成员的声明与使用都按 parameter 着色** | 14 |
 | `jump.test.ts` | 跳转关系表：signal/module/instance 命中并给出目标范围、索引延迟就位后目标才解析出来、不可解析的名字不入表、未索引的文件不建表、光标落在名字首尾都算命中、删文件后关系表失效、**无关文件被 add 后命中表不重建、removeFile 只丢指向它的表（其余保留）、表按 LRU 淘汰（命中刷新最近序）、同目录出现新定义后命中改指向、header 借名后命中改指向** | 13 |
 | `scale.test.ts` | 规模：`moduleAtLine` 二分与逐行扫描在 200 module 的每一行等价、200 signal 的 module 只看见自己的声明（名字表不串模块）、关系表构建一次复用、删文件后关系计数归零（不泄漏） | 3 |
-| `providers.test.ts` | 真实 provider 借桩 `vscode` 跑起来（headless）：module 词与 instance 名跳到声明、信号读跳到声明、hover 不受影响、被排除的文件在打开前没有关系、**打开后跳转生效**、关闭后恢复 | 7 |
+   | `providers.test.ts` | 真实 provider 借桩 `vscode` 跑起来（headless）：module 词与 instance 名跳到声明、信号读跳到声明、 hover 不受影响、被排除的文件在打开前没有关系、**打开后跳转生效**、关闭后恢复 | 7 |
+   | `webview.test.ts` | 连接图 webview：真实内联脚本（`SCRIPT`）跑在桩 DOM 上、图由真实 `buildGraph` 生成——**一个 module 一个容器框、信号是框内行且按方向排序**、端口边从源框的行落到**目标框内同名信号行**（不落到外框、不落到 header）、同组 `assign` 两头从框右侧外凸、chevron 折叠后行消失且连线回退到 header、双击 header 发 `collapse` 给扩展、层次折叠的框标 `+` 且不画子节点、搜到一个信号后整组模块连同全部信号一起保留 | 8 |
 
-   共 279 个用例，因此可在无 GUI 环境运行：其中 271 个完全不依赖 `vscode` 模块，`providers.test.ts` 的 7 个与 `coldstart.test.ts` 的 1 个则由 `src/test/vscodeStub.ts` 提供的 `vscode` **桩模块**驱动——`Module._load` 拦截 `'vscode'` 后动态 `import('../extension')`，跑的是真实的 activate/scan/provider 代码，而不是复刻一份逻辑。其中 `config.test.ts` 是**接线守卫**：直接读源码双向校验“没有死设置”——`HdlConfig` 的每个字段必须在 config.ts 之外被读过，`package.json` 的每个设置必须被 `readConfig` 读过，数值设置必须有正的 `minimum`。两个方向都做过变异校验（把 `semanticHighlighting` 换成常量、往 manifest 里塞一个没人读的属性，对应用例都会失败），`ranges.test.ts` 同样做过偏移量变异校验。本轮新增的 parser/tokens/probabilities 分支也逐条做过变异校验：去掉 `isTypedefName` 里的 file-scope 分支、去掉 package 限定、`qualifiedNameAt` 的 token 数写错、取消 `shareFileTypedefs` 的自引用、忽略 module 内部遮蔽、去掉无端口列表实例化的 scope 判定、去掉 `classifyTypeUses`、`referenceTokens` 里 `kind === 'type'` 的着色分支、flatten 里“按类型聚合成一条”的告警与“本 module 已有 typedef 就不重复报”——十一处变异都会被对应用例抓住。后续两轮（隐式 net、`import`/`bind`）又逐条做了变异校验：去掉 `inAlways` 判定（过程赋值不再被判未声明）、放宽层级路径判定（`u.o` 变成一个叫 `o` 的 net）、不写 `implicit` 标记、副本与 stub 各漏一处过滤、不记录 `import` 语句、认不出 `import pkg::*`、不按名字过滤 import 列表、跨文件包不再定 kind、跳过包与自身的环、丢掉 import 名字的 owner（定义跳到别的文件）、让重命名不再拒绝、重新给 module 类型的 ref 定 kind、把 `bind`/`let` 加回 block 开关键字、不标记 bind 里的 ref——二十处变异都会被对应用例抓住。enum 那一轮又做了九处：不给第一个没有显式取值的成员补 0、不把文件作用域的成员下发到 module、不记成员的声明引用、整个 enum 解析跳过、下发之后不再重定 ref 的 kind、成员值看不到前面成员的值、无引用的 typedef 也告警、丢掉的 typedef 从不告警、把 typedef 自己算成使用者——九处都会被抓到（单元测试或 e2e 至少一处失败）。generate 那一轮又做了九处：generate 体不再分发语句、else 分支不读、不给赋值打 generate 标记、不给声明打、不给 parameter 打、生成器只拦实例、只拦 generate 里的赋值、只拦 generate 里的声明、把过程块关键字收窄成只有 `always`——九处也都会被抓住。路径那一轮（保留层级路径里的下标、按下标选 generate 副本、嵌套块路径、内联 `genvar`）又做了十二处：解析引用时不保留下标、不记下标里的名字读、嵌套循环丢掉外层标签、实例前缀被内层覆盖、光标链在下标处断开、跨文件跨 generate 块读不到信号、不按块路径选声明、数组实例元素匹配不到实例、block 切片少跳一次 `begin : label`、header 里的 `parameter` 当成端口、参数默认值在空 scope 里折叠、循环头里的内联 `genvar` 不识别——十二处都会被单元测试或 e2e 抓住（其中 `begin : label` 的两处是等价变异：else 分支的标签改由 `blockCtx` 兜底读出，行为一致）。过程块与图这一轮又做了十四处：不再跳过 `: label`、过程块里不再解析声明、case item 标签退回只认标识符、typedef 判定放宽到任意 ident（`arr[i] = 0;` 被误判成声明）、`for` 头第一段不再建声明、`foreach` 不再声明循环变量、条件不再记为读、无条件分支的 `bodyEnd + 1`、`labelEnd` 不再遇 `?`/`=` 退出、`for` 头改回按逗号切分、`integer` 关键字不再映射到 integer、nets 不再把 condition 当读、图里重新跳过 `inAlways` 赋值、过程边的 label 退回 `assign`——十四处全部会被单元测试或 e2e 抓住。select 与接口端口这一轮又做了五处：`indexRefs` 退回逐 token 平扫、`isAnsiSlice` 不认裸接口端口、`scopeKinds` 不填、猜方向的过滤里不跳过接口端口——前三处与 nets 那一处会被对应用例抓住；第四处（猜方向的过滤）是等价变异（`guessDir` 只在非 ANSI 占位端口上设置，ANSI 接口端口走 `parseAnsiPort` 的接口分支，到不了那条过滤），所以没有留在代码里。同一轮还加了一处 Nets 的：`add()` 不再把 `$` 开头的名字收进 net list（`$clog2(DEPTH)` 里的 `$clog2`），对应 nets 用例会失败。子程序体这一轮做了五处：Nets 不再跳过 `local` 的赋值、图不再跳过、赋值不标 `local`、声明不标 `local`、函数体不再算过程体——前四处会被对应用例抓住；最后“`inProcedural: false`”是等价变异（`scanFunctionBody` 根本没有例化分支，`inProcedural` 在这里没有消费者，值仍按“函数体是过程体”写）。这一轮还砍掉了两处一开始写下的代码：函数体里的 ref 标记（子程序体不产生 `context` 引用，无人消费）与 generator 里跳过 `local` 声明的过滤（`flatten` 先拒绝带 function/task 的 module，够不着）。 generate 条件这一轮做了四处（条件不记引用、记成运行时条件、Nets 丢掉它、Nets 写成 `read by always`）——四处都被对应用例抓住。generate 作用域那一轮做了五处：拒绝信息里少了参数/端口的块名、Nets 不再把 generate 路径归并、图里 `netInfo()` 不再回退到块内声明、`generateScopes()` 不看声明、路径不再去掉下标——五处都会被对应用例抓住。 位宽这一轮做了十三处：不再区分 packed 与 unpacked、没声明的门词仍算引用、门词一律当原语、参考不记 `select`、`signalWidth`/`widthOfPort`/`widthOfVar`/`declWidth` 各忽略一段维度、单比特下标仍算一位、节点用下标位宽、生成器把 unpacked 写在名字前、扁平化的多维端口没有位宽、门原语被报成缺失模块——十三处都会被对应用例抓住（头两处与 `signalWidth`/`declWidth` 两处各补了一个用例才抓住）。 收尾这一轮做了四处：跨文件的裸 interface 端口又报方向猜测、占位端口不再记录 `declaredType`、字符串拼接照旧折成假数字、compose 生成的端口方向弄错而 e2e 不查——四处都会被抓住（字符串那处第一版只挡了后置的、前置的漏了，补上 `{"ab", 4'h1}` 那个用例才抓住）。跳转关系表这一轮做了三处：instance 条目不记 `target`（查表拿不到目标，`jump.test.ts` 与 `providers.test.ts` 共 5 个用例失败）、`removeFile` 不再失效已缓存的关系表（删掉的文件仍能“跳”到过期位置，`jump.test.ts` 2 个用例失败）、打开文件时不补索引（被排除文件打开后依然没有跳转，`providers.test.ts` 1 个用例失败）——三处都会被抓住。用户类型位宽这一轮做了五处：`typeWidth` 不再向 scope 要 `typeOf`（8 个用例失败）、`scopeFor` 不装 resolver（同样 8 个）、去掉互递归的 `seen` 保护（链上打转，1 个用例栈溢出而失败）、`childScope` 不换成孩子自己的 resolver（孩子那 32 位的信号折成父 module 同名类型的 8 位，1 个失败）、`underlyingType` 不认 `pkg::type`（2 个失败）——五处都会被抓住。冷启动这一轮做了一处：`provideDefinition` 不再等索引就绪（`coldstart.test.ts` 1 个用例失败）——会被抓住。名字表与跳转关系表这一轮做了十三处：`lendHeaderDecls` 不再失效名字表（头文件后到时查不到）、`moduleAtLine` 二分差一（起始行命中的 module 查不到，scale 用例失败）、命中不 touch（缓存退化成 FIFO，LRU 用例失败）、`removeFile` 不丢指向它的表（.过关系的表残留）、`removeFile` 退回整表清空（无关文件的关系被误杀）、保存的未命中不再重试（延迟就位的 module 永远查不到）、重名 module 出现不推 `preferEpoch`（同目录新定义改不了命中，jump 用例失败）、header 借名不推 `preferEpoch`（借名后命中不改正指向）、关系表不记 `targetFiles`（删除文件时无法粒度丢表）、名字表改为后写者胜（同名形参与借名遮蔽出错）、预算条件写成 `&&`（超限不淘汰）、丢表不减关系计数（泄漏）——前十二处都会被对应用例抓住；第十三处（`descend` 实例的 `idx` 合并规则）是等价变异：`byHead && byBase` 在当前 parser 下不可能同时命中（路径按点拆段、`instances` 键没有带下标的键），idx 规则从不参与决定，保留它是因为它一字不差就是被替换的"线性扫描先出现者胜"。这一轮先跑变异、后补用例：`invalidateScopeIndex`、两处 `preferEpoch` 与后写者胜共四处一开始都活着，补了 4 个用例（`index.test.ts` 2 个 + `jump.test.ts` 2 个）才全部转红。
+   共 287 个用例，因此可在无 GUI 环境运行：其中 271 个完全不依赖 `vscode` 模块，`providers.test.ts` 的 7 个、`coldstart.test.ts` 的 1 个与 `webview.test.ts` 的 8 个则由 `src/test/vscodeStub.ts` 提供的 `vscode` **桩模块**驱动——`Module._load` 拦截 `'vscode'` 后动态 `import('../extension')`，跑的是真实的 activate/scan/provider 代码，`webview.test.ts` 则借同一个钩子拿到 `graphPanel.ts` 导出的 `SCRIPT`，用 `new Function` 喂给桩 DOM 执行，而不是复刻一份逻辑。其中 `config.test.ts` 是**接线守卫**：直接读源码双向校验“没有死设置”——`HdlConfig` 的每个字段必须在 config.ts 之外被读过，`package.json` 的每个设置必须被 `readConfig` 读过，数值设置必须有正的 `minimum`。两个方向都做过变异校验（把 `semanticHighlighting` 换成常量、往 manifest 里塞一个没人读的属性，对应用例都会失败），`ranges.test.ts` 同样做过偏移量变异校验。本轮新增的 parser/tokens/probabilities 分支也逐条做过变异校验：去掉 `isTypedefName` 里的 file-scope 分支、去掉 package 限定、`qualifiedNameAt` 的 token 数写错、取消 `shareFileTypedefs` 的自引用、忽略 module 内部遮蔽、去掉无端口列表实例化的 scope 判定、去掉 `classifyTypeUses`、`referenceTokens` 里 `kind === 'type'` 的着色分支、flatten 里“按类型聚合成一条”的告警与“本 module 已有 typedef 就不重复报”——十一处变异都会被对应用例抓住。后续两轮（隐式 net、`import`/`bind`）又逐条做了变异校验：去掉 `inAlways` 判定（过程赋值不再被判未声明）、放宽层级路径判定（`u.o` 变成一个叫 `o` 的 net）、不写 `implicit` 标记、副本与 stub 各漏一处过滤、不记录 `import` 语句、认不出 `import pkg::*`、不按名字过滤 import 列表、跨文件包不再定 kind、跳过包与自身的环、丢掉 import 名字的 owner（定义跳到别的文件）、让重命名不再拒绝、重新给 module 类型的 ref 定 kind、把 `bind`/`let` 加回 block 开关键字、不标记 bind 里的 ref——二十处变异都会被对应用例抓住。enum 那一轮又做了九处：不给第一个没有显式取值的成员补 0、不把文件作用域的成员下发到 module、不记成员的声明引用、整个 enum 解析跳过、下发之后不再重定 ref 的 kind、成员值看不到前面成员的值、无引用的 typedef 也告警、丢掉的 typedef 从不告警、把 typedef 自己算成使用者——九处都会被抓到（单元测试或 e2e 至少一处失败）。generate 那一轮又做了九处：generate 体不再分发语句、else 分支不读、不给赋值打 generate 标记、不给声明打、不给 parameter 打、生成器只拦实例、只拦 generate 里的赋值、只拦 generate 里的声明、把过程块关键字收窄成只有 `always`——九处也都会被抓住。路径那一轮（保留层级路径里的下标、按下标选 generate 副本、嵌套块路径、内联 `genvar`）又做了十二处：解析引用时不保留下标、不记下标里的名字读、嵌套循环丢掉外层标签、实例前缀被内层覆盖、光标链在下标处断开、跨文件跨 generate 块读不到信号、不按块路径选声明、数组实例元素匹配不到实例、block 切片少跳一次 `begin : label`、header 里的 `parameter` 当成端口、参数默认值在空 scope 里折叠、循环头里的内联 `genvar` 不识别——十二处都会被单元测试或 e2e 抓住（其中 `begin : label` 的两处是等价变异：else 分支的标签改由 `blockCtx` 兜底读出，行为一致）。过程块与图这一轮又做了十四处：不再跳过 `: label`、过程块里不再解析声明、case item 标签退回只认标识符、typedef 判定放宽到任意 ident（`arr[i] = 0;` 被误判成声明）、`for` 头第一段不再建声明、`foreach` 不再声明循环变量、条件不再记为读、无条件分支的 `bodyEnd + 1`、`labelEnd` 不再遇 `?`/`=` 退出、`for` 头改回按逗号切分、`integer` 关键字不再映射到 integer、nets 不再把 condition 当读、图里重新跳过 `inAlways` 赋值、过程边的 label 退回 `assign`——十四处全部会被单元测试或 e2e 抓住。select 与接口端口这一轮又做了五处：`indexRefs` 退回逐 token 平扫、`isAnsiSlice` 不认裸接口端口、`scopeKinds` 不填、猜方向的过滤里不跳过接口端口——前三处与 nets 那一处会被对应用例抓住；第四处（猜方向的过滤）是等价变异（`guessDir` 只在非 ANSI 占位端口上设置，ANSI 接口端口走 `parseAnsiPort` 的接口分支，到不了那条过滤），所以没有留在代码里。同一轮还加了一处 Nets 的：`add()` 不再把 `$` 开头的名字收进 net list（`$clog2(DEPTH)` 里的 `$clog2`），对应 nets 用例会失败。子程序体这一轮做了五处：Nets 不再跳过 `local` 的赋值、图不再跳过、赋值不标 `local`、声明不标 `local`、函数体不再算过程体——前四处会被对应用例抓住；最后“`inProcedural: false`”是等价变异（`scanFunctionBody` 根本没有例化分支，`inProcedural` 在这里没有消费者，值仍按“函数体是过程体”写）。这一轮还砍掉了两处一开始写下的代码：函数体里的 ref 标记（子程序体不产生 `context` 引用，无人消费）与 generator 里跳过 `local` 声明的过滤（`flatten` 先拒绝带 function/task 的 module，够不着）。 generate 条件这一轮做了四处（条件不记引用、记成运行时条件、Nets 丢掉它、Nets 写成 `read by always`）——四处都被对应用例抓住。generate 作用域那一轮做了五处：拒绝信息里少了参数/端口的块名、Nets 不再把 generate 路径归并、图里 `netInfo()` 不再回退到块内声明、`generateScopes()` 不看声明、路径不再去掉下标——五处都会被对应用例抓住。 位宽这一轮做了十三处：不再区分 packed 与 unpacked、没声明的门词仍算引用、门词一律当原语、参考不记 `select`、`signalWidth`/`widthOfPort`/`widthOfVar`/`declWidth` 各忽略一段维度、单比特下标仍算一位、节点用下标位宽、生成器把 unpacked 写在名字前、扁平化的多维端口没有位宽、门原语被报成缺失模块——十三处都会被对应用例抓住（头两处与 `signalWidth`/`declWidth` 两处各补了一个用例才抓住）。 收尾这一轮做了四处：跨文件的裸 interface 端口又报方向猜测、占位端口不再记录 `declaredType`、字符串拼接照旧折成假数字、compose 生成的端口方向弄错而 e2e 不查——四处都会被抓住（字符串那处第一版只挡了后置的、前置的漏了，补上 `{"ab", 4'h1}` 那个用例才抓住）。跳转关系表这一轮做了三处：instance 条目不记 `target`（查表拿不到目标，`jump.test.ts` 与 `providers.test.ts` 共 5 个用例失败）、`removeFile` 不再失效已缓存的关系表（删掉的文件仍能“跳”到过期位置，`jump.test.ts` 2 个用例失败）、打开文件时不补索引（被排除文件打开后依然没有跳转，`providers.test.ts` 1 个用例失败）——三处都会被抓住。用户类型位宽这一轮做了五处：`typeWidth` 不再向 scope 要 `typeOf`（8 个用例失败）、`scopeFor` 不装 resolver（同样 8 个）、去掉互递归的 `seen` 保护（链上打转，1 个用例栈溢出而失败）、`childScope` 不换成孩子自己的 resolver（孩子那 32 位的信号折成父 module 同名类型的 8 位，1 个失败）、`underlyingType` 不认 `pkg::type`（2 个失败）——五处都会被抓住。冷启动这一轮做了一处：`provideDefinition` 不再等索引就绪（`coldstart.test.ts` 1 个用例失败）——会被抓住。名字表与跳转关系表这一轮做了十三处：`lendHeaderDecls` 不再失效名字表（头文件后到时查不到）、`moduleAtLine` 二分差一（起始行命中的 module 查不到，scale 用例失败）、命中不 touch（缓存退化成 FIFO，LRU 用例失败）、`removeFile` 不丢指向它的表（.过关系的表残留）、`removeFile` 退回整表清空（无关文件的关系被误杀）、保存的未命中不再重试（延迟就位的 module 永远查不到）、重名 module 出现不推 `preferEpoch`（同目录新定义改不了命中，jump 用例失败）、header 借名不推 `preferEpoch`（借名后命中不改正指向）、关系表不记 `targetFiles`（删除文件时无法粒度丢表）、名字表改为后写者胜（同名形参与借名遮蔽出错）、预算条件写成 `&&`（超限不淘汰）、丢表不减关系计数（泄漏）——前十二处都会被对应用例抓住；第十三处（`descend` 实例的 `idx` 合并规则）是等价变异：`byHead && byBase` 在当前 parser 下不可能同时命中（路径按点拆段、`instances` 键没有带下标的键），idx 规则从不参与决定，保留它是因为它一字不差就是被替换的"线性扫描先出现者胜"。这一轮先跑变异、后补用例：`invalidateScopeIndex`、两处 `preferEpoch` 与后写者胜共四处一开始都活着，补了 4 个用例（`index.test.ts` 2 个 + `jump.test.ts` 2 个）才全部转红。
 
 2. **fixture 集**：`test/fixtures/` 覆盖纯 Verilog-1995、Verilog-2001 ANSI、SystemVerilog、generate for、interface、package、宏、`ifdef` 变体。
 3. **集成冒烟**（98 项 `ok`）：`src/tools/e2e.ts` 加载 fixture 目录，断言索引统计、层次与参数传播、graph 结构（含“过程赋值也在图里”）、flatten/compose/stub/auto 的可解析性与错误信息，逐项打印 `ok`，末尾输出 `ALL CHECKS PASSED`。 flatten 与 stub 的产物都回读一遍；compose 之前只查了结构，现在也回读：重建出来的端口表最容易在方向或位宽上丢东西，而回读后的 `ports` 才是用户真正拿到的 module。
@@ -611,7 +617,7 @@ CI：`npm run check && npm test`（或 `make check`）。
 | 着色 grammar | `syntaxes/*.tmLanguage.json` | 完成；`source.systemverilog` 只是 `source.verilog` 的 include 壳，两种语言共用一份 pattern |
 | 索引与解析 | `src/core/index.ts`、`resolve.ts`、`scopeIndex.ts`、`globs.ts` | 完成；文件监视、未保存文档防抖重解析、关文档回读磁盘、`include` 展开；glob 匹配、每 module 名字表、每文件跳转关系表（LRU）都在 core，可单测 |
 | 层次展开 | `src/core/hierarchy.ts` | 完成；环检测、深度与实例双上限、参数作用域求值、嵌套 generate 块路径（`ln[1].half[0]`）与分支标签（`many`）；`findByPath()` 容忍数组元素下标 |
-| 连接图 | `src/core/graph.ts`、`src/vscode/graphPanel.ts` | 完成；自包含 SVG 力导向图，无 CDN/worker |
+| 连接图 | `src/core/graph.ts`、`src/vscode/graphPanel.ts` | 完成；自包含 SVG 图，无 CDN/worker；一个 module 一个容器框、信号是框内行，连线锚到目标框里的对应信号行 |
 | 组成树 / nets / problems | `src/vscode/views.ts` + `core/nets.ts`、`core/problems.ts` | 完成；TreeItem 按 path 记忆供 `reveal` 复用；nets/problems 的判定逻辑在 core，可单测 |
 | 跳转/hover/references/rename/符号 | `src/vscode/providers.ts` | 完成；F12 命中实例名时跳到被例化的 module（`followDefinition` 关掉则改为在组成树中定位），rename 拒绝遮蔽同名符号并只替换限定名里的叶子 |
 | wrapper 生成 | `src/core/generator.ts`、`src/vscode/generate.ts` | 完成；三种策略 + auto 回退，先预览后显式保存；generate 块内的连线含循环变量时拒绝并回退 stub |
@@ -632,7 +638,8 @@ CI：`npm run check && npm test`（或 `make check`）。
 - **首次布局收敛后自动适配视图**：布局以原点为中心，初始恒等视图把原点放在 SVG 左上角，负坐标的一半（含许多信号）落在画布左上角外面，看起来"整张图偏左"。`fitView()` 在布局完成后（且用户尚未平移/缩放/拖节点）把包围盒居中并缩放填满画布；双击同样回到 fit 而不是硬重置为恒等视图。
 - **图的根不是设计顶层时带上祖先上下文**：只看"当前 module 内的信号"漏掉了例化它的模块。`showGraph`/`showGraphForSelection`/`setGraphRoot` 现在都带上所在层次树的根（`composition.hierarchyRoot` 或光标 module 展开出的 root），`GraphPanel` 用 `pathChain` 算从根到所选节点的祖先链传给 `buildGraph`，图里根之上逐级画出父实例与父作用域喂进来的信号；点击祖先节点可以逐级向上缩放。顶层的图仍只有一个 root 节点，行为不变。
 - **根节点也能高亮**：层次根的 `path` 是空串，图消息里的 `focus` 判空必须用 `!== undefined` 而不是真值判断，否则打开顶层 module 的图时什么都不会高亮，"只看邻居" 也就无从触发。
-- **链接按层次显示、按层次折叠**：默认布局从力导向换成按 `depth` 分列（`layoutHierarchical`，240 单位列距、行居中），连线沿列走向穿过实例树，"谁例化谁"不再取决于力导向的收敛结果；`hierarchy layout` 开关可切回力导向（切换时清 `__laid`/`__moved`，否则列坐标会被当成已收敛的布局冻住）。折叠是**双击实例**：盒子留下（标 `+`），`buildGraph` 收到 `GraphOptions.collapsed` 后 `visit()` 直接返回——子实例与该作用域的 net 都不展开，且**不记 `truncated`**（有意为之，不是预算截断）。webview 的本地 set 让盒子即时反应，扩展端 `GraphPanel.collapsed` 随每次请求回传权威集合；把图 re-root 到某节点时会丢掉会遮住新根及其祖先链的折叠项，避免空图。单击聚焦因此**延迟 200ms** 才发 `focus`（双击要取消它——先 re-root 再折叠只会折叠掉刚成为根的那个盒子）；层次布局下拖过的节点记 `__moved`，列不再覆盖它的坐标。
+- **链接按层次显示、按层次折叠**：默认布局从力导向换成按 `depth` 分列（`layoutHierarchical`，列距 = 列内最宽的框 + 90，列居中），连线沿列走向穿过实例树，"谁例化谁"不再取决于力导向的收敛结果；`hierarchy layout` 开关可切回力导向（切换时把 `gpos` 里的 `laid`/`moved` 一起清掉，否则列坐标会被当成已收敛的布局冻住）。折叠是**双击实例**：盒子留下（标 `+`），`buildGraph` 收到 `GraphOptions.collapsed` 后 `visit()` 直接返回——子实例与该作用域的 net 都不展开，且**不记 `truncated`**（有意为之，不是预算截断）。webview 的本地 set 让盒子即时反应，扩展端 `GraphPanel.collapsed` 随每次请求回传权威集合；把图 re-root 到某节点时会丢掉会遮住新根及其祖先链的折叠项，避免空图。单击聚焦因此**延迟 200ms** 才发 `focus`（双击要取消它——先 re-root 再折叠只会折叠掉刚成为根的那个盒子）；层次布局下拖过的框记 `moved`，列不再覆盖它的坐标。**折叠信号行**（框头 chevron）是另一回事：纯 webview 状态、不请求扩展，见 §5.3。
+- **一个 module 一个框，信号是框内的行，连线锚到行上**：信号跟着它的 module 走（分组键就是 id 的 `::` 前缀），每组一个容器框、框里一行一个信号——"谁的信号"一眼可见，跨模块的线也不再在一堆散点里打结。连线不停在外框：`anchorOf` 按对端组中心选左右边缘，net 端锚在行高上，实例端按 `e.port`/`e.signal` 在**对端框里**找同名行（`portRow`），找不到才回 header 中心；同组的 `assign`/`always` 画成框右侧外凸的弓形，不穿框。框头 chevron 折叠信号行是 **webview 本地状态**（只改画法、不请求扩展），折叠后该组连线回退锚到 header，连接不会消失；层次折叠仍是双击 + `+` 标记（core 收缩），两个集合独立。搜索/邻域的命中集经 `withGroups()` 扩成整组，`applyHighlight()` 移到 `draw()` 末尾重放（此前每次重绘都会丢掉 dim）。模型层 `core/graph.ts` 一行没动——分组、锚定、折叠全是画法，`graph.test.ts` 的 27 个用例原样通过，画法本身由 `webview.test.ts` 用桩 DOM 跑真实内联脚本覆盖（8 例，见 §8）。
 - §5.3 里"导出 SVG/PNG""点击节点后右侧列出 ports 面板""JSON 分批投递""超限自动降到 2 跳"均未实现：当前是单条消息投递（800 节点规模足够），超限时按配置截断并在图上标 `truncated`。
 - **TreeView 的行点击命令按行类型分派**：组成树的行带 `node`，能直接给出 module 名的 range；nets 行只有文件与行号；problems 行还带列号。三个视图曾共用一个"打开"命令，而该命令直接读 `item.node`，在 nets/problems 行上会抛 `TypeError`，因此 `revealInstance` 现在同时接受两种行形状，problems 行则改绑本来就存在的 `openProblem`（唯一能定位到出错列的命令）。
 - **`wordAtPosition` 的 `name` 是光标下的那个 token**，不是整条点号的第一个：`u_alu.result` 上光标停在 `result` 时 `name` 必须是 `result`。取链首会让层次信号的 find-references/rename 操作到实例名上，返回另一个符号的位置，而且 rename 会把实例名改掉。e2e 里原先断言 `name === 'dut'`（即错误行为），已按 `WordAtPosition` 的文档契约改正。
@@ -664,7 +671,7 @@ CI：`npm run check && npm test`（或 `make check`）。
 
 ### 11.3 已知限制
 
-- 无 `code` CLI，尚未在真实 Extension Host 中验收；但 Definition/Hover/Symbols 三个 provider 已由 `providers.test.ts` 在 headless 下跑通（桩 `vscode` 激活扩展 → 扫描 fixture → 逐项调 provider）。TreeView/Webview 的渲染与交互、semantic token、命令仍只做过静态检查。
+- 无 `code` CLI，尚未在真实 Extension Host 中验收；但 Definition/Hover/Symbols 三个 provider 已由 `providers.test.ts` 在 headless 下跑通（桩 `vscode` 激活扩展 → 扫描 fixture → 逐项调 provider），连接图的渲染与交互已由 `webview.test.ts` 在桩 DOM 上跑通（真实内联脚本 + 真实 `buildGraph`，见 §8）。TreeView 的渲染、semantic token、命令仍只做过静态检查。
 - 宏不做完整展开：以宏名实例化的模块会保留为 unresolved 实例并在 Problems 面板提示。
 - `always` 块只提取声明、赋值目标与条件里的读，不保留语句体；含过程逻辑、function/task、generate 内模块实例的模块一律回退为 port-forwarding stub。
 - ANSI 端口的默认值（`input wire a = 1'b0`）当前不入 IR，位宽/方向不受影响，但语义 hover 不显示默认值。
@@ -686,17 +693,21 @@ CI：`npm run check && npm test`（或 `make check`）。
 
 ### 11.4 Webview 布局的规模上限
 
-`GraphPanel` 的力导向布局按节点数分档，并且**不会阻塞 webview 主线程**：
+`GraphPanel` 的力导向布局按**容器组数**分档，并且**不会阻塞 webview 主线程**：
 
-- 斥力用网格近似：节点按 `40*sqrt(n)`（钳制在 90–220）分桶，每个节点只与自身及相邻 8 个桶内的节点计算斥力。力是 `900/d²`，在 ~130 单位外已小于 0.05，因此这个近似不影响观感，但把每轮的 O(n²) 降到接近 O(n)。
-- 迭代轮数随规模递减：`n>400` 用 70 轮，`n>120` 用 130 轮，其余 260 轮。
-- 每轮之间检查 `Date.now()`，一帧最多算 20ms，剩下的交给 `requestAnimationFrame` 继续；布局未收敛前先画一屏并提示 `laying out N nodes...`，收敛后再整体重绘。
-- 初始位置是确定性的径向播种，重合点的抖动也由节点序号推导，所以同一张图每次布局结果一致（截图/diff 可复现）。
+- 力导向跑在**容器框**上而不是单个信号上（一个 module 一个框），组数远小于节点数，同规模的图直接小一个量级。
+- 斥力用网格近似：框按 `80*sqrt(g)`（钳制在 150–340）分桶，每个框只与自身及相邻 8 个桶内的框计算斥力。力是 `900/d²`，在 ~130 单位外已小于 0.05；两个框重叠时再加一项与重叠量成正比的推力，所以框不会互相套住。这个近似把每轮的 O(n²) 降到接近 O(n)。
+- 迭代轮数随组数递减：`g > 120` 用 60 轮，`g > 40` 用 110 轮，其余 180 轮。
+- 每轮之间检查 `Date.now()`，一帧最多算 20ms，剩下的交给 `requestAnimationFrame` 继续；布局未收敛前先画一屏并提示 `laying out N module groups...`，收敛后再整体重绘。
+- 初始位置是确定性的径向播种，重合点的抖动也由组序号推导，所以同一张图每次布局结果一致（截图/diff 可复现）。
 
-实测（1600 条边，本机单线程）：
+实测（桩 DOM 里跑真实内联脚本，本机单线程；"框数" = module 容器数，"总计"是全部帧的墙钟时间之和）：
 
-| 节点数 | 旧实现（单次阻塞） | 现实现（分帧总计） |
-|--------|--------------------|--------------------|
-| 56 | 35ms | 60ms / 3 帧 |
-| 200 | 92ms | 53ms / 3 帧 |
-| 800（默认上限） | 810ms 冻结 | 119ms / 6 帧（每帧 ≤20ms） |
+| 节点数 | 边数 | 框数 | 分帧总计 | 帧数 |
+|--------|------|------|----------|------|
+| 55 | 73 | 11 | 21ms | 1 |
+| 200 | 276 | 40 | 48ms | 2 |
+| 800（默认上限） | 1116 | 160 | 67ms | 3 |
+| 2400（对照，未截断） | 3356 | 480 | 216ms | 8 |
+
+每帧仍 ≤ 20ms：即便拿掉默认节点上限，布局本身也只是多摊几帧，不会冻住 webview；真正控制图规模的仍是 `maxNodes` 截断与 neighbourhood 聚焦。
