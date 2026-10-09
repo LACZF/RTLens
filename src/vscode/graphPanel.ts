@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 
 import type { IndexService } from './indexService';
 import type { Graph } from '../core/graph';
-import { findByPath, pathChain } from '../core/hierarchy';
+import { findByPath, pathChain, subtreeDepth } from '../core/hierarchy';
 import type { HierarchyNode } from '../core/ast';
 
 /**
@@ -37,11 +37,14 @@ export class GraphPanel {
   /** How many of `ancestors` (from the parent upward) are currently drawn. */
   private ancestorsShown = 0;
   /**
-   * Whether the webview asked for the root's descendants. Starts off: the graph
-   * opens as just the root box and the right-side `+` brings the whole subtree
-   * in at once.
+   * How many levels of the root's subtree are drawn; starts off at none and
+   * walks one level per click. `descendantsAvailable` is how deep the subtree
+   * actually goes under the current root, so the webview knows when the right
+   * edge has no more `+` left.
    */
   private descendantsShown = 0;
+  /** Levels of instances below the current root, from `subtreeDepth`. */
+  private descendantsAvailable = 0;
   /**
    * Instance paths the user collapsed in the webview. Sent back with every
    * request so the graph itself shrinks: nothing below a collapsed box is
@@ -111,9 +114,10 @@ export class GraphPanel {
     this.focus = focus ?? node.path;
     this.ancestors = pathChain(this.chainRoot, node.path).slice(0, -1);
     // A fresh root starts with no containing modules and no children; the plus
-    // signs at its edges reveal them.
+    // signs at its edges reveal them one level at a time.
     this.ancestorsShown = 0;
     this.descendantsShown = 0;
+    this.descendantsAvailable = subtreeDepth(node);
     // A collapse that would hide the new root (or anything on its ancestor
     // chain) is meaningless once we zoom there - drop it instead of drawing an
     // empty graph.
@@ -148,7 +152,7 @@ export class GraphPanel {
       maxDepth: 8,
       ancestors: shown,
       collapsed: [...this.collapsed],
-      showDescendants: this.descendantsShown > 0,
+      descendants: this.descendantsShown,
     });
     this.panel.title = `Connectivity: ${graph.root}`;
     await this.panel.webview.postMessage({
@@ -159,6 +163,7 @@ export class GraphPanel {
       ancestorsShown: shown.length,
       ancestorsLeft: this.ancestors.length - shown.length,
       descendantsShown: this.descendantsShown,
+      descendantsLeft: Math.max(0, this.descendantsAvailable - this.descendantsShown),
     });
     this.panel.webview.postMessage({ type: 'stats', text: statsLine(graph) });
   }
@@ -214,7 +219,11 @@ export class GraphPanel {
         return;
       }
       case 'descendants': {
-        this.descendantsShown = msg.shown ? 1 : 0;
+        // How many levels of the subtree to draw, clamped to how deep the
+        // hierarchy actually goes below the root.
+        const want = Number(msg.shown ?? 0);
+        const n = Number.isFinite(want) ? Math.round(want) : 0;
+        this.descendantsShown = Math.max(0, Math.min(this.descendantsAvailable, n));
         void this.refresh();
         return;
       }
@@ -259,7 +268,7 @@ export class GraphPanel {
   <span class="k out">output port</span>
   <span class="k inout">inout</span>
   <span class="k bad">unresolved</span>
-  <span class="hint">chevron folds a module's signals · double-click a header collapses its subtree · a + on the left edge reveals the module above, a + on the right edge the modules below</span>
+  <span class="hint">chevron folds a module's signals · double-click a header collapses its subtree · a + on the left edge reveals the module above, a + on the right edge the modules below, one level per click</span>
 </footer>
 <script>${SCRIPT}</script>
 </body>
@@ -393,10 +402,12 @@ export const SCRIPT = String.raw`
   // the plus sign on the topmost module walks up one level at a time.
   let ancShown = 0;
   let ancLeft = 0;
-  // Whether the root's descendants are drawn. Also hidden by default: the right
-  // edge of the root box carries the plus that brings the whole subtree in at
-  // once (and the minus that tucks it back).
+  // How many levels of the root's subtree the extension is currently drawing,
+  // and how many more are available below the deepest one. The children are
+  // hidden by default: the plus on the root's right edge walks down one level
+  // at a time, the minus tucks one level back.
   let descShown = 0;
+  let descLeft = 0;
   let view = { x: 0, y: 0, k: 1 };
   // Whether the user has panned/zoomed/dragged since the last graph, which
   // stops the initial fit-to-view from yanking the graph out from under them.
@@ -790,14 +801,17 @@ export const SCRIPT = String.raw`
   }
 
   /**
-   * Bring the whole subtree below the root in, or tuck it away, in one click.
-   * The extension rebuilds the graph without descendants and sends the new
-   * model back; the local flag moves first so the mark on the right edge of the
-   * root box reacts on the spot.
+   * Walk the root's subtree down or up by one level. The extension rebuilds the
+   * graph with that many levels and sends the authoritative counts back; the
+   * local numbers move first so the mark on the root's right edge reacts on the
+   * spot.
    */
-  function showDescendants(next) {
+  function showDescendants(delta) {
+    const total = descShown + descLeft;
+    const next = Math.max(0, Math.min(total, descShown + delta));
     if (next === descShown) return;
     descShown = next;
+    descLeft = total - next;
     vscode.postMessage({ type: 'descendants', shown: next });
     scheduleDraw();
   }
@@ -971,7 +985,6 @@ export const SCRIPT = String.raw`
     const hasPlus = !!(g.head && g.head.childCount && collapsed.has(g.head.path));
     const isChainTop = chainTop !== null && g.key === chainTop;
     const isRootBox = !!g.head && model !== null && g.key === model.root;
-    const hasKids = isRootBox && !!g.head.childCount;
     const marks = [];
     if (hasChev && !hasPlus) {
       marks.push({
@@ -1044,10 +1057,10 @@ export const SCRIPT = String.raw`
       }
     }
     // The left edge of the topmost box walks up the containing-module chain,
-    // one level per click; the right edge of the root box brings the whole
-    // subtree below it in (or tucks it back) in one click. These are collected
-    // here so they land after the header in the DOM, letting the chevron be
-    // the first 'chev' element a test or query finds.
+    // one level per click; the right edge of the root box walks down the
+    // subtree the same way. These are collected here so they land after the
+    // header in the DOM, letting the chevron be the first 'chev' element a test
+    // or query finds.
     const canUp = isChainTop && ancLeft > 0;
     const canDown = isChainTop && ancShown > 0;
     if (canUp) {
@@ -1059,10 +1072,16 @@ export const SCRIPT = String.raw`
       sideMark(grp, left - 30, hy + 4, '−', 'Hide the containing module',
         () => showAncestors(-1), 'lm');
     }
-    if (hasKids) {
-      sideMark(grp, right + 12, hy + 4, descShown ? '−' : '+',
-        descShown ? 'Hide the child modules' : 'Show the child modules',
-        () => showDescendants(descShown ? 0 : 1), 'rm');
+    const canDescDown = isRootBox && descShown > 0;
+    const canDescUp = isRootBox && descLeft > 0;
+    if (canDescUp) {
+      sideMark(grp, right + 12, hy + 4, '+',
+        descLeft === 1 ? 'Show the child modules' : 'Show the child modules (' + descLeft + ' below)',
+        () => showDescendants(1), 'rm');
+    }
+    if (canDescDown) {
+      sideMark(grp, right + 30, hy + 4, '−', 'Hide the child modules',
+        () => showDescendants(-1), 'rm');
     }
     return { el: grp, g, els };
   }
@@ -1257,6 +1276,7 @@ export const SCRIPT = String.raw`
       ancShown = Number(msg.ancestorsShown ?? 0) || 0;
       ancLeft = Number(msg.ancestorsLeft ?? 0) || 0;
       descShown = Number(msg.descendantsShown ?? 0) || 0;
+      descLeft = Number(msg.descendantsLeft ?? 0) || 0;
       // A new model may settle differently under the force layout. The
       // hierarchy layout ignores the flag and re-columns on the next frame,
       // while a group the user dragged keeps its position either way.

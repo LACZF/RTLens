@@ -407,7 +407,7 @@ export class IndexService implements vscode.Disposable {
       maxDepth: opts.maxDepth ?? 8,
       ancestors: opts.ancestors,
       collapsed: opts.collapsed,
-      showDescendants: opts.showDescendants,
+      descendants: opts.descendants,
     });
   }
 

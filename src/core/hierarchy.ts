@@ -359,6 +359,27 @@ export function subtree(root: HierarchyNode, path?: string): HierarchyNode[] {
   return out;
 }
 
+/**
+ * Levels of descendants below `node`: how many further rows of instances live
+ * under it. A leaf (or a node whose subtree was not expanded by the hierarchy
+ * budget) answers 0, so the view's right-side plus has somewhere to stop.
+ */
+export function subtreeDepth(node: HierarchyNode): number {
+  let deepest = 0;
+  const stack: HierarchyNode[] = [node];
+  while (stack.length) {
+    const n = stack.pop()!;
+    if (n.children?.length) {
+      for (let i = n.children.length - 1; i >= 0; i--) {
+        const c = n.children[i];
+        deepest = Math.max(deepest, c.depth - node.depth);
+        stack.push(c);
+      }
+    }
+  }
+  return deepest;
+}
+
 /** The chain of nodes from the root down to `path`, inclusive. */
 export function pathChain(root: HierarchyNode, path: string): HierarchyNode[] {
   if (root.path === path) {

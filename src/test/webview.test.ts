@@ -94,11 +94,11 @@ function ancestorGraph(shown: number): Graph {
 }
 
 /**
- * A graph rooted at `top` either with just the root box (no descendants) or
- * with the usual tall tree, matching the two shapes GraphPanel.refresh()
- * builds around a root whose children are hidden or shown.
+ * A graph rooted at `top` with `descendants` levels of its subtree shown (0 for
+ * just the root box), matching the shape GraphPanel.refresh() builds around a
+ * root whose children are walked one level per click.
  */
-function rootGraph(withChildren: boolean): Graph {
+function rootGraph(descendants: number): Graph {
   const index = new HdlIndex();
   index.addFile('/w/top.v', SRC);
   const h = buildHierarchy(index, 'top', { maxDepth: 8 })!;
@@ -106,7 +106,7 @@ function rootGraph(withChildren: boolean): Graph {
     maxDepth: 8,
     maxNodes: 500,
     showContainment: true,
-    showDescendants: withChildren,
+    descendants,
   });
 }
 
@@ -246,6 +246,7 @@ function startPanel(
     ancestorsShown?: number;
     ancestorsLeft?: number;
     descendantsShown?: number;
+    descendantsLeft?: number;
   } = {},
 ) {
   const posted: Record<string, unknown>[] = [];
@@ -300,6 +301,7 @@ function startPanel(
     ancestorsShown: opts.ancestorsShown ?? 0,
     ancestorsLeft: opts.ancestorsLeft ?? 0,
     descendantsShown: opts.descendantsShown ?? 0,
+    descendantsLeft: opts.descendantsLeft ?? 0,
   });
   const api = (svg as unknown as { __api: PanelApi }).__api;
   return {
@@ -490,10 +492,11 @@ test('a fully-revealed chain has no + but a - to fold the parent', () => {
   assert.equal(p.posted.find((m) => m.type === 'ancestors')?.shown, 0);
 });
 
-test('children start hidden and the + on the right edge brings them in at once', () => {
+test('children start hidden and the + on the right edge reveals them one level per click', () => {
   // A root whose descendants are not built, exactly what the extension builds
-  // the first time a module is focused.
-  const p = startPanel(rootGraph(false));
+  // the first time a module is focused. The fixture is two levels below `top`
+  // (u_mid has u_inner), so the extension reports two levels still available.
+  const p = startPanel(rootGraph(0), { descendantsLeft: 2 });
 
   const keys = p.api._els!.groups.map((gd) => gd.g.key);
   assert.deepEqual(keys, ['top'], 'only the root box is drawn, no children');
@@ -506,15 +509,36 @@ test('children start hidden and the + on the right edge brings them in at once',
   assert.equal(p.posted.find((m) => m.type === 'descendants')?.shown, 1);
 });
 
-test('the - on the right edge tucks the whole subtree back', () => {
-  const p = startPanel(rootGraph(true), { descendantsShown: 1 });
+test('each click reveals exactly one more level of children', () => {
+  // One level shown: the root and its direct children are there, but u_mid's
+  // own child u_inner is still out - and the root still wears a + because one
+  // more level remains below it.
+  const p = startPanel(rootGraph(1), { descendantsShown: 1, descendantsLeft: 1 });
+
+  const keys = p.api._els!.groups.map((gd) => gd.g.key).sort();
+  assert.deepEqual(keys, ['top', 'top.u_dangling', 'top.u_leaf', 'top.u_mid', 'top.u_missing']);
+  assert.equal(p.group('top.u_mid').g.nets.length, 4, 'the leaf at the revealed level shows its own ports only');
+  const root = p.group('top');
+  const plus = find(root.el, (e) => e.tagName === 'text' && e.textContent === '+' && e.classList.contains('rm'));
+  assert.ok(plus, 'a deeper level remains, so the + is still on the right edge');
+  const minus = find(root.el, (e) => e.tagName === 'text' && e.textContent === '−' && e.classList.contains('rm'));
+  assert.ok(minus, 'the - sits beside the + once any level is shown');
+
+  fire(plus!, 'click');
+  assert.equal(p.posted.find((m) => m.type === 'descendants')?.shown, 2);
+});
+
+test('the - on the right edge tucks one level back', () => {
+  // Full subtree drawn (two levels): the - turns u_inner back off, leaving the
+  // root's direct children showing.
+  const p = startPanel(rootGraph(2), { descendantsShown: 2, descendantsLeft: 0 });
 
   const root = p.group('top');
   const minus = find(root.el, (e) => e.tagName === 'text' && e.textContent === '−' && e.classList.contains('rm'));
   assert.ok(minus, 'the root wears a - on its right edge while children are shown');
 
   fire(minus!, 'click');
-  assert.equal(p.posted.find((m) => m.type === 'descendants')?.shown, 0);
+  assert.equal(p.posted.find((m) => m.type === 'descendants')?.shown, 1);
 });
 
 test('a leaf root has no mark on its right edge', () => {
@@ -523,7 +547,7 @@ test('a leaf root has no mark on its right edge', () => {
   const h = buildHierarchy(index, 'top', { maxDepth: 8 })!;
   const leaf = findByPath(h.root, 'top.u_leaf')!;
   const g = buildGraph(index, leaf, {
-    maxDepth: 8, maxNodes: 500, showContainment: true, showDescendants: false,
+    maxDepth: 8, maxNodes: 500, showContainment: true, descendants: 0,
   });
   const p = startPanel(g);
 
