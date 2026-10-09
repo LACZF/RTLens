@@ -111,6 +111,13 @@ export interface GraphOptions {
   ancestors?: HierarchyNode[];
   /** Instance paths that should not be expanded below (collapsed). */
   collapsed?: Set<string> | string[];
+  /**
+   * Whether the subtree below the root is drawn (default true). The view starts
+   * without it - just the root box and its own signals - and the right-side
+   * plus brings the whole subtree in at once, so the same graph is built twice
+   * with this flag flipped.
+   */
+  showDescendants?: boolean;
   /** Whether to draw net nodes as separate nodes (default true). */
   showNetNodes?: boolean;
 }
@@ -167,7 +174,17 @@ class GraphBuilder {
       this.addInstanceNode(root, true);
     }
     this.addAncestors(root);
-    this.visit(root);
+    if (this.opts.showDescendants) {
+      this.visit(root);
+    } else {
+      // The graph is just the root box and its own scope's signals and assigns:
+      // no child instances, so nothing expands below it. The view reveals them
+      // with the right-side plus, which just rebuilds with the flag flipped.
+      const rootDef = this.index.resolveModule(root.moduleName, root.file);
+      if (rootDef) {
+        this.connectScope(root, rootDef);
+      }
+    }
     this.nodes = this.prune(this.nodes);
     this.edges = this.edges.filter(
       (e) => this.nodes.has(e.from) && this.nodes.has(e.to) && e.from !== e.to,
@@ -780,6 +797,7 @@ export function buildGraph(index: HdlIndex, root: HierarchyNode, opts: GraphOpti
     portWiringOnly: opts.portWiringOnly ?? false,
     ancestors: opts.ancestors ?? [],
     collapsed: opts.collapsed ?? [],
+    showDescendants: opts.showDescendants ?? true,
     showNetNodes: opts.showNetNodes ?? true,
   });
   return builder.build(root);

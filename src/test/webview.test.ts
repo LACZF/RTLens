@@ -13,7 +13,7 @@ import { Module } from 'node:module';
 
 import { vscode } from './vscodeStub';
 import { HdlIndex } from '../core/index';
-import { buildHierarchy } from '../core/hierarchy';
+import { buildHierarchy, findByPath, pathChain } from '../core/hierarchy';
 import { buildGraph } from '../core/graph';
 import type { Graph } from '../core/graph';
 
@@ -72,6 +72,42 @@ function fixtureGraph(opts: { collapsed?: string[] } = {}): Graph {
   index.addFile('/w/top.v', SRC);
   const h = buildHierarchy(index, 'top', { maxDepth: 8 })!;
   return buildGraph(index, h.root, { maxDepth: 8, maxNodes: 500, showContainment: true, ...opts });
+}
+
+/**
+ * A graph rooted at `top.u_mid` with up to `shown` levels of the containing
+ * module chain above it, exactly the way GraphPanel.refresh() slices it.
+ */
+function ancestorGraph(shown: number): Graph {
+  const index = new HdlIndex();
+  index.addFile('/w/top.v', SRC);
+  const h = buildHierarchy(index, 'top', { maxDepth: 8 })!;
+  const root = findByPath(h.root, 'top.u_mid')!;
+  const chain = pathChain(h.root, root.path).slice(0, -1);
+  const first = Math.max(0, chain.length - shown);
+  return buildGraph(index, root, {
+    maxDepth: 8,
+    maxNodes: 500,
+    showContainment: true,
+    ancestors: chain.slice(first),
+  });
+}
+
+/**
+ * A graph rooted at `top` either with just the root box (no descendants) or
+ * with the usual tall tree, matching the two shapes GraphPanel.refresh()
+ * builds around a root whose children are hidden or shown.
+ */
+function rootGraph(withChildren: boolean): Graph {
+  const index = new HdlIndex();
+  index.addFile('/w/top.v', SRC);
+  const h = buildHierarchy(index, 'top', { maxDepth: 8 })!;
+  return buildGraph(index, h.root, {
+    maxDepth: 8,
+    maxNodes: 500,
+    showContainment: true,
+    showDescendants: withChildren,
+  });
 }
 
 type Listener = (ev: Record<string, unknown>) => void;
@@ -202,7 +238,16 @@ before(async () => {
   SCRIPT = mod.SCRIPT;
 });
 
-function startPanel(graph: Graph, opts: { focus?: string; collapsed?: string[] } = {}) {
+function startPanel(
+  graph: Graph,
+  opts: {
+    focus?: string;
+    collapsed?: string[];
+    ancestorsShown?: number;
+    ancestorsLeft?: number;
+    descendantsShown?: number;
+  } = {},
+) {
   const posted: Record<string, unknown>[] = [];
   const svg = new FakeEl('svg');
   const elements: Record<string, FakeEl> = {
@@ -252,6 +297,9 @@ function startPanel(graph: Graph, opts: { focus?: string; collapsed?: string[] }
     graph,
     focus: opts.focus,
     collapsed: opts.collapsed ?? [],
+    ancestorsShown: opts.ancestorsShown ?? 0,
+    ancestorsLeft: opts.ancestorsLeft ?? 0,
+    descendantsShown: opts.descendantsShown ?? 0,
   });
   const api = (svg as unknown as { __api: PanelApi }).__api;
   return {
@@ -398,6 +446,91 @@ test('a hierarchy-collapsed module keeps its box, marked and without children', 
   assert.equal(mid.els.length, 1);
   const mark = find(mid.el, (e) => e.tagName === 'text' && e.textContent === '+');
   assert.ok(mark, 'the collapsed box is marked with a +');
+});
+
+test('containing modules are hidden and revealed by + / -', () => {
+  // One ancestor above the root is available but not drawn yet.
+  const p = startPanel(ancestorGraph(0), { ancestorsShown: 0, ancestorsLeft: 1 });
+
+  assert.ok(!p.api._els!.groups.some((gd) => gd.g.key === 'top'), 'the parent module is not drawn yet');
+  const root = p.group('top.u_mid');
+  const plus = find(root.el, (e) => e.tagName === 'text' && e.textContent === '+' && e.classList.contains('chev'));
+  assert.ok(plus, 'the chain-top module wears a + to reveal its parent');
+
+  fire(plus!, 'click');
+  const msg = p.posted.find((m) => m.type === 'ancestors');
+  assert.ok(msg, 'a ancestors message was posted');
+  assert.equal(msg!.shown, 1);
+});
+
+test('+ brings the parent module in and - tucks it back', () => {
+  // The parent is now drawn; clicking the + again must have asked for one more
+  // level beyond it, i.e. a chain that has something still above.
+  const g = ancestorGraph(1);
+  const p = startPanel(g, { ancestorsShown: 1, ancestorsLeft: 1 });
+
+  assert.ok(p.group('top'), 'the nearest containing module is drawn');
+  const top = p.group('top');
+  const up = find(top.el, (e) => e.tagName === 'text' && e.textContent === '+' && e.classList.contains('chev'));
+  assert.ok(up, 'top has another + because one more level is hidden above it');
+  fire(up!, 'click');
+  assert.equal(p.posted.find((m) => m.type === 'ancestors')?.shown, 2);
+});
+
+test('a fully-revealed chain has no + but a - to fold the parent', () => {
+  const p = startPanel(ancestorGraph(1), { ancestorsShown: 1, ancestorsLeft: 0 });
+
+  const top = p.group('top');
+  const plus = find(top.el, (e) => e.tagName === 'text' && e.textContent === '+' && e.classList.contains('chev'));
+  assert.equal(plus, undefined, 'nothing is left above the chain top, so no +');
+  const minus = find(top.el, (e) => e.tagName === 'text' && e.textContent === '−' && e.classList.contains('chev'));
+  assert.ok(minus, 'the chain top wears a - to hide the containing module');
+
+  fire(minus!, 'click');
+  assert.equal(p.posted.find((m) => m.type === 'ancestors')?.shown, 0);
+});
+
+test('children start hidden and the + on the right edge brings them in at once', () => {
+  // A root whose descendants are not built, exactly what the extension builds
+  // the first time a module is focused.
+  const p = startPanel(rootGraph(false));
+
+  const keys = p.api._els!.groups.map((gd) => gd.g.key);
+  assert.deepEqual(keys, ['top'], 'only the root box is drawn, no children');
+  const root = p.group('top');
+  assert.equal(root.g.nets.length, 4, 'the root box shows its own ports, not its childrens wires');
+  const plus = find(root.el, (e) => e.tagName === 'text' && e.textContent === '+' && e.classList.contains('rm'));
+  assert.ok(plus, 'the root wears a + on its right edge when children are hidden');
+
+  fire(plus!, 'click');
+  assert.equal(p.posted.find((m) => m.type === 'descendants')?.shown, 1);
+});
+
+test('the - on the right edge tucks the whole subtree back', () => {
+  const p = startPanel(rootGraph(true), { descendantsShown: 1 });
+
+  const root = p.group('top');
+  const minus = find(root.el, (e) => e.tagName === 'text' && e.textContent === '−' && e.classList.contains('rm'));
+  assert.ok(minus, 'the root wears a - on its right edge while children are shown');
+
+  fire(minus!, 'click');
+  assert.equal(p.posted.find((m) => m.type === 'descendants')?.shown, 0);
+});
+
+test('a leaf root has no mark on its right edge', () => {
+  const index = new HdlIndex();
+  index.addFile('/w/top.v', SRC);
+  const h = buildHierarchy(index, 'top', { maxDepth: 8 })!;
+  const leaf = findByPath(h.root, 'top.u_leaf')!;
+  const g = buildGraph(index, leaf, {
+    maxDepth: 8, maxNodes: 500, showContainment: true, showDescendants: false,
+  });
+  const p = startPanel(g);
+
+  const root = p.group('top.u_leaf');
+  assert.equal(root.g.head!.childCount, 0, 'the leaf instantiates nothing');
+  const mark = find(root.el, (e) => e.tagName === 'text' && e.classList.contains('rm'));
+  assert.equal(mark, undefined, 'nothing to reveal, so no right-edge mark');
 });
 
 test('searching a signal brings its whole module group along', () => {

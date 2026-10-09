@@ -28,7 +28,20 @@ export class GraphPanel {
    * context of who instantiates it.
    */
   private chainRoot: HierarchyNode;
+  /**
+   * The full ancestor chain from `chainRoot` down to the root's parent. The
+   * graph starts without it and the webview's `+` walks up one entry at a time,
+   * so a mid-tree module is not shown with its whole containing context at once.
+   */
   private ancestors: HierarchyNode[] = [];
+  /** How many of `ancestors` (from the parent upward) are currently drawn. */
+  private ancestorsShown = 0;
+  /**
+   * Whether the webview asked for the root's descendants. Starts off: the graph
+   * opens as just the root box and the right-side `+` brings the whole subtree
+   * in at once.
+   */
+  private descendantsShown = 0;
   /**
    * Instance paths the user collapsed in the webview. Sent back with every
    * request so the graph itself shrinks: nothing below a collapsed box is
@@ -97,6 +110,10 @@ export class GraphPanel {
     this.node = node;
     this.focus = focus ?? node.path;
     this.ancestors = pathChain(this.chainRoot, node.path).slice(0, -1);
+    // A fresh root starts with no containing modules and no children; the plus
+    // signs at its edges reveal them.
+    this.ancestorsShown = 0;
+    this.descendantsShown = 0;
     // A collapse that would hide the new root (or anything on its ancestor
     // chain) is meaningless once we zoom there - drop it instead of drawing an
     // empty graph.
@@ -123,10 +140,15 @@ export class GraphPanel {
     if (!this.node) {
       return;
     }
+    // The chain is stored top-down; reveal from the root upward, so the last
+    // `ancestorsShown` entries are the ones nearest the graph root.
+    const first = Math.max(0, this.ancestors.length - this.ancestorsShown);
+    const shown = this.ancestors.slice(first);
     const graph = this.svc.graphFor(this.node, {
       maxDepth: 8,
-      ancestors: this.ancestors,
+      ancestors: shown,
       collapsed: [...this.collapsed],
+      showDescendants: this.descendantsShown > 0,
     });
     this.panel.title = `Connectivity: ${graph.root}`;
     await this.panel.webview.postMessage({
@@ -134,6 +156,9 @@ export class GraphPanel {
       graph,
       focus: this.focus,
       collapsed: [...this.collapsed],
+      ancestorsShown: shown.length,
+      ancestorsLeft: this.ancestors.length - shown.length,
+      descendantsShown: this.descendantsShown,
     });
     this.panel.webview.postMessage({ type: 'stats', text: statsLine(graph) });
   }
@@ -179,6 +204,20 @@ export class GraphPanel {
         void this.refresh();
         return;
       }
+      case 'ancestors': {
+        // How many containing modules to draw, clamped to the chain actually
+        // available above the root.
+        const want = Number(msg.shown ?? 0);
+        const n = Number.isFinite(want) ? Math.round(want) : 0;
+        this.ancestorsShown = Math.max(0, Math.min(this.ancestors.length, n));
+        void this.refresh();
+        return;
+      }
+      case 'descendants': {
+        this.descendantsShown = msg.shown ? 1 : 0;
+        void this.refresh();
+        return;
+      }
       case 'error':
         void vscode.window.showErrorMessage(`HDL: ${String(msg.message ?? 'unknown error')}`);
         return;
@@ -220,7 +259,7 @@ export class GraphPanel {
   <span class="k out">output port</span>
   <span class="k inout">inout</span>
   <span class="k bad">unresolved</span>
-  <span class="hint">chevron folds a module's signals · double-click a header collapses its subtree</span>
+  <span class="hint">chevron folds a module's signals · double-click a header collapses its subtree · a + on the left edge reveals the module above, a + on the right edge the modules below</span>
 </footer>
 <script>${SCRIPT}</script>
 </body>
@@ -334,6 +373,10 @@ export const SCRIPT = String.raw`
   // The picture, grouped the way it is drawn: one group per module scope, the
   // instance as the header and the signals the scope declares as rows below it.
   let groups = [];
+  // Key of the topmost module box, recomputed every draw; its left edge carries
+  // the plus/minus marks that reveal or hide the containing modules above the
+  // graph root.
+  let chainTop = null;
   // node id -> its group, for edge anchoring and drag.
   let gm = new Map();
   // Layout state per group, keyed by scope path. A group is rebuilt from the
@@ -345,6 +388,15 @@ export const SCRIPT = String.raw`
   let folded = new Set();
   // Instance paths the extension told us are hierarchy-collapsed.
   let collapsed = new Set();
+  // How many containing modules the extension is currently drawing, and how
+  // many more are available above the top one. The chain is hidden by default;
+  // the plus sign on the topmost module walks up one level at a time.
+  let ancShown = 0;
+  let ancLeft = 0;
+  // Whether the root's descendants are drawn. Also hidden by default: the right
+  // edge of the root box carries the plus that brings the whole subtree in at
+  // once (and the minus that tucks it back).
+  let descShown = 0;
   let view = { x: 0, y: 0, k: 1 };
   // Whether the user has panned/zoomed/dragged since the last graph, which
   // stops the initial fit-to-view from yanking the graph out from under them.
@@ -428,6 +480,24 @@ export const SCRIPT = String.raw`
   function headerParts(g) {
     if (!g.head) return { title: scopeLabel(g.key), mod: '' };
     return { title: g.head.label, mod: g.head.detail || g.head.moduleName || '' };
+  }
+
+  /**
+   * The module box at the top of the ancestor chain: the one with no drawn
+   * parent above it. That is where the plus sign that reveals the next containing
+   * module lives, on its left edge. Only instance boxes count; a scope-only group
+   * (its instance was filtered away) can never be the top of the chain.
+   */
+  function chainTopKey(gs) {
+    let top = null;
+    for (const g of gs) {
+      if (!g.head) continue;
+      const d = g.depth || 0;
+      if (!top || d < top.depth || (d === top.depth && g.key < top.key)) {
+        top = { key: g.key, depth: d };
+      }
+    }
+    return top ? top.key : null;
   }
 
   function sizeGroup(g) {
@@ -719,6 +789,34 @@ export const SCRIPT = String.raw`
     scheduleDraw();
   }
 
+  /**
+   * Bring the whole subtree below the root in, or tuck it away, in one click.
+   * The extension rebuilds the graph without descendants and sends the new
+   * model back; the local flag moves first so the mark on the right edge of the
+   * root box reacts on the spot.
+   */
+  function showDescendants(next) {
+    if (next === descShown) return;
+    descShown = next;
+    vscode.postMessage({ type: 'descendants', shown: next });
+    scheduleDraw();
+  }
+
+  /**
+   * Walk the containing-module chain up or down by one level. The extension
+   * rebuilds the graph with that many ancestors and sends the authoritative
+   * counts back; the local numbers move first so the box reacts on the spot.
+   */
+  function showAncestors(delta) {
+    const total = ancShown + ancLeft;
+    const next = Math.max(0, Math.min(total, ancShown + delta));
+    if (next === ancShown) return;
+    ancShown = next;
+    ancLeft = total - next;
+    vscode.postMessage({ type: 'ancestors', shown: next });
+    scheduleDraw();
+  }
+
   /** The row inside an instance's group that names the port the edge connects. */
   function portRow(g, e) {
     if (e.kind !== 'port') return null;
@@ -775,6 +873,7 @@ export const SCRIPT = String.raw`
     nodes = sel.n; edges = sel.e;
     if (!nodes.length) return;
     groups = buildGroups(nodes);
+    chainTop = chainTopKey(groups);
     if (cbHier.checked) {
       layoutHierarchical(groups);
       if (!interacted) fitView();
@@ -834,6 +933,18 @@ export const SCRIPT = String.raw`
     applyHighlight();
   }
 
+  /** A clickable mark that sits on a box edge, outside the box outline. */
+  function sideMark(parent, x, y, glyph, tip, onClick, cls) {
+    const t = el('text', { x, y, 'text-anchor': 'middle', class: 'chev ' + cls });
+    t.textContent = glyph;
+    t.addEventListener('mousedown', (ev) => ev.stopPropagation());
+    t.addEventListener('click', (ev) => { ev.stopPropagation(); onClick(); });
+    t.addEventListener('mouseenter', (ev) => showTip(ev, tip));
+    t.addEventListener('mousemove', moveTip);
+    t.addEventListener('mouseleave', hideTip);
+    parent.appendChild(t);
+  }
+
   /** One module box: header for the instance, one row per signal of its scope. */
   function drawGroup(g) {
     const isFolded = folded.has(g.key);
@@ -858,26 +969,43 @@ export const SCRIPT = String.raw`
 
     const hasChev = g.nets.length > 0;
     const hasPlus = !!(g.head && g.head.childCount && collapsed.has(g.head.path));
+    const isChainTop = chainTop !== null && g.key === chainTop;
+    const isRootBox = !!g.head && model !== null && g.key === model.root;
+    const hasKids = isRootBox && !!g.head.childCount;
+    const marks = [];
+    if (hasChev && !hasPlus) {
+      marks.push({
+        glyph: isFolded ? '▸' : '▾',
+        tip: (isFolded ? 'Show ' : 'Fold ') + g.nets.length + ' signal(s)',
+        onClick: () => toggleFold(g),
+      });
+    }
     if (hasPlus) {
-      const plus = el('text', { x: left + 13, y: hy + 4, 'text-anchor': 'middle', class: 'chev' });
-      plus.textContent = '+';
-      headg.appendChild(plus);
-    } else if (hasChev) {
-      const chev = el('text', { x: left + 13, y: hy + 4, 'text-anchor': 'middle', class: 'chev' });
-      chev.textContent = isFolded ? '▸' : '▾';
-      chev.addEventListener('mousedown', (ev) => ev.stopPropagation());
-      chev.addEventListener('click', (ev) => { ev.stopPropagation(); toggleFold(g); });
-      chev.addEventListener('mouseenter', (ev) => showTip(ev, (isFolded ? 'Show ' : 'Fold ') + g.nets.length + ' signal(s)'));
-      chev.addEventListener('mousemove', moveTip);
-      chev.addEventListener('mouseleave', hideTip);
-      headg.appendChild(chev);
+      marks.push({
+        glyph: '+',
+        tip: 'Subtree collapsed - double-click the header to expand it',
+        onClick: null,
+      });
+    }
+    for (let i = 0; i < marks.length; i++) {
+      const m = marks[i];
+      const t = el('text', { x: left + 13 + i * 17, y: hy + 4, 'text-anchor': 'middle', class: 'chev' });
+      t.textContent = m.glyph;
+      if (m.onClick) {
+        t.addEventListener('mousedown', (ev) => ev.stopPropagation());
+        t.addEventListener('click', (ev) => { ev.stopPropagation(); m.onClick(); });
+      }
+      t.addEventListener('mouseenter', (ev) => showTip(ev, m.tip));
+      t.addEventListener('mousemove', moveTip);
+      t.addEventListener('mouseleave', hideTip);
+      headg.appendChild(t);
     }
 
     const p = headerParts(g);
-    const markW = hasChev || hasPlus ? 30 : 16;
+    const markW = marks.length ? 9 + marks.length * 17 : 16;
     const modW = p.mod ? labelW(p.mod, 10.5) + 8 : 0;
     const avail = Math.max(4, Math.floor((g.w - markW - modW) / 6.6));
-    const title = el('text', { x: left + markW - 4, y: hy + 4, 'text-anchor': 'start', class: 'hd' });
+    const title = el('text', { x: left + markW, y: hy + 4, 'text-anchor': 'start', class: 'hd' });
     title.textContent = truncate(p.title, avail);
     headg.appendChild(title);
     if (p.mod) {
@@ -914,6 +1042,27 @@ export const SCRIPT = String.raw`
         grp.appendChild(rowg);
         els.push({ n, el: rowg });
       }
+    }
+    // The left edge of the topmost box walks up the containing-module chain,
+    // one level per click; the right edge of the root box brings the whole
+    // subtree below it in (or tucks it back) in one click. These are collected
+    // here so they land after the header in the DOM, letting the chevron be
+    // the first 'chev' element a test or query finds.
+    const canUp = isChainTop && ancLeft > 0;
+    const canDown = isChainTop && ancShown > 0;
+    if (canUp) {
+      sideMark(grp, left - 12, hy + 4, '+',
+        ancLeft === 1 ? 'Show the containing module' : 'Show the containing module (' + ancLeft + ' above)',
+        () => showAncestors(1), 'lm');
+    }
+    if (canDown) {
+      sideMark(grp, left - 30, hy + 4, '−', 'Hide the containing module',
+        () => showAncestors(-1), 'lm');
+    }
+    if (hasKids) {
+      sideMark(grp, right + 12, hy + 4, descShown ? '−' : '+',
+        descShown ? 'Hide the child modules' : 'Show the child modules',
+        () => showDescendants(descShown ? 0 : 1), 'rm');
     }
     return { el: grp, g, els };
   }
@@ -1105,6 +1254,9 @@ export const SCRIPT = String.raw`
       // The extension owns the collapse set once it has answered; a message
       // without the field (older hosts) keeps whatever we toggled locally.
       if (msg.collapsed !== undefined) collapsed = new Set(msg.collapsed || []);
+      ancShown = Number(msg.ancestorsShown ?? 0) || 0;
+      ancLeft = Number(msg.ancestorsLeft ?? 0) || 0;
+      descShown = Number(msg.descendantsShown ?? 0) || 0;
       // A new model may settle differently under the force layout. The
       // hierarchy layout ignores the flag and re-columns on the next frame,
       // while a group the user dragged keeps its position either way.
