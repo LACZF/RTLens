@@ -554,12 +554,93 @@ export const SCRIPT = String.raw`
       sizeGroup(g);
       gs.push(g);
     }
+    // Rows ordered by direction and then name keep each box tidy but ignore
+    // what hangs off every row, so the wires between two boxes fan out and
+    // cross. Reorder: a row sorts by the mean position (barycenter) of the rows
+    // it connects to in other boxes, and we re-run until it stabilises, because
+    // moving a row here lets its partners move in their boxes too.
+    orderRowsForConnections(gs);
     gm = new Map();
     for (const g of gs) {
       if (g.head) gm.set(g.head.id, g);
       for (const n of g.nets) gm.set(n.id, g);
     }
     return gs;
+  }
+
+  /**
+   * Align the rows of every box with the boxes they wire into, so the wires
+   * between two modules do not criss-cross.
+   *
+   * A wire joins exactly two rows: the driving net of the parent scope and the
+   * same-named port row inside the child. Each row is given the mean y-rank
+   * (barycenter) of the rows it shares wires with, and both ends of every wire
+   * feed the pair - a child port moves to meet its parent net and the parent
+   * net meets it back. Sorting each group's rows by that value, and re-running
+   * the sweep until it stabilises, lines related rows up across boxes. Rows
+   * with no cross-box wire keep their direction-by-name order, so an isolated
+   * signal does not wander off.
+   */
+  function orderRowsForConnections(gs) {
+    // Node id -> the group box holding it. Local to this pass: gm is rebuilt
+    // after buildGroups returns, and ordering must not depend on a stale map.
+    const byNode = new Map();
+    for (const g of gs) {
+      if (g.head) byNode.set(g.head.id, g);
+      for (const n of g.nets) byNode.set(n.id, g);
+    }
+    const sweep = () => {
+      const rowRank = new Map();
+      const refresh = () => {
+        rowRank.clear();
+        for (const g of gs) { for (let i = 0; i < g.nets.length; i++) rowRank.set(g.nets[i].id, i); }
+      };
+      refresh();
+      // A visible wire joins two rows, one on each box: the driving net of the
+      // parent scope and the same-named port row inside the child. Both ends
+      // share the pair, so a child port moves to meet its parent net, not just
+      // the other way around.
+      const links = new Map();
+      for (const g of gs) { for (const n of g.nets) links.set(n.id, []); }
+      for (const e of edges) {
+        if (e.kind !== 'port') continue;
+        const a = byNode.get(e.from), b = byNode.get(e.to);
+        if (!a || !b || a === b) continue;
+        const ra = a.nets.find((n) => n.id === e.from);
+        const rb = portRow(b, e);
+        if (ra && rb && rb.id !== ra.id) {
+          links.get(ra.id).push(rb.id);
+          links.get(rb.id).push(ra.id);
+        }
+      }
+      const bary = new Map();
+      for (const g of gs) {
+        for (const n of g.nets) {
+          let sum = 0, count = 0;
+          for (const pid of links.get(n.id) || []) {
+            const r = rowRank.get(pid);
+            if (r != null) { sum += r; count++; }
+          }
+          bary.set(n.id, count ? sum / count : null);
+        }
+        g.nets.sort((a, b) => {
+          const ba = bary.get(a.id), bb = bary.get(b.id);
+          if (ba != null && bb != null && ba !== bb) return ba - bb;
+          if (ba != null && bb == null) return -1;
+          if (ba == null && bb != null) return 1;
+          const da = DIR_ORDER[a.direction] == null ? 3 : DIR_ORDER[a.direction];
+          const db = DIR_ORDER[b.direction] == null ? 3 : DIR_ORDER[b.direction];
+          if (da !== db) return da - db;
+          return (a.label || '') < (b.label || '') ? -1 : (a.label || '') > (b.label || '') ? 1 : 0;
+        });
+        // The sort just moved this group's rows; later groups must read the
+        // new ranks, and the next sweep starts from here too.
+        refresh();
+      }
+    };
+    // A handful of sweeps is enough for a layout this small; beyond that the
+    // relative order of the connected rows has long settled.
+    for (let i = 0; i < 6; i++) sweep();
   }
 
   function ensurePos(g) {

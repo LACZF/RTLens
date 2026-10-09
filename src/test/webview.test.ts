@@ -567,3 +567,45 @@ test('searching a signal brings its whole module group along', () => {
   assert.equal(p.group('top').g.nets.length, 6, 'the module keeps every one of its signals');
   assert.equal(p.group('top.u_leaf').g.nets.length, 4);
 });
+
+test('wires between two modules do not cross', () => {
+  const p = startPanel(fixtureGraph());
+  const groups = p.api._els!.groups;
+  // Every drawn wire end, resolved to the box and row it touches.
+  const wires = p.api._els!.edgeEls
+    .filter((x) => x.e.kind === 'port')
+    .map((x) => {
+      const fromBox = groups.find((gd) => gd.g.nets.some((n) => n.id === x.e.from));
+      const toBox = groups.find((gd) => gd.g.head?.id === x.e.to);
+      const fromRow = fromBox?.g.nets.find((n) => n.id === x.e.from);
+      const toRow = toBox?.g.nets.find((n) => n.label === x.e.port);
+      if (!fromBox || !toBox || !fromRow || !toRow) return null;
+      return {
+        key: fromBox.g.key + ':' + toBox.g.key,
+        a: fromBox.g.nets.indexOf(fromRow),
+        b: toBox.g.nets.indexOf(toRow),
+      };
+    })
+    .filter((w): w is { key: string; a: number; b: number } => w !== null);
+  // Two wires that share a pair of boxes must keep their rows in the same
+  // order on both sides, or the wires would cross.
+  const byPair = new Map<string, { a: number; b: number }[]>();
+  for (const w of wires) {
+    const list = byPair.get(w.key) ?? [];
+    list.push(w);
+    byPair.set(w.key, list);
+  }
+  for (const pair of byPair.values()) {
+    for (let i = 0; i < pair.length; i++) {
+      for (let j = i + 1; j < pair.length; j++) {
+        const u = pair[i], v = pair[j];
+        // A crossing is a strict order flip on the two sides; sharing a row
+        // (a fan-out, or two wires meeting mid-bundle) is not a crossing.
+        assert.ok(
+          !((u.a - v.a < 0 && u.b - v.b > 0) || (u.a - v.a > 0 && u.b - v.b < 0)),
+          `rows ${u.a}/${u.b} and ${v.a}/${v.b} cross`,
+        );
+      }
+    }
+  }
+});
