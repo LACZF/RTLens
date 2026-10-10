@@ -1056,7 +1056,11 @@ export const SCRIPT = String.raw`
     }));
 
     const hasChev = g.nets.length > 0;
-    const hasExpand = !!(g.head && g.head.childCount);
+    // Only the focus subtree owns the per-module +/- marks: an ancestor box is
+    // context, and its own children are not part of this graph.
+    const inFocus = !!(g.head && model && (g.head.path === model.root
+      || (model.root !== '' && g.head.path.indexOf(model.root + '.') === 0)));
+    const hasExpand = !!(g.head && g.head.childCount && inFocus);
     const isExpanded = hasExpand && expanded.has(g.head.path);
     const hasPlus = hasExpand && collapsed.has(g.head.path);
     const isChainTop = chainTop !== null && g.key === chainTop;
@@ -1360,6 +1364,8 @@ export const SCRIPT = String.raw`
       // without the field (older hosts) keeps whatever we toggled locally.
       if (msg.collapsed !== undefined) collapsed = new Set(msg.collapsed || []);
       expanded = new Set(msg.expanded || []);
+      ancShown = Number(msg.ancestorsShown ?? 0) || 0;
+      ancLeft = Number(msg.ancestorsLeft ?? 0) || 0;
       // A new model may settle differently under the force layout. The
       // hierarchy layout ignores the flag and re-columns on the next frame,
       // while a group the user dragged keeps its position either way.

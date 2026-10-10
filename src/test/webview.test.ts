@@ -307,7 +307,8 @@ opts: {
     posted,
     group: (k: string) => api._els!.groups.find((gd) => gd.g.key === k)!,
     search: () => elements.search,
-    edge: (from: string, to: string) => api._els!.edgeEls.find((ee) => ee.e.from === from && ee.e.to === to)!,
+    edge: (to: string, port: string) =>
+      api._els!.edgeEls.find((ee) => ee.e.to === to && ee.e.port === port)!,
   };
 }
 
@@ -477,9 +478,8 @@ test('a fully-revealed chain has no + but a - to fold the parent', () => {
 });
 
 test('children start hidden and the + on the right edge reveals them one level per click', () => {
-  // A root whose descendants are not built, exactly what the extension builds
-  // the first time a module is focused. The fixture is two levels below `top`
-  // (u_mid has u_inner), so the extension reports two levels still available.
+  // The extension builds a root with nothing expanded; the right-edge + then
+  // reveals only that module's own direct children.
   const p = startPanel(rootGraph([]), { expanded: [] });
 
   const keys = p.api._els!.groups.map((gd) => gd.g.key);
@@ -490,32 +490,33 @@ test('children start hidden and the + on the right edge reveals them one level p
   assert.ok(plus, 'the root wears a + on its right edge when children are hidden');
 
   fire(plus!, 'click');
-  assert.equal(p.posted.find((m) => m.type === 'descendants')?.shown, undefined);
   const msg = p.posted.find((m) => m.type === 'descendants');
   assert.equal(msg?.path, 'top');
-  assert.equal(msg?.expanded, false);
+  assert.equal(msg?.expanded, true, 'the + asks for this module children');
 });
 
-test('each click reveals exactly one more level of children', () => {
-  // One level shown: the root and its direct children are there, but u_mid's
-  // own child u_inner is still out - and the root still wears a + because one
-  // more level remains below it.
+test('each module reveals only its own next level of children', () => {
+  // The root is expanded, so it wears a - and its direct children are drawn;
+  // each child that still hides a level wears its own + to reveal it.
   const p = startPanel(rootGraph(['top']), { expanded: ['top'] });
 
   const keys = p.api._els!.groups.map((gd) => gd.g.key).sort();
   assert.deepEqual(keys, ['top', 'top.u_dangling', 'top.u_leaf', 'top.u_mid', 'top.u_missing']);
-  assert.equal(p.group('top.u_mid').g.nets.length, 4, 'the leaf at the revealed level shows its own ports only');
-  const root = p.group('top');
-  const plus = find(root.el, (e) => e.tagName === 'text' && e.textContent === '+' && e.classList.contains('rm'));
-  assert.ok(plus, 'a deeper level remains, so the + is still on the right edge');
-  const minus = find(root.el, (e) => e.tagName === 'text' && e.textContent === '−' && e.classList.contains('rm'));
-  assert.ok(minus, 'the - sits beside the + once any level is shown');
+  assert.equal(p.group('top.u_mid').g.nets.length, 4, 'the child at the revealed level shows its own ports only');
 
+  const root = p.group('top');
+  assert.ok(find(root.el, (e) => e.tagName === 'text' && e.textContent === '−' && e.classList.contains('rm')),
+    'the expanded root wears a - on its right edge');
+  assert.equal(find(root.el, (e) => e.tagName === 'text' && e.textContent === '+' && e.classList.contains('rm')),
+    undefined, 'the expanded root has nothing left to reveal');
+
+  const mid = p.group('top.u_mid');
+  const plus = find(mid.el, (e) => e.tagName === 'text' && e.textContent === '+' && e.classList.contains('rm'));
+  assert.ok(plus, 'the child with a hidden level wears its own +');
   fire(plus!, 'click');
-  assert.equal(p.posted.find((m) => m.type === 'descendants')?.shown, undefined);
-  const msg = p.posted.find((m) => m.type === 'descendants');
-  assert.equal(msg?.path, 'top');
-  assert.equal(msg?.expanded, false);
+  const msg = p.posted.find((m) => m.type === 'descendants' && m.path === 'top.u_mid');
+  assert.ok(msg, 'the click asks for the child module specifically');
+  assert.equal(msg?.expanded, true);
 });
 
 test('the - on the right edge tucks one level back', () => {
