@@ -109,6 +109,50 @@ function rootGraph(expanded: string[]): Graph {
   });
 }
 
+const CHIP_SRC = `
+module chip (input wire [7:0] data, output wire [7:0] out, output wire ok);
+  top #(.W (8)) u_top (.din (data), .other (data), .dout (out), .flag (ok));
+endmodule
+module top #(parameter int W = 8) (
+  input  wire [W-1:0] din,
+  input  wire [W-1:0] other,
+  output wire [W-1:0] dout,
+  output wire         flag
+);
+  wire [W-1:0] mid_out;
+  wire         carry;
+  mid #(.W (W)) u_mid (.x (din), .y (mid_out), .cout (carry));
+endmodule
+module mid #(parameter int W = 8) (
+  input  wire [W-1:0] x,
+  output wire [W-1:0] y,
+  output wire         cout
+);
+  assign y = x;
+  assign cout = 1'b0;
+endmodule
+`;
+
+/**
+ * A graph rooted at `chip.u_top.u_mid` with the containing chain chip -> top
+ * cut to `shown` parents, so the per-box ancestor marks have two levels to
+ * walk instead of the single level the shared fixture offers.
+ */
+function deepAncestorGraph(shown: number): Graph {
+  const index = new HdlIndex();
+  index.addFile('/w/chip.v', CHIP_SRC);
+  const h = buildHierarchy(index, 'chip', { maxDepth: 8 })!;
+  const root = findByPath(h.root, 'chip.u_top.u_mid')!;
+  const chain = pathChain(h.root, root.path).slice(0, -1);
+  const first = Math.max(0, chain.length - shown);
+  return buildGraph(index, root, {
+    maxDepth: 8,
+    maxNodes: 500,
+    showContainment: true,
+    ancestors: chain.slice(first),
+  });
+}
+
 type Listener = (ev: Record<string, unknown>) => void;
 
 function event(extra: Record<string, unknown> = {}): Record<string, unknown> {
@@ -464,17 +508,39 @@ test('+ brings the parent module in and - tucks it back', () => {
   assert.equal(p.posted.find((m) => m.type === 'ancestors')?.shown, 2);
 });
 
-test('a fully-revealed chain has no + but a - to fold the parent', () => {
+test('a fully-revealed chain has no + but the focus folds its parent away', () => {
   const p = startPanel(ancestorGraph(1), { ancestorsShown: 1, ancestorsLeft: 0 });
 
   const top = p.group('top');
-  const plus = find(top.el, (e) => e.tagName === 'text' && e.textContent === '+' && e.classList.contains('chev'));
-  assert.equal(plus, undefined, 'nothing is left above the chain top, so no +');
-  const minus = find(top.el, (e) => e.tagName === 'text' && e.textContent === '−' && e.classList.contains('chev'));
-  assert.ok(minus, 'the chain top wears a - to hide the containing module');
+  const plus = find(top.el, (e) => e.tagName === 'text' && e.textContent === '+' && e.classList.contains('lm'));
+  assert.equal(plus, undefined, 'nothing is left above the chain, so the ancestor wears no +');
+  const minus = find(top.el, (e) => e.tagName === 'text' && e.textContent === '−' && e.classList.contains('lm'));
+  assert.equal(minus, undefined, 'the ancestor has no parent of its own to fold');
 
-  fire(minus!, 'click');
+  const root = p.group('top.u_mid');
+  const fold = find(root.el, (e) => e.tagName === 'text' && e.textContent === '−' && e.classList.contains('lm'));
+  assert.ok(fold, 'each box folds its own parent: the focus wears a - while its parent is shown');
+  fire(fold!, 'click');
   assert.equal(p.posted.find((m) => m.type === 'ancestors')?.shown, 0);
+});
+
+test('each ancestor box wears its own left + or - for its own parent', () => {
+  // chip > top > u_mid: with one ancestor shown, the focus folds its shown
+  // parent with a - while the parent ancestor still wears a + of its own to
+  // reveal the chip above - nothing is threaded through a single chain-top box.
+  const p = startPanel(deepAncestorGraph(1), { ancestorsShown: 1, ancestorsLeft: 1 });
+
+  const mid = p.group('chip.u_top.u_mid');
+  const fold = find(mid.el, (e) => e.tagName === 'text' && e.textContent === '−' && e.classList.contains('lm'));
+  assert.ok(fold, 'the focus folds its shown parent with a left -');
+  assert.equal(find(mid.el, (e) => e.tagName === 'text' && e.textContent === '+' && e.classList.contains('lm')),
+    undefined, 'the focus has nothing of its own above to reveal');
+
+  const top = p.group('chip.u_top');
+  const reveal = find(top.el, (e) => e.tagName === 'text' && e.textContent === '+' && e.classList.contains('lm'));
+  assert.ok(reveal, 'the ancestor whose parent is still hidden wears its own left +');
+  fire(reveal!, 'click');
+  assert.equal(p.posted.find((m) => m.type === 'ancestors')?.shown, 2, 'only that one level is asked for');
 });
 
 test('children start hidden and the + on the right edge reveals them one level per click', () => {

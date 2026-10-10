@@ -382,10 +382,10 @@ export const SCRIPT = String.raw`
   // The picture, grouped the way it is drawn: one group per module scope, the
   // instance as the header and the signals the scope declares as rows below it.
   let groups = [];
-  // Key of the topmost module box, recomputed every draw; its left edge carries
-  // the plus/minus marks that reveal or hide the containing modules above the
-  // graph root.
-  let chainTop = null;
+  // The focus module's hierarchy depth; boxes at depth >= rootDepth belong to
+  // the focus subtree, while depth < rootDepth are its containing chain. Each
+  // such box wears its own left-edge +/- that steps its own parent a level.
+  let rootDepth = 0;
   // node id -> its group, for edge anchoring and drag.
   let gm = new Map();
   // Layout state per group, keyed by scope path. A group is rebuilt from the
@@ -492,24 +492,6 @@ export const SCRIPT = String.raw`
   function headerParts(g) {
     if (!g.head) return { title: scopeLabel(g.key), mod: '' };
     return { title: g.head.label, mod: g.head.detail || g.head.moduleName || '' };
-  }
-
-  /**
-   * The module box at the top of the ancestor chain: the one with no drawn
-   * parent above it. That is where the plus sign that reveals the next containing
-   * module lives, on its left edge. Only instance boxes count; a scope-only group
-   * (its instance was filtered away) can never be the top of the chain.
-   */
-  function chainTopKey(gs) {
-    let top = null;
-    for (const g of gs) {
-      if (!g.head) continue;
-      const d = g.depth || 0;
-      if (!top || d < top.depth || (d === top.depth && g.key < top.key)) {
-        top = { key: g.key, depth: d };
-      }
-    }
-    return top ? top.key : null;
   }
 
   function sizeGroup(g) {
@@ -891,17 +873,20 @@ export const SCRIPT = String.raw`
   }
 
   /**
-   * Walk the containing-module chain up or down by one level. The extension
-   * rebuilds the graph with that many ancestors and sends the authoritative
-   * counts back; the local numbers move first so the box reacts on the spot.
+   * Reveal or hide the containing chain so that the deepest next levels are
+   * drawn. Each module box controls its own level up: the box at depth u
+   * above the focus shows + to reveal its own parent (next = u+1) and - to
+   * fold its own parent away (next = u). The extension rebuilds the graph
+   * with that many ancestors and sends the authoritative counts back; the
+   * local numbers move first so the box reacts on the spot.
    */
-  function showAncestors(delta) {
+  function setAncestors(next) {
     const total = ancShown + ancLeft;
-    const next = Math.max(0, Math.min(total, ancShown + delta));
-    if (next === ancShown) return;
-    ancShown = next;
-    ancLeft = total - next;
-    vscode.postMessage({ type: 'ancestors', shown: next });
+    const n = Math.max(0, Math.min(total, next));
+    if (n === ancShown) return;
+    ancShown = n;
+    ancLeft = total - n;
+    vscode.postMessage({ type: 'ancestors', shown: n });
     scheduleDraw();
   }
 
@@ -961,7 +946,12 @@ export const SCRIPT = String.raw`
     nodes = sel.n; edges = sel.e;
     if (!nodes.length) return;
     groups = buildGroups(nodes);
-    chainTop = chainTopKey(groups);
+    // The focus root's hierarchy depth: the containing chain sits above it
+    // (up > 0 walking up), while revealed children sit below it (up < 0).
+    rootDepth = 0;
+    for (const g of groups) {
+      if (g.head && g.head.path === model.root) { rootDepth = g.depth || 0; break; }
+    }
     if (cbHier.checked) {
       layoutHierarchical(groups);
       if (!interacted) fitView();
@@ -1063,7 +1053,6 @@ export const SCRIPT = String.raw`
     const hasExpand = !!(g.head && g.head.childCount && inFocus);
     const isExpanded = hasExpand && expanded.has(g.head.path);
     const hasPlus = hasExpand && collapsed.has(g.head.path);
-    const isChainTop = chainTop !== null && g.key === chainTop;
     // Per-module expansion: every module with children can toggle its own subtree.
     const marks = [];
     if (hasChev && !hasPlus) {
@@ -1136,23 +1125,25 @@ export const SCRIPT = String.raw`
         els.push({ n, el: rowg });
       }
     }
-    // The left edge of the topmost box walks up the containing-module chain,
-    // one level per click; the right edge of the root box walks down the
-    // subtree the same way. These are collected here so they land after the
-    // header in the DOM, letting the chevron be the first 'chev' element a test
-    // or query finds.
-    // Left edge: ancestors control stays at chain top (keeping the existing
-    // behaviour for the containing-module chain for now).
-    const canUp = isChainTop && ancLeft > 0;
-    const canDown = isChainTop && ancShown > 0;
-    if (canUp) {
-      sideMark(grp, left - 12, hy + 4, '+',
-        ancLeft === 1 ? 'Show the containing module' : 'Show the containing module (' + ancLeft + ' above)',
-        () => showAncestors(1), 'lm');
-    }
-    if (canDown) {
-      sideMark(grp, left - 30, hy + 4, '−', 'Hide the containing module',
-        () => showAncestors(-1), 'lm');
+    // Every box of the containing chain (the focus root and each ancestor)
+    // carries its own left-edge +/− that steps its own parent one level at a
+    // time: + reveals the box's parent when it is still hidden, - folds it
+    // away when it is drawn. The right edge of every module box below the
+    // focus toggles that module's own children the same way. These are
+    // collected here so they land after the header in the DOM, letting the
+    // chevron be the first 'chev' element a test or query finds.
+    // Distance from the focus root, in hierarchy levels: 0 is the root itself,
+    // i > 0 are its containing modules, i < 0 are revealed children.
+    const up = g.head ? rootDepth - (g.depth || 0) : -1;
+    if (g.head && up >= 0) {
+      if (up < ancShown) {
+        sideMark(grp, left - 12, hy + 4, '−', 'Hide the containing module',
+          () => setAncestors(up), 'lm');
+      } else if (ancLeft > 0) {
+        sideMark(grp, left - 12, hy + 4, '+',
+          ancLeft === 1 ? 'Show the containing module' : 'Show the containing module (' + ancLeft + ' above)',
+          () => setAncestors(up + 1), 'lm');
+      }
     }
     // Right edge: each module with children toggles only its own subtree.
     if (hasExpand) {
