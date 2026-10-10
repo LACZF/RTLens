@@ -94,11 +94,10 @@ function ancestorGraph(shown: number): Graph {
 }
 
 /**
- * A graph rooted at `top` with `descendants` levels of its subtree shown (0 for
- * just the root box), matching the shape GraphPanel.refresh() builds around a
- * root whose children are walked one level per click.
+ * A graph rooted at `top` with the given instance paths expanded. Each path's
+ * children are drawn when the path is in `expanded`.
  */
-function rootGraph(descendants: number): Graph {
+function rootGraph(expanded: string[]): Graph {
   const index = new HdlIndex();
   index.addFile('/w/top.v', SRC);
   const h = buildHierarchy(index, 'top', { maxDepth: 8 })!;
@@ -106,7 +105,7 @@ function rootGraph(descendants: number): Graph {
     maxDepth: 8,
     maxNodes: 500,
     showContainment: true,
-    descendants,
+    expanded,
   });
 }
 
@@ -240,13 +239,12 @@ before(async () => {
 
 function startPanel(
   graph: Graph,
-  opts: {
+opts: {
     focus?: string;
     collapsed?: string[];
     ancestorsShown?: number;
     ancestorsLeft?: number;
-    descendantsShown?: number;
-    descendantsLeft?: number;
+    expanded?: string[];
   } = {},
 ) {
   const posted: Record<string, unknown>[] = [];
@@ -300,30 +298,16 @@ function startPanel(
     collapsed: opts.collapsed ?? [],
     ancestorsShown: opts.ancestorsShown ?? 0,
     ancestorsLeft: opts.ancestorsLeft ?? 0,
-    descendantsShown: opts.descendantsShown ?? 0,
-    descendantsLeft: opts.descendantsLeft ?? 0,
+    expanded: opts.expanded ?? [],
   });
   const api = (svg as unknown as { __api: PanelApi }).__api;
   return {
     svg,
     api,
     posted,
-    elements,
-    message,
-    draw: () => api.redraw(),
+    group: (k: string) => api._els!.groups.find((gd) => gd.g.key === k)!,
     search: () => elements.search,
-    group: (key: string): Drawn => {
-      const gd = (svg as unknown as { __api: PanelApi }).__api._els!.groups.find((x) => x.g.key === key);
-      assert.ok(gd, 'group ' + key + ' is drawn');
-      return gd;
-    },
-    edge: (to: string, port: string) => {
-      const ed = (svg as unknown as { __api: PanelApi }).__api._els!.edgeEls.find(
-        (x) => x.e.to === to && x.e.port === port,
-      );
-      assert.ok(ed, 'edge .' + port + ' -> ' + to + ' is drawn');
-      return ed;
-    },
+    edge: (from: string, to: string) => api._els!.edgeEls.find((ee) => ee.e.from === from && ee.e.to === to)!,
   };
 }
 
@@ -496,7 +480,7 @@ test('children start hidden and the + on the right edge reveals them one level p
   // A root whose descendants are not built, exactly what the extension builds
   // the first time a module is focused. The fixture is two levels below `top`
   // (u_mid has u_inner), so the extension reports two levels still available.
-  const p = startPanel(rootGraph(0), { descendantsLeft: 2 });
+  const p = startPanel(rootGraph([]), { expanded: [] });
 
   const keys = p.api._els!.groups.map((gd) => gd.g.key);
   assert.deepEqual(keys, ['top'], 'only the root box is drawn, no children');
@@ -506,14 +490,17 @@ test('children start hidden and the + on the right edge reveals them one level p
   assert.ok(plus, 'the root wears a + on its right edge when children are hidden');
 
   fire(plus!, 'click');
-  assert.equal(p.posted.find((m) => m.type === 'descendants')?.shown, 1);
+  assert.equal(p.posted.find((m) => m.type === 'descendants')?.shown, undefined);
+  const msg = p.posted.find((m) => m.type === 'descendants');
+  assert.equal(msg?.path, 'top');
+  assert.equal(msg?.expanded, false);
 });
 
 test('each click reveals exactly one more level of children', () => {
   // One level shown: the root and its direct children are there, but u_mid's
   // own child u_inner is still out - and the root still wears a + because one
   // more level remains below it.
-  const p = startPanel(rootGraph(1), { descendantsShown: 1, descendantsLeft: 1 });
+  const p = startPanel(rootGraph(['top']), { expanded: ['top'] });
 
   const keys = p.api._els!.groups.map((gd) => gd.g.key).sort();
   assert.deepEqual(keys, ['top', 'top.u_dangling', 'top.u_leaf', 'top.u_mid', 'top.u_missing']);
@@ -525,20 +512,26 @@ test('each click reveals exactly one more level of children', () => {
   assert.ok(minus, 'the - sits beside the + once any level is shown');
 
   fire(plus!, 'click');
-  assert.equal(p.posted.find((m) => m.type === 'descendants')?.shown, 2);
+  assert.equal(p.posted.find((m) => m.type === 'descendants')?.shown, undefined);
+  const msg = p.posted.find((m) => m.type === 'descendants');
+  assert.equal(msg?.path, 'top');
+  assert.equal(msg?.expanded, false);
 });
 
 test('the - on the right edge tucks one level back', () => {
   // Full subtree drawn (two levels): the - turns u_inner back off, leaving the
   // root's direct children showing.
-  const p = startPanel(rootGraph(2), { descendantsShown: 2, descendantsLeft: 0 });
+  const p = startPanel(rootGraph(['top', 'top.u_mid']), { expanded: ['top', 'top.u_mid'] });
 
   const root = p.group('top');
   const minus = find(root.el, (e) => e.tagName === 'text' && e.textContent === '−' && e.classList.contains('rm'));
   assert.ok(minus, 'the root wears a - on its right edge while children are shown');
 
   fire(minus!, 'click');
-  assert.equal(p.posted.find((m) => m.type === 'descendants')?.shown, 1);
+  assert.equal(p.posted.find((m) => m.type === 'descendants')?.shown, undefined);
+  const msg = p.posted.find((m) => m.type === 'descendants');
+  assert.equal(msg?.path, 'top');
+  assert.equal(msg?.expanded, false);
 });
 
 test('a leaf root has no mark on its right edge', () => {
@@ -547,7 +540,7 @@ test('a leaf root has no mark on its right edge', () => {
   const h = buildHierarchy(index, 'top', { maxDepth: 8 })!;
   const leaf = findByPath(h.root, 'top.u_leaf')!;
   const g = buildGraph(index, leaf, {
-    maxDepth: 8, maxNodes: 500, showContainment: true, descendants: 0,
+    maxDepth: 8, maxNodes: 500, showContainment: true, expanded: [],
   });
   const p = startPanel(g);
 

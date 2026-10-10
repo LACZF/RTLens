@@ -112,15 +112,15 @@ export interface GraphOptions {
   /** Instance paths that should not be expanded below (collapsed). */
   collapsed?: Set<string> | string[];
   /**
-   * How many levels of the subtree below the root to draw. The view starts at 0
-   * - just the root box and its own scope - and the right-side plus walks one
-   * level at a time, so the graph is rebuilt with a bigger number on every click.
-   * - `undefined`: expand fully (subject to `maxDepth`), as before this option.
-   * - `0`: only the root box and its own signals; no children at all.
-   * - `n > 0`: expand the nodes up to `n` levels below the root; a node at the
-   *   deepest level still shows its own scope, only its children stay out.
+   * Instance paths whose *direct children* are drawn. Every module below the
+   * root renders its own scope regardless; `expanded` decides whether the next
+   * level of child boxes appears below it. Each module's right-side +/- toggles
+   * only its own path in this set, so one box never controls the whole subtree.
+   * - `undefined`: expand fully (subject to `maxDepth`), the budget mode.
+   * - a set: children of a path are drawn only while that path is in the set;
+   *   a box not in it still shows its own scope, just not its children.
    */
-  descendants?: number;
+  expanded?: Set<string> | string[];
   /** Whether to draw net nodes as separate nodes (default true). */
   showNetNodes?: boolean;
 }
@@ -161,6 +161,8 @@ class GraphBuilder {
 
   private readonly collapsed: Set<string>;
   private readonly showNetNodes: boolean;
+  /** Per-path expansion; `null` when the caller asked for budget mode instead. */
+  private readonly expanded: Set<string> | null;
 
   constructor(
     private readonly index: HdlIndex,
@@ -168,6 +170,7 @@ class GraphBuilder {
   ) {
     this.collapsed = new Set(opts.collapsed);
     this.showNetNodes = opts.showNetNodes;
+    this.expanded = opts.expanded === null ? null : new Set(opts.expanded as Iterable<string>);
   }
 
   build(root: HierarchyNode): Graph {
@@ -177,14 +180,13 @@ class GraphBuilder {
       this.addInstanceNode(root, true);
     }
     this.addAncestors(root);
-    // Level mode walks the subtree relative to the graph root: the deepest box
-    // still shows its own scope, only its children stay out. Budget mode keeps
-    // the depth limit an absolute cap as before, marking the deepest boxes
-    // truncated. `descendants` is a level count (-1 when the caller did not ask
-    // for level mode, so it falls back to budget mode).
-    const level = this.opts.descendants >= 0;
-    const limit = level ? root.depth + this.opts.descendants : this.opts.maxDepth;
-    this.visit(root, limit);
+    // Expansion mode walks the subtree per path: a box's own scope is always
+    // drawn, and its children are drawn only while the box's path is in the
+    // `expanded` set. Budget mode keeps the depth limit an absolute cap as
+    // before, marking the deepest boxes truncated (`expanded` is null then).
+    const level = this.expanded !== null;
+    const limit = this.opts.maxDepth;
+    this.visit(root, limit, level);
     this.nodes = this.prune(this.nodes);
     this.edges = this.edges.filter(
       (e) => this.nodes.has(e.from) && this.nodes.has(e.to) && e.from !== e.to,
@@ -381,7 +383,7 @@ class GraphBuilder {
     }
   }
 
-  private visit(node: HierarchyNode, limit: number): void {
+  private visit(node: HierarchyNode, limit: number, level: boolean): void {
     this.maxDepthSeen = Math.max(this.maxDepthSeen, node.depth);
     // Collapsed: the node box stays (its parent added it) but nothing inside
     // it is expanded - no child instances, no nets of its own scope. The view
@@ -390,18 +392,42 @@ class GraphBuilder {
     if (this.collapsed.has(node.path)) {
       return;
     }
-    if (node.depth >= limit) {
-      // The requested descendant level (or the budget's absolute cap). The box
-      // itself is already on the graph; only the modules below it stay out. In
-      // level mode this is a deliberate stop, so the box still shows its own
-      // scope - the user can expand further with another click. In budget mode
-      // the box is marked truncated instead.
-      const levelStop = this.opts.descendants >= 0;
+    if (level) {
+      // Expansion mode: every box below the root shows its own scope, and only
+      // the paths the user expanded (this module's own +/-) get their children.
       const parentDef = this.index.resolveModule(node.moduleName, node.file);
-      if (parentDef && levelStop) {
+      if (parentDef) {
         this.connectScope(node, parentDef);
       }
-      if (!levelStop && node.children?.length) {
+      if (!this.expanded!.has(node.path)) {
+        return;
+      }
+      for (const child of node.children ?? []) {
+        if (this.nodes.size >= this.opts.maxNodes) {
+          this.overflowed = true;
+          this.truncatedPaths.add(node.path);
+          return;
+        }
+        this.addInstanceNode(child);
+        this.connectInstance(node, child, parentDef);
+        if (this.opts.showContainment) {
+          this.addEdge({
+            from: GraphBuilder.ids(node.path),
+            to: GraphBuilder.ids(child.path),
+            kind: 'containment',
+            label: child.moduleName,
+            dashed: true,
+          });
+        }
+        this.visit(child, limit, level);
+      }
+      return;
+    }
+    if (node.depth >= limit) {
+      // The budget's absolute cap. The box itself is already on the graph; only
+      // the modules below it stay out, and it is marked truncated so the view
+      // does not mistake it for a leaf.
+      if (node.children?.length) {
         this.truncatedPaths.add(node.path);
         this.addInstanceNode(node);
       }
@@ -430,7 +456,7 @@ class GraphBuilder {
           dashed: true,
         });
       }
-      this.visit(child, limit);
+      this.visit(child, limit, level);
     }
   }
 
@@ -807,7 +833,7 @@ export function buildGraph(index: HdlIndex, root: HierarchyNode, opts: GraphOpti
     portWiringOnly: opts.portWiringOnly ?? false,
     ancestors: opts.ancestors ?? [],
     collapsed: opts.collapsed ?? [],
-    descendants: opts.descendants === undefined ? -1 : opts.descendants,
+    expanded: (opts.expanded === undefined ? null : (opts.expanded instanceof Set ? opts.expanded : new Set(opts.expanded))) as any,
     showNetNodes: opts.showNetNodes ?? true,
   });
   return builder.build(root);
