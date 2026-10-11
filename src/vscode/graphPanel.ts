@@ -401,7 +401,7 @@ const STYLE = `
   .chev { font-size: 11px; fill: currentColor; opacity: .8; }
   .sm { font-size: 18px; font-weight: 600; opacity: .9; }
   .smhit { fill: transparent; pointer-events: all; cursor: pointer; }
-  .edge { fill: none; stroke-width: 1.1; opacity: .55; }
+  .edge { fill: none; stroke-width: 1.4; opacity: .55; }
   .edge:hover { opacity: 1; stroke-width: 2; }
   #tip {
     position: fixed; pointer-events: none; padding: 3px 6px; max-width: 420px;
@@ -1074,7 +1074,7 @@ export const SCRIPT = String.raw`
         class: 'edge',
         stroke: stroke,
         'stroke-dasharray': e.dashed ? '4 3' : '',
-        'stroke-width': e.kind === 'containment' ? 0.8 : 1.1,
+        'stroke-width': e.kind === 'containment' ? 0.9 : 1.4,
       });
       const pa = anchorOf(a, b, e);
       const pb = anchorOf(b, a, e);
@@ -1356,7 +1356,7 @@ export const SCRIPT = String.raw`
     var pad = 40;
     var bw = Math.max(1, maxX - minX), bh = Math.max(1, maxY - minY);
     var w = Math.max(1, svg.clientWidth - pad * 2), h = Math.max(1, svg.clientHeight - pad * 2);
-    var k = Math.max(0.15, Math.min(1.5, Math.min(w / bw, h / bh)));
+    var k = Math.max(0.15, Math.min(1.2, Math.min(w / bw, h / bh)));
     view.k = k;
     view.x = svg.clientWidth / 2 - (minX + bw / 2) * k;
     view.y = svg.clientHeight / 2 - (minY + bh / 2) * k;
@@ -1422,7 +1422,7 @@ export const SCRIPT = String.raw`
     ev.preventDefault();
     interacted = true;
     const f = ev.deltaY < 0 ? 1.12 : 1 / 1.12;
-    const k = Math.max(0.15, Math.min(6, view.k * f));
+    const k = Math.max(0.15, Math.min(4, view.k * f));
     view.x = ev.clientX - (ev.clientX - view.x) * (k / view.k);
     view.y = ev.clientY - (ev.clientY - view.y) * (k / view.k);
     view.k = k;

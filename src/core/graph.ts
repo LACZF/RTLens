@@ -359,7 +359,7 @@ class GraphBuilder {
     // wires and only the tail of the I/O.
     const limit = this.signalLimits.get(scope) ?? this.maxSignalsPerScope;
     const used = this.netCount.get(scope) ?? 0;
-    if (limit !== Infinity && limit >= 0 && used >= limit) {
+    if (limit !== Infinity && limit > 0 && used >= limit) {
       this.cappedScopes.add(scope);
       return id;
     }
@@ -435,9 +435,9 @@ class GraphBuilder {
       // Expansion mode: every box below the root shows its own scope, and only
       // the paths the user expanded (this module's own +/-) get their children.
       const parentDef = this.index.resolveModule(node.moduleName, node.file);
-      if (parentDef) {
-        this.connectScope(node, parentDef);
-      }
+        if (parentDef) {
+          this.connectScope(node, parentDef);
+        }
       if (!this.expanded!.has(node.path)) {
         return;
       }
