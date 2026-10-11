@@ -89,6 +89,12 @@ export interface Graph {
   edges: GraphEdge[];
   stats: GraphStats;
   truncated: boolean;
+  /**
+   * Scopes whose signal list was cut by `maxSignalsPerScope`. The view uses
+   * this to offer a "show more" control; an empty list means every signal of
+   * every rendered scope is present.
+   */
+  cappedScopes: string[];
   issues: GraphIssue[];
 }
 
@@ -123,6 +129,20 @@ export interface GraphOptions {
   expanded?: Set<string> | string[];
   /** Whether to draw net nodes as separate nodes (default true). */
   showNetNodes?: boolean;
+  /**
+   * Maximum number of signal rows materialised in one scope. A scope with more
+   * signals keeps the first `maxSignalsPerScope` and is listed in
+   * `Graph.cappedScopes`, so a generated module with thousands of ports cannot
+   * exhaust the node budget before its child boxes are drawn. Ports are added
+   * before internal wires, so I/O survives the cut. Default: no limit.
+   */
+  maxSignalsPerScope?: number;
+  /**
+   * Per-scope overrides of `maxSignalsPerScope`, keyed by instance path. The
+   * view raises the limit for one box when the user asks for more signals; a
+   * missing key falls back to `maxSignalsPerScope`.
+   */
+  signalLimits?: Record<string, number>;
 }
 
 const DEFAULT_MAX_NODES = 800;
@@ -163,6 +183,11 @@ class GraphBuilder {
   private readonly showNetNodes: boolean;
   /** Per-path expansion; `null` when the caller asked for budget mode instead. */
   private readonly expanded: Set<string> | null;
+  private readonly maxSignalsPerScope: number;
+  private readonly signalLimits: Map<string, number>;
+  /** Signals already materialised per scope, so the cap cuts the tail only. */
+  private readonly netCount = new Map<string, number>();
+  private readonly cappedScopes = new Set<string>();
 
   constructor(
     private readonly index: HdlIndex,
@@ -171,6 +196,8 @@ class GraphBuilder {
     this.collapsed = new Set(opts.collapsed);
     this.showNetNodes = opts.showNetNodes;
     this.expanded = opts.expanded === null ? null : new Set(opts.expanded as Iterable<string>);
+    this.maxSignalsPerScope = opts.maxSignalsPerScope;
+    this.signalLimits = new Map(Object.entries(opts.signalLimits));
   }
 
   build(root: HierarchyNode): Graph {
@@ -232,6 +259,7 @@ class GraphBuilder {
         truncated,
       },
       truncated,
+      cappedScopes: [...this.cappedScopes].sort(),
       issues: this.issues,
     };
   }
@@ -325,6 +353,17 @@ class GraphBuilder {
       }
       return id;
     }
+    // The per-scope cap: a generated module can declare thousands of ports and
+    // wires, and materialising all of them would exhaust `maxNodes` before the
+    // child boxes appear. Ports are added first, so the cut drops internal
+    // wires and only the tail of the I/O.
+    const limit = this.signalLimits.get(scope) ?? this.maxSignalsPerScope;
+    const used = this.netCount.get(scope) ?? 0;
+    if (used >= limit) {
+      this.cappedScopes.add(scope);
+      return id;
+    }
+    this.netCount.set(scope, used + 1);
     this.nodes.set(id, {
       id,
       kind: 'net',
@@ -835,6 +874,8 @@ export function buildGraph(index: HdlIndex, root: HierarchyNode, opts: GraphOpti
     collapsed: opts.collapsed ?? [],
     expanded: (opts.expanded === undefined ? null : (opts.expanded instanceof Set ? opts.expanded : new Set(opts.expanded))) as any,
     showNetNodes: opts.showNetNodes ?? true,
+    maxSignalsPerScope: opts.maxSignalsPerScope ?? Infinity,
+    signalLimits: opts.signalLimits ?? {},
   });
   return builder.build(root);
 }

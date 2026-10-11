@@ -210,6 +210,37 @@ test('graph respects the node budget and keeps the shallow nodes', () => {
   assert.ok(byId(g.nodes, 'i:top'), 'the root survives the cut');
 });
 
+test('graph caps the signals per scope and keeps the module I/O', () => {
+  const { g } = graph({ maxSignalsPerScope: 3 });
+  const top = g.nodes.filter((n) => n.kind === 'net' && n.path.startsWith('top::'));
+  assert.equal(top.length, 3, 'only the first signals of the scope are materialised');
+  for (const n of top) {
+    assert.ok(['din', 'other', 'dout', 'flag'].includes(n.label), `${n.label} is a port of top`);
+  }
+  assert.ok(g.cappedScopes.includes('top'), 'the view is told the scope has more behind the cut');
+});
+
+test('graph leaves cappedScopes empty when nothing was cut', () => {
+  const { g } = graph({ maxSignalsPerScope: 100 });
+  assert.equal(g.cappedScopes.length, 0);
+});
+
+test('graph: a per-scope signal limit overrides the default cap', () => {
+  const { g } = graph({ maxSignalsPerScope: 3, signalLimits: { top: 10 } });
+  const top = g.nodes.filter((n) => n.kind === 'net' && n.path.startsWith('top::'));
+  assert.equal(top.length, 6, 'the override lets the whole scope through');
+  assert.equal(g.cappedScopes.includes('top'), false);
+});
+
+test('graph: a fat scope no longer crowds out its child boxes', () => {
+  // Without the per-scope cap the top scope eats the whole budget before the
+  // first child box is added, so the view's right-edge + had nothing to show.
+  const { g } = graph({ maxSignalsPerScope: 2, maxNodes: 100, expanded: ['top'] });
+  assert.ok(inst(g, 'top.u_mid'), 'the child box is still drawn');
+  assert.ok(inst(g, 'top.u_leaf'));
+  assert.equal(g.cappedScopes.length > 0, true, 'the cut scopes are flagged for a show-more control');
+});
+
 test('includeRoot=false omits the root but keeps its children', () => {
   const { g } = graph({ includeRoot: false });
   assert.equal(byId(g.nodes, 'i:top'), undefined);

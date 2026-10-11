@@ -289,7 +289,6 @@ function startPanel(
     ancestorsShown?: number;
     ancestorsLeft?: number;
     expanded?: string[];
-    maxSignalsPerGroup?: number;
   } = {},
 ) {
   const posted: Record<string, unknown>[] = [];
@@ -344,7 +343,6 @@ function startPanel(
     ancestorsShown: opts.ancestorsShown ?? 0,
     ancestorsLeft: opts.ancestorsLeft ?? 0,
     expanded: opts.expanded ?? [],
-    maxSignalsPerGroup: opts.maxSignalsPerGroup,
   });
   const api = (svg as unknown as { __api: PanelApi }).__api;
   return {
@@ -394,21 +392,22 @@ test('every module is one box and its signals are rows inside it', () => {
   assert.ok(withClass(leaf.el, 'rowg'), 'rows are drawn as their own elements');
 });
 
-test('a module with many signals shows only a configurable subset behind a ... toggle', () => {
-  const p = startPanel(fixtureGraph(), { maxSignalsPerGroup: 2 });
+test('a scope the graph cut short wears a ... row that asks for more signals', () => {
+  const g = fixtureGraph();
+  g.cappedScopes = ['top'];
+  const p = startPanel(g);
   const top = p.group('top');
-  assert.equal(top.g.nets.length, 6, 'the group still knows every one of its signals');
-  // Header plus the two visible rows; the rest is hidden.
-  assert.equal(top.els.length, 3, 'only the subset is drawn as rows');
-  let dots = find(top.el, (e) => e.tagName === 'text' && e.textContent === '...');
-  assert.ok(dots, 'the excess signals collapse under a ... toggle');
+  const dots = find(top.el, (e) => e.tagName === 'text' && e.textContent === '...');
+  assert.ok(dots, 'a capped scope offers a ... row to fetch the rest');
 
   fire(dots!, 'click');
-  p.api.redraw();
-  const top2 = p.group('top');
-  dots = find(top2.el, (e) => e.tagName === 'text' && e.textContent === '...');
-  assert.equal(dots, undefined, 'the ... goes away once every signal is shown');
-  assert.equal(top2.els.length, 7, 'every signal is drawn after the toggle');
+  const ask = p.posted.find((m) => m.type === 'moreSignals');
+  assert.ok(ask, 'the click asks the extension for another page');
+  assert.equal(ask!.path, 'top');
+
+  const leaf = p.group('top.u_leaf');
+  assert.equal(find(leaf.el, (e) => e.tagName === 'text' && e.textContent === '...'), undefined,
+    'a scope the graph left whole has no ... row');
 });
 
 

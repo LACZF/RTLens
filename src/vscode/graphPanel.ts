@@ -50,6 +50,12 @@ export class GraphPanel {
    * expanded, and the webview only has to hide what it is told about.
    */
   private readonly collapsed = new Set<string>();
+  /**
+   * Per-box signal cap raised by the webview's "show more". The graph sends at
+   * most `hdl.connectView.graph.maxSignalsPerGroup` rows per box; each click
+   * raises that box's ceiling so the next build carries more of its signals.
+   */
+  private signalLimits = new Map<string, number>();
 
   private constructor(
     private readonly panel: vscode.WebviewPanel,
@@ -145,6 +151,7 @@ export class GraphPanel {
     // signs at its edges reveal them one level at a time.
     this.ancestorsShown = 0;
     this.expanded.clear();
+    this.signalLimits.clear();
     // `subtreeDepth` is no longer driving the per-module toggle; the extension
     // still computes it so external callers are unchanged, but it is ignored.
     // A collapse that would hide the new root (or anything on its ancestor
@@ -182,6 +189,7 @@ export class GraphPanel {
       ancestors: shown,
       collapsed: [...this.collapsed],
       expanded: [...this.expanded],
+      signalLimits: Object.fromEntries(this.signalLimits),
     });
     this.panel.title = `Connectivity: ${graph.root}`;
     await this.panel.webview.postMessage({
@@ -192,7 +200,6 @@ export class GraphPanel {
       ancestorsShown: shown.length,
       ancestorsLeft: this.ancestors.length - shown.length,
       expanded: [...this.expanded],
-      maxSignalsPerGroup: this.svc.config.graphMaxSignalsPerGroup,
     });
     this.panel.webview.postMessage({ type: 'stats', text: statsLine(graph) });
   }
@@ -254,6 +261,19 @@ export class GraphPanel {
           if (open) this.expanded.add(want);
           else this.expanded.delete(want);
         }
+        void this.refresh();
+        return;
+      }
+      case 'moreSignals': {
+        // The box wants another page of signals. Raise its ceiling by the
+        // configured page size and rebuild; the graph carries the extra rows.
+        const path = String(msg.path ?? '');
+        if (!path) {
+          return;
+        }
+        const page = Math.max(1, this.svc.config.graphMaxSignalsPerGroup);
+        const current = this.signalLimits.get(path) ?? page;
+        this.signalLimits.set(path, current + page);
         void this.refresh();
         return;
       }
@@ -438,8 +458,7 @@ export const SCRIPT = String.raw`
   // the '+' on any box reveals the whole chain at once.
   let ancShown = 0;
   let ancLeft = 0;
-  let maxSignalsPerGroup = 40;
-  let netExpanded = new Set(); // group keys where all signals shown
+  let cappedScopes = new Set(); // group keys the graph cut short
 // How many levels of the root's subtree the extension is currently drawing,
 // and how many more are available below the deepest one. The children are
 // hidden by default: the plus on the root's right edge walks down one level
@@ -486,16 +505,14 @@ export const SCRIPT = String.raw`
 
   function labelW(s, fs) { return (s || '').length * fs * 0.62; }
   function truncate(s, n) { return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+  // The graph itself caps how many signals it sends per scope; the view shows
+  // every row it was given. A scope in cappedScopes has more behind the cut,
+  // so it earns a ... row that asks the extension for another page.
   function visibleNets(g) {
-    if (!g || !g.nets) return g.nets;
-    if (netExpanded.has(g.key) || maxSignalsPerGroup <= 0) return g.nets;
-    const limit = maxSignalsPerGroup;
-    if (g.nets.length <= limit) return g.nets;
-    return g.nets.slice(0, limit);
+    return g && g.nets ? g.nets : [];
   }
-  /** The group has more signals than the configured limit. */
-  function isTruncated(g) {
-    return !!g && maxSignalsPerGroup > 0 && g.nets.length > maxSignalsPerGroup;
+  function hasMoreNets(g) {
+    return !!g && cappedScopes.has(g.key);
   }
 
   function colorFor(n) {
@@ -556,7 +573,7 @@ export const SCRIPT = String.raw`
       }
     }
     g.w = Math.max(MIN_W, Math.min(MAX_W, Math.ceil(w)));
-    const moreRow = !folded.has(g.key) && isTruncated(g) ? 1 : 0;
+    const moreRow = !folded.has(g.key) && hasMoreNets(g) ? 1 : 0;
     g.h = HEAD_H + (show ? (vnets.length + moreRow) * ROW_H + 4 : 0);
   }
 
@@ -1172,8 +1189,7 @@ export const SCRIPT = String.raw`
 
     if (!isFolded) {
       const vnets = visibleNets(g);
-      const truncated = isTruncated(g);
-      const expandedAll = netExpanded.has(g.key);
+      const more = hasMoreNets(g);
       for (let i = 0; i < vnets.length; i++) {
         const n = vnets[i];
         const ry = n.y;
@@ -1198,33 +1214,26 @@ export const SCRIPT = String.raw`
         grp.appendChild(rowg);
         els.push({ n, el: rowg });
       }
-      if (truncated) {
+      if (more) {
         const ry = top + HEAD_H + 2 + ROW_H / 2 + vnets.length * ROW_H;
         const rowg = el('g', { class: 'rowg' });
         rowg.appendChild(el('line', {
           x1: left + 10, y1: ry - ROW_H / 2, x2: right - 10, y2: ry - ROW_H / 2, class: 'rsep',
         }));
         const t = el('text', { x: left + 14, y: ry + 3.5, 'text-anchor': 'start', class: 'sig' });
-        t.textContent = expandedAll ? '…' : '...';
+        t.textContent = '...';
         t.style.cursor = 'pointer';
-        const toggle = () => {
-          if (expandedAll) {
-            netExpanded.delete(g.key);
-          } else {
-            netExpanded.add(g.key);
-          }
-          scheduleDraw();
-        };
+        const askMore = () => vscode.postMessage({ type: 'moreSignals', path: g.key });
         t.addEventListener('mousedown', (ev) => ev.stopPropagation());
-        t.addEventListener('click', (ev) => { ev.stopPropagation(); toggle(); });
-        t.addEventListener('mouseenter', (ev) => showTip(ev, expandedAll ? 'Show fewer signals' : 'Show more signals'));
+        t.addEventListener('click', (ev) => { ev.stopPropagation(); askMore(); });
+        t.addEventListener('mouseenter', (ev) => showTip(ev, 'Show more signals'));
         t.addEventListener('mousemove', moveTip);
         t.addEventListener('mouseleave', hideTip);
         rowg.appendChild(t);
         const rhit = el('rect', { x: left + 2, y: ry - ROW_H / 2, width: g.w - 4, height: ROW_H, class: 'hit' });
         rhit.style.cursor = 'pointer';
         rhit.addEventListener('mousedown', (ev) => ev.stopPropagation());
-        rhit.addEventListener('click', (ev) => { ev.stopPropagation(); toggle(); });
+        rhit.addEventListener('click', (ev) => { ev.stopPropagation(); askMore(); });
         rowg.appendChild(rhit);
         grp.appendChild(rowg);
       }
@@ -1445,8 +1454,7 @@ export const SCRIPT = String.raw`
       expanded = new Set(msg.expanded || []);
       ancShown = Number(msg.ancestorsShown ?? 0) || 0;
       ancLeft = Number(msg.ancestorsLeft ?? 0) || 0;
-      if (msg.maxSignalsPerGroup !== undefined) maxSignalsPerGroup = Number(msg.maxSignalsPerGroup) || 40;
-      netExpanded = new Set();
+      cappedScopes = new Set((model && model.cappedScopes) || []);
       // A new model may settle differently under the force layout. The
       // hierarchy layout ignores the flag and re-columns on the next frame,
       // while a group the user dragged keeps its position either way.

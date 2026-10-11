@@ -408,6 +408,8 @@ export class IndexService implements vscode.Disposable {
       ancestors: opts.ancestors,
       collapsed: opts.collapsed,
       expanded: opts.expanded,
+      maxSignalsPerScope: this.configValue.graphMaxSignalsPerGroup,
+      signalLimits: opts.signalLimits,
     });
   }
 
