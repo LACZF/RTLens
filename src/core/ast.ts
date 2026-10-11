@@ -383,6 +383,8 @@ export interface MacroDef {
   range: Range;
   /** Just the macro identifier - what a jump lands on. */
   nameRange: Range;
+  /** The full directive text (e.g. "`define WIDTH 8"), line-oriented. */
+  text?: string;
 }
 
 /** `defparam u1.W = 8;` */

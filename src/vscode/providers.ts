@@ -200,6 +200,12 @@ export class HdlHoverProvider implements vscode.HoverProvider {
         parts.push('not found in the index (black box?)');
       }
     }
+    if (d.kind === 'macro') {
+      const def = index.resolveMacro(d.name, d.file);
+      if (def && def.text) {
+        parts.push('`' + def.text);
+      }
+    }
     if (d.kind === 'instance' && d.viaInstance) {
       parts.push(`instance of \`${d.name}\``);
     }

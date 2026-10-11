@@ -832,6 +832,7 @@ export class Parser {
             start: { line: t.range.start.line, character: startChar },
             end: { line: t.range.start.line, character: startChar + m[1].length },
           },
+          text: t.text,
         });
       }
     }
