@@ -162,6 +162,12 @@
         "category": "HDL"
       },
       {
+        "command": "hdl.connectView.refreshDatabase",
+        "title": "HDL: Refresh Signal/Module Database",
+        "category": "HDL",
+        "icon": "$(database)"
+      },
+      {
         "command": "hdl.connectView.showGraph",
         "title": "HDL: Show Connectivity Graph",
         "category": "HDL",

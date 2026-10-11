@@ -187,6 +187,7 @@ const api: Record<string, any> = {
   TreeItemCollapsibleState: { None: 0, Collapsed: 1, Expanded: 2 },
   FileType: { File: 1, Directory: 2 },
   ProgressLocation: { Notification: 15, Window: 10 },
+  StatusBarAlignment: { Left: 1, Right: 2 },
   ViewColumn: { One: 1, Two: 2, Active: -1 },
   commands: {
     registerCommand(id: string, fn: (...args: unknown[]) => unknown) {
@@ -247,8 +248,30 @@ const api: Record<string, any> = {
     showInformationMessage: async () => undefined,
     showWarningMessage: async () => undefined,
     showTextDocument: async () => undefined,
-    showQuickPick: async () => undefined,
+    showQuickPick: async (items: unknown, opts?: unknown) =>
+      api.__quickPick ? api.__quickPick(items, opts) : undefined,
     showInputBox: async () => undefined,
+    setStatusBarMessage: () => noop,
+    createStatusBarItem() {
+      const item = {
+        text: '',
+        tooltip: '',
+        command: '',
+        name: '',
+        visible: false,
+        show() {
+          item.visible = true;
+        },
+        hide() {
+          item.visible = false;
+        },
+        dispose() {
+          item.visible = false;
+        },
+      };
+      (api.__statusBars ??= []).push(item);
+      return item;
+    },
     withProgress: async (_options: unknown, task: (p: { report: () => unknown }, c: unknown) => unknown) =>
       task({ report: () => undefined }, { isCancellationRequested: false }),
     activeTextEditor: undefined,

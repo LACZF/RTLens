@@ -16,6 +16,7 @@
 - **组成树（Composition）**：侧边栏层次树，展示 module 之间的例化关系，带层次路径面包屑，可跳转到源码。
 - **Net 视图与问题视图**：列出网络与解析过程中的告警（未声明信号、缺失 module、被丢弃的 typedef 等）。
 - **包装 module 生成**：从图中或光标处的实例生成 wrapper 源码，支持四种模式 —— `Auto`、`Flatten`（内联展开）、`Compose`（保留实例、重建接线）、`Stub`（例化并原样引出端口）。生成结果先预览，写盘需要显式 "Save As" 确认。
+- **信号 / module 关系数据库**：将信号读写关系与 module 间端口连接固化为 JSON 文件，保存到每个工作区 `.vscode/rtlens/relations.json`，支持增量（只重算变动文件及其依赖）与全量刷新，可通过底部状态栏按钮一键更新。
 
 ## 视图
 
@@ -32,6 +33,7 @@
 | 命令 | 说明 |
 |------|------|
 | `HDL: Refresh Index` | 重建工作区索引 |
+| `HDL: Refresh Signal/Module Database` | 刷新信号/module 关系数据库（.vscode/rtlens/relations.json），支持增量或全量 |
 | `HDL: Show Connectivity Graph` | 打开选中实例的连接关系图 |
 | `HDL: Show Connectivity Graph for Current Module` | 打开光标所在 module 的图（快捷键 `Ctrl+Alt+G` / macOS `Cmd+Alt+G`） |
 | `HDL: Set Graph Root to Current Module` | 把图根设为当前 module |
@@ -60,6 +62,7 @@
 2. 在编辑器中把光标放到某个 module 或实例上，按 `Ctrl+Alt+G` 打开连接关系图。
 3. 或在 **Composition** 视图里右键实例，选择 *Show Connectivity Graph* / *Generate Wrapper Module*。
 4. 若默认排除规则不适用，调整 `hdl.connectView.files` / `hdl.connectView.exclude` 后执行 `HDL: Refresh Index`。
+5. 信号/module 关系数据库保存在工作区的 `.vscode/rtlens/relations.json`，底部状态栏的 `RTLens DB` 按钮可手动刷新（增量或全量）；激活时只读取，不自动重写。
 
 ## 开发
 

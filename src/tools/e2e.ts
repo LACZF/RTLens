@@ -12,6 +12,7 @@ import { buildGraph } from '../core/graph';
 import { flattenModule, composeModule, generateWrapper, stubModule } from '../core/generator';
 import { collectProblems } from '../core/problems';
 import { signalUsage } from '../core/nets';
+import { databaseStats, hashText, updateDatabase, type FileInput } from '../core/relations';
 
 const FIXTURES = path.resolve(__dirname, '../../test/fixtures');
 
@@ -385,6 +386,35 @@ console.log('\n[10] generate paths, header parameters and hierarchical reads');
   checkTrue('the generate block is understood', lane.usesUnknownConstruct === false);
   const laneProblems = collectProblems(index).filter((p) => p.file.endsWith('gen_lane.sv') || (p.file.endsWith('sv.sv') && p.label.includes('lane')));
   check('the generate fixture reports nothing', laneProblems.map((p) => p.label), []);
+}
+
+console.log('\n[11] signal/module relation database');
+{
+  const inputs: FileInput[] = files.map((f) => ({
+    file: f,
+    rel: path.relative(FIXTURES, f).split(path.sep).join('/'),
+    hash: hashText(fs.readFileSync(f, 'utf8')),
+  }));
+  const first = updateDatabase(index, undefined, inputs, 'full', 'e2e');
+  check('db records every file', Object.keys(first.db.files).length, files.length);
+  check('db records every module', databaseStats(first.db).modules, index.stats.modules);
+  checkTrue(
+    'db records module → module connections',
+    databaseStats(first.db).connections > 0,
+    `${databaseStats(first.db).connections} connections, ${databaseStats(first.db).signals} signals`,
+  );
+  // datapath instantiates adder and regfile; its child ports carry directions.
+  const datapath = first.db.files['lib/datapath.v']?.modules.find((m) => m.name === 'datapath');
+  checkTrue('datapath is in the database', !!datapath);
+  checkTrue(
+    'datapath connections name their child',
+    !!datapath?.connections.some((c) => c.child === 'adder' && c.direction),
+    datapath?.connections.map((c) => `${c.instance}.${c.port}->${c.child}`).join(' '),
+  );
+  // A second pass with the same hashes must reuse every file and recompute none.
+  const second = updateDatabase(index, first.db, inputs, 'incremental', 'e2e2');
+  check('incremental recomputes nothing', second.changed.length, 0);
+  check('incremental reuses every file', second.reused, files.length);
 }
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'}`);

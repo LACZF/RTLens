@@ -22,6 +22,7 @@ import {
 } from './vscode/views';
 import { GraphPanel } from './vscode/graphPanel';
 import { runGenerateWrapper } from './vscode/generate';
+import { DatabaseService, pickRefreshMode } from './vscode/database';
 import type { HierarchyNode } from './core/ast';
 import { findByPath } from './core/hierarchy';
 
@@ -34,6 +35,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const svc = new IndexService(log);
   context.subscriptions.push(svc);
+
+  // The signal/module relation database and its status-bar refresh button.
+  const database = new DatabaseService(svc, log);
+  context.subscriptions.push(database);
 
   // --- views -------------------------------------------------------------
   const composition = new CompositionTreeProvider(svc);
@@ -100,6 +105,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // --- index lifecycle ---------------------------------------------------
   void svc.ensureReady().then(() => {
     syncEditor(vscode.window.activeTextEditor);
+    database.load();
     const stats = svc.stats;
     log.appendLine(
       `indexed ${stats.modules} module(s) in ${stats.files} file(s) in ${stats.parseMs} ms` +
@@ -124,6 +130,21 @@ export function activate(context: vscode.ExtensionContext): void {
     composition.refresh();
     problems.refresh();
     syncEditor(vscode.window.activeTextEditor);
+  });
+
+  reg('hdl.connectView.refreshDatabase', async () => {
+    const mode = await pickRefreshMode();
+    if (!mode) {
+      return;
+    }
+    const summary = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Window, title: `HDL: ${mode} database refresh` },
+      () => database.refresh(mode),
+    );
+    void vscode.window.setStatusBarMessage(
+      `HDL: ${mode} database refresh · ${summary.changed} recomputed, ${summary.reused} reused, ${summary.removed} removed`,
+      4000,
+    );
   });
 
   reg('hdl.connectView.showGraph', async (item?: CompositionItem) => {
