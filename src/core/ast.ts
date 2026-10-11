@@ -371,6 +371,20 @@ export interface DirectiveUse {
   range: Range;
 }
 
+/**
+ * A `` `define `` seen in the source. The macro body is not expanded, but the
+ * name and where it sits are kept so a reference (a `` `NAME `` token) can jump
+ * to its definition.
+ */
+export interface MacroDef {
+  name: string;
+  file: string;
+  /** Full extent of the whole directive line, backtick included. */
+  range: Range;
+  /** Just the macro identifier - what a jump lands on. */
+  nameRange: Range;
+}
+
 /** `defparam u1.W = 8;` */
 export interface DefParam {
   /** Instance path relative to the enclosing module, e.g. `u1.u2`. */
@@ -397,6 +411,8 @@ export interface ParseResult {
   file: string;
   modules: ModuleDef[];
   includes: string[];
+  /** `` `define `` macros declared anywhere in the file, in source order. */
+  macros: MacroDef[];
   fileScoped: FileScopeDecls;
   timeMs: number;
 }

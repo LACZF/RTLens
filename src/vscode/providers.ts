@@ -40,6 +40,7 @@ export const DECL_KIND_LABEL: Record<ResolvedDecl['kind'], string> = {
   interface: 'interface',
   genvar: 'genvar',
   type: 'type',
+  macro: 'macro',
   arg: 'function argument',
 };
 
@@ -47,6 +48,9 @@ export const DECL_KIND_LABEL: Record<ResolvedDecl['kind'], string> = {
 function renameRefusal(resolution: Resolution): string {
   if (resolution.ok && resolution.decl.kind === 'arg') {
     return 'HDL: a function or task argument is declared in its header, which this rename cannot rewrite.';
+  }
+  if (resolution.ok && resolution.decl.kind === 'macro') {
+    return 'HDL: a `define macro is expanded by the preprocessor; renaming it here would miss every `NAME use.';
   }
   return 'HDL: this name is imported from another file, so renaming it here would leave the import behind.';
 }

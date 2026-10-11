@@ -92,6 +92,42 @@ test('jump: an instance gets its target when the module is indexed later', () =>
   assert.equal(after.target?.file, '/w/control.v');
 });
 
+test('jump: a `NAME macro reference is saved against its `define', () => {
+  const index = new HdlIndex();
+  const src = [
+    '`define DEFAULT_VALUE 5',
+    'module top;',
+    '  localparam int X = `DEFAULT_VALUE;',
+    'endmodule',
+  ].join('\n');
+  index.addFile('/w/m.v', src);
+
+  const line = 2;
+  const nameCol = at(src, line, 'DEFAULT_VALUE');
+  const entry = index.lookupJump('/w/m.v', src, line, nameCol);
+  assert.ok(entry, 'the macro reference resolves');
+  assert.equal(entry.kind, 'macro');
+  assert.equal(entry.target?.file, '/w/m.v');
+  assert.equal(entry.target?.range.start.line, 0);
+  assert.equal(entry.target?.range.start.character, at(src, 0, 'DEFAULT_VALUE'));
+  // The saved occurrence starts on the name, not the backtick before it.
+  assert.equal(entry.start, nameCol);
+});
+
+test('jump: a macro reference resolves to a `define in another file', () => {
+  const index = new HdlIndex();
+  index.addFile('/w/defs.vh', '`define WIDTH 8\n');
+  const src = ['module top;', '  wire [`WIDTH-1:0] w;', 'endmodule'].join('\n');
+  index.addFile('/w/top.v', src);
+
+  const line = 1;
+  const entry = index.lookupJump('/w/top.v', src, line, at(src, line, 'WIDTH'));
+  assert.ok(entry, 'a macro defined elsewhere still resolves');
+  assert.equal(entry.kind, 'macro');
+  assert.equal(entry.target?.file, '/w/defs.vh');
+  assert.equal(entry.target?.range.start.line, 0);
+});
+
 test('jump: nothing is saved for text that is not a resolvable name', () => {
   const index = workspace();
 

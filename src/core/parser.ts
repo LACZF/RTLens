@@ -31,6 +31,7 @@ import type {
   ValueRange,
   VarDecl,
   VarKind,
+  MacroDef,
 } from './ast';
 import { MapScope, exprFromTokens, normalizeExpr, typeWidth, evalTokenExpr } from './fold';
 
@@ -585,6 +586,8 @@ export class Parser {
   private toks: Token[] = [];
   private modules: ModuleDef[] = [];
   private includes: string[] = [];
+  /** `` `define `` macros of the current file, in source order. */
+  private macros: MacroDef[] = [];
   private file = '';
   /** Typedefs declared outside any module scope, in source order. */
   private fileTypedefs: VarDecl[] = [];
@@ -604,6 +607,7 @@ export class Parser {
     this.file = file;
     this.modules = [];
     this.includes = [];
+    this.macros = [];
     this.fileTypedefs = [];
     this.fileTypedefRefs = [];
     this.fileImports = [];
@@ -645,6 +649,7 @@ export class Parser {
       file,
       modules: this.modules,
       includes: this.includes,
+      macros: this.macros,
       // A header has no module to hand its types to, so they travel with the
       // parse result and the index offers them to whoever includes the file.
       fileScoped: { decls: this.fileTypedefs, params: this.fileEnumParams },
@@ -809,6 +814,25 @@ export class Parser {
       const p = m ? (m[1] ?? m[2]) : '';
       if (p) {
         this.includes.push(p);
+      }
+    } else if (name === 'define') {
+      // A `define is consumed whole by the lexer, so the macro name is carved
+      // out of the directive text. The body is never expanded, but the name and
+      // its extent are what a reference (`NAME) jumps to.
+      const m = /`define\s+([A-Za-z_$][A-Za-z0-9_$]*)/.exec(t.text);
+      if (m) {
+        const startChar = t.range.start.character + (m[0].length - m[1].length);
+        this.macros.push({
+          name: m[1],
+          file: this.file,
+          range: t.range,
+          // The directive is line-oriented, so the name always sits on the
+          // line the backtick starts on.
+          nameRange: {
+            start: { line: t.range.start.line, character: startChar },
+            end: { line: t.range.start.line, character: startChar + m[1].length },
+          },
+        });
       }
     }
   }

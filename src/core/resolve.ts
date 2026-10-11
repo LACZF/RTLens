@@ -32,6 +32,8 @@ export type DeclKind =
   | 'interface'
   | 'genvar'
   | 'type'
+  /** A `` `define `` macro named by a `` `NAME `` reference. */
+  | 'macro'
   /** An argument of a function or task. */
   | 'arg';
 
@@ -73,6 +75,8 @@ export interface WordAtPosition {
   fullRange: Range;
   /** Bit/array select text that follows the final element, e.g. `[7:0]`. */
   select: string;
+  /** True when the word is written as a `` `NAME `` macro reference. */
+  isMacro?: boolean;
 }
 
 /**
@@ -89,24 +93,39 @@ export interface WordAtPosition {
  */
 export function wordAtToken(toks: Token[], idx: number): WordAtPosition | undefined {
   const ident = toks[idx];
-  if (!ident || (ident.kind !== 'ident' && !(ident.kind === 'keyword' && ident.text.startsWith('$')))) {
+  if (
+    !ident ||
+    (ident.kind !== 'ident' &&
+      ident.kind !== 'macroRef' &&
+      !(ident.kind === 'keyword' && ident.text.startsWith('$')))
+  ) {
     return undefined;
   }
+  // A macro reference carries the backtick in its text; the name a jump resolves
+  // (and lands on) is the identifier after it.
+  const identName = ident.kind === 'macroRef' ? (ident.name ?? ident.text.replace(/^`/, '')) : ident.text;
+  const backtick = ident.kind === 'macroRef' && ident.text.startsWith('`') ? 1 : 0;
   const chain = expandChain(toks, idx);
   const last = chain.toks[chain.toks.length - 1];
   // The name is the token under the cursor, which for `u_alu.result` is
   // `result`. Taking the first element of the chain instead would make
   // find-references and rename on a hierarchical signal operate on the
   // instance name, silently returning the wrong symbol's locations.
-  const name = ident.text;
+  const name = identName;
   const parts = chain.parts;
   return {
     name,
     fullPath: parts.join('.'),
     parentPath: parts.slice(0, -1).join('.'),
-    nameRange: chain.focus ?? ident.range,
+    nameRange: backtick
+      ? {
+          start: { line: ident.range.start.line, character: ident.range.start.character + backtick },
+          end: ident.range.end,
+        }
+      : chain.focus ?? ident.range,
     fullRange: { start: chain.toks[0].range.start, end: last.range.end },
     select: chain.select,
+    isMacro: ident.kind === 'macroRef',
   };
 }
 
@@ -114,7 +133,7 @@ export function wordAtPosition(source: string, line: number, character: number):
   const toks = tokenize(source).filter((t) => t.kind !== 'comment' && t.kind !== 'eof');
   const idx = toks.findIndex(
     (t) => t.range.start.line === line && t.range.start.character <= character && character <= t.range.end.character &&
-      (t.kind === 'ident' || (t.kind === 'keyword' && t.text.startsWith('$'))),
+      (t.kind === 'ident' || t.kind === 'macroRef' || (t.kind === 'keyword' && t.text.startsWith('$'))),
   );
   if (idx < 0) {
     return undefined;
@@ -222,8 +241,8 @@ function expandChain(toks: Token[], idx: number): { toks: Token[]; parts: string
         continue;
       }
     }
-    if (t.kind === 'ident' || t.kind === 'number' || t.kind === 'keyword') {
-      parts.push(t.text);
+    if (t.kind === 'ident' || t.kind === 'number' || t.kind === 'keyword' || t.kind === 'macroRef') {
+      parts.push(t.kind === 'macroRef' ? (t.name ?? t.text.replace(/^`/, '')) : t.text);
       kept.push(t);
     }
   }
@@ -596,7 +615,29 @@ export function renameAllowed(resolution: Resolution, file: string): boolean {
   if (!resolution.ok) {
     return true;
   }
-  return resolution.decl.file === file && resolution.decl.kind !== 'arg';
+  return resolution.decl.file === file && resolution.decl.kind !== 'arg' && resolution.decl.kind !== 'macro';
+}
+
+/**
+ * Resolve a `` `NAME `` macro reference to its `` `define ``. Macros are
+ * textual: there is no scope to walk, so the index picks the definition (same
+ * file first, then same directory, then any) and this wraps it as a resolution.
+ */
+export function resolveMacro(index: HdlIndex, name: string, fromFile?: string): Resolution {
+  const def = index.resolveMacro(name, fromFile);
+  if (!def) {
+    return { ok: false, reason: `macro "${name}" not found` };
+  }
+  return {
+    ok: true,
+    decl: {
+      kind: 'macro',
+      name,
+      file: def.file,
+      range: def.range,
+      nameRange: def.nameRange,
+    },
+  };
 }
 
 /** Resolve a reference site collected by the parser. */
@@ -627,7 +668,11 @@ export function resolveAt(
   }
   const mod = index.moduleAtLine(file, line);
   const parts = word.fullPath.split('.');
-  const resolution = resolvePath(index, mod, parts);
+  // A `NAME reference names a macro, not a scope symbol; only fall back to the
+  // ordinary walk when no `define declares it (a macro used as a module name,
+  // for instance).
+  const macro = word.isMacro ? resolveMacro(index, word.name, file) : undefined;
+  const resolution = macro && macro.ok ? macro : resolvePath(index, mod, parts);
   return { word, mod, resolution };
 }
 

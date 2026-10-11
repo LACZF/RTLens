@@ -243,6 +243,24 @@ test('parser records `include directives and unknown constructs', () => {
   assert.equal(modules.length, 1);
 });
 
+test('parser records `define macros with their name extent', () => {
+  const src = [
+    '`define DEFAULT_VALUE 5',
+    '`define  SPACED(x)  (x)',
+    'module top;',
+    '  `define IN_BODY 1',
+    'endmodule',
+  ].join('\n');
+  const { macros } = parseSource('/m.v', src);
+  assert.deepEqual(macros.map((m) => m.name), ['DEFAULT_VALUE', 'SPACED', 'IN_BODY']);
+  // The name range points at the identifier, not the backtick or the body.
+  assert.equal(macros[0].nameRange.start.character, 8);
+  assert.equal(macros[0].nameRange.end.character, 21);
+  assert.equal(macros[0].nameRange.start.line, 0);
+  // A macro declared inside a module body is still a file macro.
+  assert.equal(macros[2].nameRange.start.character, 10);
+});
+
 test('parser recovers from a missing endmodule', () => {
   const { modules } = parseSource('/t.v', 'module a; sub u();\nmodule b; endmodule');
   assert.deepEqual(modules.map((m) => m.name), ['a', 'b']);

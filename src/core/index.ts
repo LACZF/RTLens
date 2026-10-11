@@ -7,7 +7,7 @@
  */
 
 import { parseSource } from './parser';
-import type { ModuleDef, ModuleKind, PortDecl, VarDecl, ParamDecl, FunctionDecl, FileScopeDecls, DataType, InstanceSite } from './ast';
+import type { ModuleDef, ModuleKind, PortDecl, VarDecl, ParamDecl, FunctionDecl, FileScopeDecls, DataType, InstanceSite, MacroDef } from './ast';
 import { MapScope, typeWidth } from './fold';
 import { buildFileJumps, lookupInTable, type FileJumps, type JumpEntry } from './jump';
 import { unresolvedInstances } from './problems';
@@ -73,6 +73,12 @@ export class HdlIndex {
   /** File path -> the files it `` `include ``s, as written. */
   private fileIncludes = new Map<string, string[]>();
   /**
+   * File path -> the `` `define `` macros declared there, by name. A macro is
+   * textual, so a reference (`WIDTH) does not resolve like a symbol in a scope -
+   * it lands on the definition that was seen.
+   */
+  private macrosByFile = new Map<string, Map<string, MacroDef>>();
+  /**
    * Saved navigation relations per file: identifier occurrence -> declaration.
    * Insertion order is least-recently-used first, which is what the eviction
    * uses; `lookupJump` re-inserts a table on every hit to keep it fresh.
@@ -102,6 +108,17 @@ export class HdlIndex {
     this.parsed.add(file);
     if (res.includes.length > 0) {
       this.fileIncludes.set(file, res.includes);
+    }
+    if (res.macros.length > 0) {
+      const byName = new Map<string, MacroDef>();
+      // A redefinition wins: the compiler sees the last `define. The map is
+      // rebuilt per file, so a renamed macro cannot leave a stale target.
+      for (const m of res.macros) {
+        byName.set(m.name, m);
+      }
+      this.macrosByFile.set(file, byName);
+    } else {
+      this.macrosByFile.delete(file);
     }
     if (mods.length === 0) {
       // No module to hang the types on, so this is a header: keep them for the
@@ -320,6 +337,7 @@ export class HdlIndex {
     // below has to happen before the early return.
     const wasHeader = this.headerScope.delete(file);
     this.fileIncludes.delete(file);
+    this.macrosByFile.delete(file);
     this.parsed.delete(file);
     const mods = this.byFile.get(file);
     if (!mods) {
@@ -354,6 +372,7 @@ export class HdlIndex {
     this.files.clear();
     this.headerScope.clear();
     this.fileIncludes.clear();
+    this.macrosByFile.clear();
     this.parsed.clear();
     this.jumpTables.clear();
     this.jumpEntries = 0;
@@ -576,6 +595,34 @@ export class HdlIndex {
   resolveInterface(name: string): ModuleDef | undefined {
     const def = this.resolveModule(name);
     return def && (def.kind === 'interface' || def.kind === 'class') ? def : undefined;
+  }
+
+  /**
+   * The `` `define `` a reference names. A macro is textual, so there is no
+   * scope to search: a definition in the same file wins (a macro is usually
+   * used right below its `define), then one in the same directory, then any.
+   * The last `define of a file wins, matching what the compiler sees.
+   */
+  resolveMacro(name: string, fromFile?: string): MacroDef | undefined {
+    let first: MacroDef | undefined;
+    let sameDir: MacroDef | undefined;
+    const from = fromFile ? dirname(fromFile) : undefined;
+    for (const defs of this.macrosByFile.values()) {
+      const def = defs.get(name);
+      if (!def) {
+        continue;
+      }
+      if (fromFile && def.file === fromFile) {
+        return def;
+      }
+      if (!first) {
+        first = def;
+      }
+      if (from !== undefined && dirname(def.file) === from) {
+        sameDir = def;
+      }
+    }
+    return sameDir ?? first;
   }
 
   /** Find a signal / port / parameter / function declaration by name in a module. */

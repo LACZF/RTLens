@@ -14,7 +14,7 @@
 
 import { tokenize, type Range } from './lexer';
 import type { HdlIndex } from './index';
-import { resolvePath, wordAtToken } from './resolve';
+import { resolvePath, resolveMacro, wordAtToken } from './resolve';
 import type { DeclKind } from './resolve';
 
 /** One saved relation: where an identifier sits and where it lands. */
@@ -67,14 +67,18 @@ export function buildFileJumps(index: HdlIndex, file: string, source: string): F
     // One name is by far the common case, and splitting it would allocate an
     // array per identifier in the file.
     const path = word.fullPath.includes('.') ? word.fullPath.split('.') : [word.fullPath];
-    const resolution = resolvePath(index, mod, path);
+    const macro = word.isMacro ? resolveMacro(index, word.name, file) : undefined;
+    const resolution = macro && macro.ok ? macro : resolvePath(index, mod, path);
     if (!resolution.ok) {
       continue;
     }
     const decl = resolution.decl;
+    // For a `NAME macro reference the occurrence is the identifier, not the
+    // backtick that precedes it; the saved hit should start on the name.
+    const tokenRange = word.isMacro ? word.nameRange : tok.range;
     const entry: JumpEntry = {
-      start: tok.range.start.character,
-      end: tok.range.end.character,
+      start: tokenRange.start.character,
+      end: tokenRange.end.character,
       kind: decl.kind,
     };
     if (decl.kind === 'instance') {
