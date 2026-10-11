@@ -146,9 +146,9 @@
         "hdl.connectView.graph.maxSignalsPerGroup": {
           "type": "number",
           "default": 40,
-          "minimum": 1,
+          "minimum": 0,
           "maximum": 500,
-          "description": "Maximum number of signal rows shown per module box in the connectivity graph; excess are collapsed under a '…' toggle."
+          "description": "Maximum number of signal rows shown per module box in the connectivity graph; 0 means show all."
         },
         "hdl.connectView.followDefinition": {
           "type": "boolean",

@@ -359,7 +359,7 @@ class GraphBuilder {
     // wires and only the tail of the I/O.
     const limit = this.signalLimits.get(scope) ?? this.maxSignalsPerScope;
     const used = this.netCount.get(scope) ?? 0;
-    if (used >= limit) {
+    if (limit !== Infinity && limit >= 0 && used >= limit) {
       this.cappedScopes.add(scope);
       return id;
     }

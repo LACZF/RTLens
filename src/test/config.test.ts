@@ -83,6 +83,15 @@ test('config: numeric settings have a floor', () => {
     if (schema.type !== 'number') {
       continue;
     }
+    // maxSignalsPerGroup can be 0 to mean "no cap"
+    if (key === 'hdl.connectView.graph.maxSignalsPerGroup') {
+      assert.ok(
+        typeof schema.minimum === 'number' && schema.minimum >= 0,
+        `${key} must allow 0 or more`,
+      );
+      assert.ok(typeof schema.default === 'number', `${key} has no numeric default`);
+      continue;
+    }
     assert.ok(
       typeof schema.minimum === 'number' && schema.minimum > 0,
       `${key} is numeric with no positive minimum in package.json`,
