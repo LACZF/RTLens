@@ -578,7 +578,7 @@ resolve(name, scope) 优先级从高到低：
 
 CI：`npm run check && npm test`（或 `make check`）。
 
-**打包**：`make` = 装依赖（缺 `node_modules` 时）→ `tsc` → 单测 + e2e → `vsce package`，产物是 `dist/rtlens-<version>.vsix`（32 个文件、约 131 KB，含 `out/core/jump.js`、`out/core/scopeIndex.js`）。`vsce` 由 `npx --yes @vscode/vsce@4` 按需取用，不写进 `devDependencies`；离线环境可以 `make vsix VSCE=./node_modules/.bin/vsce`。`.vscodeignore` 把 `src/`、`test/`、`out/test/`、`out/tools/`、`*.js.map` 全部排除，vsix 里只剩运行时真正需要的 `out/extension.js`、`out/core`、`out/vscode`、`package.json`、语法与图标。`make contents` 打印将要打进去的文件清单。marketplace 图标必须是 PNG（`resources/icon.png`），而活动栏的 `viewsContainers` 图标是另一个文件 `resources/icon.svg`——两处曾经互相覆盖过一次，改动时要一起看。两个文件的职责不同：**活动栏 SVG 是单色蒙版**，VS Code 按 Activity Bar 前景色给它上色，所以它必须是**透明背景 + 单色字形**（`viewBox="0 0 24 24"`、只用 `currentColor`），一旦像早先那样铺一块铺满画布的底色矩形，蒙版就退化成一块实心方板（用户看到的"白板"）；marketplace PNG 则可以带底色、有品牌色，二者不再同源。
+**打包**：`make` = 装依赖（缺 `node_modules` 时）→ `tsc` → 单测 + e2e → `vsce package`，产物是 `dist/rtlens-<version>.vsix`（33 个文件、约 147 KB，含 `out/core/jump.js`、`out/core/scopeIndex.js`）。`vsce` 由 `npx --yes @vscode/vsce@4` 按需取用，不写进 `devDependencies`；离线环境可以 `make vsix VSCE=./node_modules/.bin/vsce`。`.vscodeignore` 把 `src/`、`test/`、`out/test/`、`out/tools/`、`*.js.map` 全部排除，vsix 里只剩运行时真正需要的 `out/extension.js`、`out/core`、`out/vscode`、`package.json`、`README.md`、语法与图标。`make contents` 打印将要打进去的文件清单。注意 README 里不要放指向被排除文件（如 `DESIGN.md`）的相对链接——vsce v4 会把它当成错误而不是警告，直接让打包失败（无 repository 字段时）。marketplace 图标必须是 PNG（`resources/icon.png`），而活动栏的 `viewsContainers` 图标是另一个文件 `resources/icon.svg`——两处曾经互相覆盖过一次，改动时要一起看。两个文件的职责不同：**活动栏 SVG 是单色蒙版**，VS Code 按 Activity Bar 前景色给它上色，所以它必须是**透明背景 + 单色字形**（`viewBox="0 0 24 24"`、只用 `currentColor`），一旦像早先那样铺一块铺满画布的底色矩形，蒙版就退化成一块实心方板（用户看到的"白板"）；marketplace PNG 则可以带底色、有品牌色，二者不再同源。
 
 ---
 
