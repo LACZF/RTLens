@@ -349,6 +349,7 @@ opts: {
     svg,
     api,
     posted,
+    message,
     group: (k: string) => api._els!.groups.find((gd) => gd.g.key === k)!,
     search: () => elements.search,
     edge: (to: string, port: string) =>
@@ -479,7 +480,7 @@ test('a hierarchy-collapsed module keeps its box, marked and without children', 
   assert.ok(mark, 'the collapsed box is marked with a +');
 });
 
-test('containing modules are hidden and the + reveals them all at once', () => {
+test('containing modules are hidden and the + reveals one level', () => {
   // One ancestor above the root is available but not drawn yet.
   const p = startPanel(ancestorGraph(0), { ancestorsShown: 0, ancestorsLeft: 1 });
 
@@ -491,12 +492,11 @@ test('containing modules are hidden and the + reveals them all at once', () => {
   fire(plus!, 'click');
   const msg = p.posted.find((m) => m.type === 'ancestors');
   assert.ok(msg, 'an ancestors message was posted');
-  assert.equal(msg!.shown, 1, 'the whole remaining chain is asked for');
+  assert.equal(msg!.shown, 1, 'the next containing module is asked for');
 });
 
-test('+ reveals every containing module in one click and - tucks one back', () => {
-  // The parent is already drawn; the + must now ask for the whole remaining
-  // chain above it, not just one more level.
+test('+ reveals the next containing module and - tucks one back', () => {
+  // The parent is already drawn; the + asks for one more level above it.
   const g = ancestorGraph(1);
   const p = startPanel(g, { ancestorsShown: 1, ancestorsLeft: 1 });
 
@@ -505,7 +505,7 @@ test('+ reveals every containing module in one click and - tucks one back', () =
   const up = find(top.el, (e) => e.tagName === 'text' && e.textContent === '+' && e.classList.contains('lm'));
   assert.ok(up, 'top wears a + because one more level is hidden above it');
   fire(up!, 'click');
-  assert.equal(p.posted.find((m) => m.type === 'ancestors')?.shown, 2, 'both remaining levels are revealed at once');
+  assert.equal(p.posted.find((m) => m.type === 'ancestors')?.shown, 2, 'the next level is revealed');
 });
 
 test('a + with nothing above it hides on click, and a - folds the parent away', () => {
@@ -535,10 +535,10 @@ test('a + with nothing above it hides on click, and a - folds the parent away', 
   assert.equal(p.posted.find((m) => m.type === 'ancestors')?.shown, 0);
 });
 
-test('each box folds its own parent and the + reveals every remaining level at once', () => {
+test('each box folds its own parent and the + reveals the next level', () => {
   // chip > top > u_mid: with one ancestor shown, the focus folds its shown
   // parent with a - while the parent ancestor still wears a + of its own; that
-  // + reveals the whole chip>... chain above in one go, not one level at a time.
+  // + reveals one more level (chip), not the whole chain above in one go.
   const p = startPanel(deepAncestorGraph(1), { ancestorsShown: 1, ancestorsLeft: 1 });
 
   const mid = p.group('chip.u_top.u_mid');
@@ -551,12 +551,12 @@ test('each box folds its own parent and the + reveals every remaining level at o
   const reveal = find(top.el, (e) => e.tagName === 'text' && e.textContent === '+' && e.classList.contains('lm'));
   assert.ok(reveal, 'the ancestor whose parent is still hidden wears its own left +');
   fire(reveal!, 'click');
-  assert.equal(p.posted.find((m) => m.type === 'ancestors')?.shown, 2, 'the whole remaining chain at once');
+  assert.equal(p.posted.find((m) => m.type === 'ancestors')?.shown, 2, 'the next level is revealed');
 });
 
-test('a single click on + reveals every containing module at once', () => {
-  // Two levels above the root, both hidden: the + on the focus asks for the
-  // entire chain, chip and top together, in one message.
+test('each + reveals exactly one more containing module', () => {
+  // Two levels above the root, both hidden: the first + asks for the nearest
+  // parent only; the next + then asks for the one above it.
   const p = startPanel(deepAncestorGraph(0), { ancestorsShown: 0, ancestorsLeft: 2 });
 
   assert.ok(!p.api._els!.groups.some((gd) => gd.g.key === 'chip.u_top'), 'no ancestor is drawn yet');
@@ -564,7 +564,15 @@ test('a single click on + reveals every containing module at once', () => {
   const plus = find(mid.el, (e) => e.tagName === 'text' && e.textContent === '+' && e.classList.contains('lm'));
   assert.ok(plus, 'the focus wears a left + while containing modules are hidden');
   fire(plus!, 'click');
-  assert.equal(p.posted.find((m) => m.type === 'ancestors')?.shown, 2, 'both levels are asked for in one click');
+  assert.equal(p.posted.filter((m) => m.type === 'ancestors')[0]?.shown, 1, 'only the nearest parent is asked for');
+
+  // The extension rebuilds with one more ancestor drawn; its + asks for the next.
+  p.message({ type: 'graph', graph: deepAncestorGraph(1), collapsed: [], ancestorsShown: 1, ancestorsLeft: 1, expanded: [] });
+  const top = p.group('chip.u_top');
+  const next = find(top.el, (e) => e.tagName === 'text' && e.textContent === '+' && e.classList.contains('lm'));
+  assert.ok(next, 'the newly drawn ancestor wears the next +');
+  fire(next!, 'click');
+  assert.equal(p.posted.filter((m) => m.type === 'ancestors')[1]?.shown, 2, 'the level above it is asked for next');
 });
 
 test('children start hidden and the + on the right edge reveals them one level per click', () => {

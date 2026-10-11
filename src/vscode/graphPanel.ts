@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 
 import type { IndexService } from './indexService';
 import type { Graph } from '../core/graph';
-import { findByPath, pathChain } from '../core/hierarchy';
+import { containingDesign, findByPath, pathChain } from '../core/hierarchy';
 import type { HierarchyNode } from '../core/ast';
 
 /**
@@ -109,6 +109,35 @@ export class GraphPanel {
   }
 
   setNode(node: HierarchyNode, focus?: string): void {
+    // A graph rooted at a bare module definition (the module, not an instance)
+    // cannot say who instantiates it, so its containing chain is invisible: the
+    // left-edge + finds nothing. Walk the index upward and re-root the walk at
+    // the design that contains the module - chip_top above datapath above adder
+    // - remapping the node and focus onto the real instance paths. Anything
+    // already rooted inside a hierarchy keeps its chain as given.
+    if (!this.chainRoot.path.includes('.')) {
+      const containing = containingDesign(
+        this.svc.index,
+        this.chainRoot.moduleName,
+        this.chainRoot.file,
+        this.svc.config.topModules,
+      );
+      if (containing && containing.node.path !== containing.root.path) {
+        const base = this.chainRoot.path;
+        const remap = (p: string) =>
+          p === base
+            ? containing.node.path
+            : p.startsWith(base + '.')
+              ? containing.node.path + p.slice(base.length)
+              : p;
+        const mapped = findByPath(containing.root, remap(node.path));
+        if (mapped) {
+          focus = remap(focus ?? node.path);
+          this.chainRoot = containing.root;
+          node = mapped;
+        }
+      }
+    }
     this.node = node;
     this.focus = focus ?? node.path;
     this.ancestors = pathChain(this.chainRoot, node.path).slice(0, -1);
@@ -880,7 +909,7 @@ export const SCRIPT = String.raw`
   /**
    * Set how many levels of the containing chain are drawn. The '-' on a box
    * whose parent is shown folds the chain back to that box's own level
-   * (next = u); the '+' reveals the whole chain above in one go (next = total).
+   * (next = u); the '+' reveals exactly one more parent (next = shown + 1).
    * The extension rebuilds the graph with that many ancestors and sends the
    * authoritative counts back; the local numbers move first so the box reacts
    * on the spot.
@@ -1145,9 +1174,8 @@ export const SCRIPT = String.raw`
         sideMark(grp, left - 12, hy + 4, '−', 'Hide the containing modules',
           () => setAncestors(up), 'lm');
       } else if (ancLeft > 0) {
-        sideMark(grp, left - 12, hy + 4, '+',
-          ancLeft === 1 ? 'Show the containing module' : 'Show all ' + ancLeft + ' containing modules',
-          () => setAncestors(ancShown + ancLeft), 'lm');
+        sideMark(grp, left - 12, hy + 4, '+', 'Show the containing module',
+          () => setAncestors(ancShown + 1), 'lm');
       } else if (!probedUp.has(g.head.path)) {
         sideMark(grp, left - 12, hy + 4, '+', 'No containing module above',
           () => { probedUp.add(g.head.path); scheduleDraw(); }, 'lm');

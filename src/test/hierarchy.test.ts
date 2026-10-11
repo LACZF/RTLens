@@ -1,8 +1,68 @@
 import * as assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { test } from 'node:test';
 
 import { HdlIndex } from '../core/index';
-import { signalWidth } from '../core/hierarchy';
+import { containingDesign, signalWidth } from '../core/hierarchy';
+
+const ROOT = path.resolve(__dirname, '..', '..');
+const FIXTURES = path.join(ROOT, 'test', 'fixtures');
+
+function indexDir(dir: string): HdlIndex {
+  const index = new HdlIndex();
+  const walk = (d: string): void => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) {
+        walk(p);
+      } else if (/\.(v|sv|svh|vh)$/.test(e.name)) {
+        index.addFile(p, fs.readFileSync(p, 'utf8'));
+      }
+    }
+  };
+  walk(dir);
+  return index;
+}
+
+test('containingDesign: a module definition is placed inside the design that instantiates it', () => {
+  // A module's own file does not say who instantiates it, so a graph opened from
+  // adder's definition used to have an empty containing chain: the left-edge +
+  // found nothing. Walking the reverse instances puts chip_top above datapath
+  // above adder.
+  const index = indexDir(path.join(FIXTURES, 'lib'));
+  const adder = containingDesign(index, 'adder');
+  assert.ok(adder, 'adder is instantiated somewhere');
+  assert.equal(adder!.root.path, 'chip_top', 'the design root is the never-instantiated top');
+  assert.equal(adder!.node.path, 'chip_top.u_dpath.u_adder', 'the instance sits on its full path');
+  assert.equal(adder!.node.parentPath, 'chip_top.u_dpath', 'and its parent is the datapath instance');
+
+  const datapath = containingDesign(index, 'datapath');
+  assert.equal(datapath!.root.path, 'chip_top');
+  assert.equal(datapath!.node.path, 'chip_top.u_dpath');
+
+  const control = containingDesign(index, 'control');
+  assert.equal(control!.node.path, 'chip_top.u_ctrl', 'a sibling instance is found just as well');
+});
+
+test('containingDesign: a configured top wins even when a testbench instantiates it', () => {
+  // With the testbench in the index, plain never-instantiated inference would
+  // root the chain at tb_chip_top. A configured top module is a stop point, so
+  // "chip_top -> datapath -> adder" is what comes back.
+  const index = indexDir(FIXTURES);
+  const without = containingDesign(index, 'adder');
+  assert.equal(without!.root.path, 'tb_chip_top', 'the closest design root is the testbench');
+  const withTop = containingDesign(index, 'adder', undefined, ['chip_top']);
+  assert.equal(withTop!.root.path, 'chip_top', 'naming the top stops the walk there');
+  assert.equal(withTop!.node.path, 'chip_top.u_dpath.u_adder');
+});
+
+test('containingDesign: a real top is its own root, so its chain stays empty', () => {
+  const index = indexDir(path.join(FIXTURES, 'lib'));
+  const top = containingDesign(index, 'chip_top');
+  assert.equal(top!.root.path, 'chip_top');
+  assert.equal(top!.node.path, 'chip_top', 'nothing is above a top, so the node is the root');
+});
 
 test('hierarchy: the width of a signal is every dimension it was declared with', () => {
   // The tree view shows this number. It used to be the first packed range and

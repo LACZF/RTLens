@@ -9,7 +9,7 @@
  */
 
 import type { HdlIndex } from './index';
-import type { HierarchyNode, ModuleDef, ParamDecl, PortDecl } from './ast';
+import type { HierarchyNode, ModuleDef, ParamDecl, PortDecl, InstanceSite } from './ast';
 import { MapScope, rangeWidth, typeWidth } from './fold';
 
 export interface HierarchyOptions {
@@ -237,6 +237,91 @@ export function buildHierarchy(
   fromFile?: string,
 ): HierarchyResult | undefined {
   return new Builder(index, opts).build(moduleName, fromFile);
+}
+
+/**
+ * Where a module's definition lives inside the wider design. A module's own
+ * file cannot say who instantiates it, so a graph opened from a bare module
+ * root (the definition, not an instance) walks the reverse instances upward:
+ * adder sits inside datapath, datapath inside chip_top. Breadth-first keeps
+ * the *closest* design root, so an instantiating testbench cannot steal the
+ * chain from the real top; a name in `preferTops` wins over a longer chain.
+ * Returns the hierarchy rooted at that top and the node standing for the
+ * module inside it, so the containing chain can be revealed above the graph
+ * root with the left-edge +/-.
+ */
+export function containingDesign(
+  index: HdlIndex,
+  moduleName: string,
+  fromFile?: string,
+  preferTops: string[] = [],
+): { root: HierarchyNode; node: HierarchyNode } | undefined {
+  if (!index.resolveModule(moduleName, fromFile)) {
+    return undefined;
+  }
+  // Chains are lists of module names, bottom-up, with the instance that names
+  // the module below each one in its own scope.
+  interface Seg {
+    parent: string;
+    inst: InstanceSite | null;
+  }
+  const open: { name: string; chain: Seg[] }[] = [{ name: moduleName, chain: [] }];
+  const seen = new Set<string>([moduleName]);
+  const candidates: { top: string; chain: Seg[] }[] = [];
+  while (open.length) {
+    const cur = open.shift()!;
+    // A module named as a preferred top ends the chain there, testbench or not:
+    // the configured top is the design root even when something instantiates it.
+    if (preferTops.includes(cur.name)) {
+      candidates.push({ top: cur.name, chain: cur.chain });
+      continue;
+    }
+    const parents = Array.from(
+      new Map(index.instantiatorsOf(cur.name).map((p) => [p.parent, p.inst])).entries(),
+    );
+    if (parents.length === 0) {
+      candidates.push({ top: cur.name, chain: cur.chain });
+      continue;
+    }
+    for (const [parent, inst] of parents) {
+      if (!seen.has(parent)) {
+        seen.add(parent);
+        open.push({ name: parent, chain: [...cur.chain, { parent, inst }] });
+      }
+    }
+  }
+  if (candidates.length === 0) {
+    return undefined;
+  }
+  const scored = candidates.map((c) => ({
+    ...c,
+    prefer: preferTops.includes(c.top) ? 0 : 1,
+  }));
+  scored.sort(
+    (a, b) =>
+      a.prefer - b.prefer ||
+      a.chain.length - b.chain.length ||
+      (a.top < b.top ? -1 : a.top > b.top ? 1 : 0),
+  );
+  const best = scored[0];
+  const res = buildHierarchy(index, best.top, { maxDepth: 128 });
+  const root = res?.root;
+  if (!root) {
+    return undefined;
+  }
+  // Top-down path through the chain: each segment's instance sits in the scope
+  // of the module above it.
+  let path = best.top;
+  for (let i = best.chain.length - 1; i >= 0; i--) {
+    const seg = best.chain[i];
+    if (!seg.inst) {
+      continue;
+    }
+    const local = seg.inst.genPrefix ? `${seg.inst.genPrefix}.${seg.inst.name}` : seg.inst.name;
+    path = `${path}.${local}`;
+  }
+  const node = findByPath(root, path);
+  return node ? { root, node } : undefined;
 }
 
 /**

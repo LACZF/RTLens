@@ -224,12 +224,24 @@ const api: Record<string, any> = {
     },
     createWebviewPanel() {
       const messages = new EventEmitter<unknown>();
-      return {
-        webview: { html: '', onDidReceiveMessage: messages.event, postMessage: async () => undefined },
+      const posted: unknown[] = [];
+      const panel = {
+        webview: {
+          html: '',
+          onDidReceiveMessage: messages.event,
+          postMessage: async (m: unknown) => {
+            posted.push(m);
+          },
+        },
         onDidDispose: new EventEmitter<void>().event,
         reveal: () => undefined,
         dispose: () => undefined,
+        // Test hooks: what the panel was told, and a way to send it messages.
+        __posted: posted,
+        __send: (m: unknown) => messages.fire(m),
       };
+      (api.__webviews ??= []).push(panel);
+      return panel;
     },
     showErrorMessage: async () => undefined,
     showInformationMessage: async () => undefined,

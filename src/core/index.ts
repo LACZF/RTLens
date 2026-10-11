@@ -7,7 +7,7 @@
  */
 
 import { parseSource } from './parser';
-import type { ModuleDef, ModuleKind, PortDecl, VarDecl, ParamDecl, FunctionDecl, FileScopeDecls, DataType } from './ast';
+import type { ModuleDef, ModuleKind, PortDecl, VarDecl, ParamDecl, FunctionDecl, FileScopeDecls, DataType, InstanceSite } from './ast';
 import { MapScope, typeWidth } from './fold';
 import { buildFileJumps, lookupInTable, type FileJumps, type JumpEntry } from './jump';
 import { unresolvedInstances } from './problems';
@@ -482,6 +482,27 @@ export class HdlIndex {
     const out: ModuleDef[] = [];
     for (const list of this.byName.values()) {
       out.push(...list);
+    }
+    return out;
+  }
+
+  /**
+   * Every place `moduleName` is instantiated: the instantiating module's name
+   * together with the instance, wherever it sits. The graph uses this to walk
+   * upward from a module's own definition to the design root that contains it
+   * (`containingDesign` in `hierarchy.ts`); plain top inference knows only the
+   * reverse direction.
+   */
+  instantiatorsOf(moduleName: string): { parent: string; inst: InstanceSite }[] {
+    const out: { parent: string; inst: InstanceSite }[] = [];
+    for (const mods of this.byFile.values()) {
+      for (const m of mods) {
+        for (const inst of m.instances) {
+          if (inst.moduleName === moduleName) {
+            out.push({ parent: m.name, inst });
+          }
+        }
+      }
     }
     return out;
   }
