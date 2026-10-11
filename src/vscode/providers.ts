@@ -203,7 +203,10 @@ export class HdlHoverProvider implements vscode.HoverProvider {
     if (d.kind === 'macro') {
       const def = index.resolveMacro(d.name, d.file);
       if (def && def.text) {
-        parts.push('`' + def.text);
+        const body = def.text.replace(/^`define\s+[A-Za-z_$][A-Za-z0-9_$]*/, '').trim();
+        if (body.length > 0) {
+          parts.push('`' + body);
+        }
       }
     }
     if (d.kind === 'instance' && d.viaInstance) {
