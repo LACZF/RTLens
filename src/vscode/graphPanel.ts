@@ -553,8 +553,16 @@ export const SCRIPT = String.raw`
       return g;
     };
     for (const n of ns) {
-      if (n.kind === 'net') grab(scopeOf(n)).nets.push(n);
-      else { const g = grab(n.path); g.head = n; g.depth = n.depth; }
+      if (n.kind === 'net') {
+        // Only show I/O-facing signals (ports or signals connected to child ports).
+        if (n.direction !== undefined && n.direction !== null) {
+          grab(scopeOf(n)).nets.push(n);
+        }
+      } else {
+        const g = grab(n.path);
+        g.head = n;
+        g.depth = n.depth;
+      }
     }
     const gs = [];
     for (const g of map.values()) {

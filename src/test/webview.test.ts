@@ -619,7 +619,7 @@ test('each module reveals only its own next level of children', () => {
 
   const keys = p.api._els!.groups.map((gd) => gd.g.key).sort();
   assert.deepEqual(keys, ['top', 'top.u_dangling', 'top.u_leaf', 'top.u_mid', 'top.u_missing']);
-  assert.equal(p.group('top.u_mid').g.nets.length, 4, 'the child at the revealed level shows its own ports only');
+  assert.equal(p.group('top.u_mid').g.nets.length, 3, 'the child at the revealed level shows its own ports only');
 
   const root = p.group('top');
   assert.ok(find(root.el, (e) => e.tagName === 'text' && e.textContent === '−' && e.classList.contains('rm')),
