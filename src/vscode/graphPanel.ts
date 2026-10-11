@@ -375,7 +375,6 @@ const STYLE = `
   .chev { font-size: 11px; fill: currentColor; opacity: .8; }
   .edge { fill: none; stroke-width: 1.1; opacity: .55; }
   .edge:hover { opacity: 1; stroke-width: 2; }
-  .dim { opacity: .12; }
   #tip {
     position: fixed; pointer-events: none; padding: 3px 6px; max-width: 420px;
     background: var(--vscode-editorHoverWidget-background, #252526);
@@ -1042,7 +1041,6 @@ export const SCRIPT = String.raw`
       drawn.push(gd);
     }
     api._els = { groups: drawn, edgeEls };
-    applyHighlight();
   }
 
   /** A clickable mark that sits on a box edge, outside the box outline. */
@@ -1312,31 +1310,9 @@ export const SCRIPT = String.raw`
   }
   function hideTip() { tip.style.display = 'none'; }
 
-  /**
-   * Dim everything that is not part of the highlighted node's neighbourhood.
-   * The neighbourhood is grouped: highlighting one signal keeps its whole
-   * module legible, and the edges that run between two lit groups stay lit too.
-   */
-  function applyHighlight() {
-    if (!api._els || !model) return;
-    const near = highlight ? withGroups(nearOf(highlight)) : null;
-    for (const gd of api._els.groups) {
-      const inNear = !!near && gd.els.some(x => near.has(x.n.id));
-      const dimGrp = !!near && !inNear;
-      gd.el.classList.toggle('dim', dimGrp);
-      for (const x of gd.els) {
-        x.el.classList.toggle('dim', !dimGrp && !!near && !near.has(x.n.id));
-      }
-    }
-    for (const ed of api._els.edgeEls) {
-      const bright = !near || (near.has(ed.e.from) && near.has(ed.e.to));
-      ed.el.classList.toggle('dim', !bright);
-    }
-  }
-
   // pan / zoom
   svg.addEventListener('mousedown', (ev) => { drag = { pan: true, sx: ev.clientX, sy: ev.clientY, ox: view.x, oy: view.y }; svg.classList.add('dragging'); });
-  window.addEventListener('mouseup', () => { drag = null; svg.classList.remove('dragging'); applyHighlight(); });
+  window.addEventListener('mouseup', () => { drag = null; svg.classList.remove('dragging'); });
   window.addEventListener('mousemove', (ev) => {
     if (!drag) return;
     if (drag.pan) {
