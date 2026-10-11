@@ -67,7 +67,7 @@
       }
     ],
     "configuration": {
-      "title": "HDL Connect View",
+      "title": "RTLens",
       "properties": {
         "hdl.connectView.files": {
           "type": "array",

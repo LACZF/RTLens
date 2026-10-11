@@ -373,6 +373,8 @@ const STYLE = `
   .sig { font-size: 10.5px; fill: currentColor; }
   .wt { font-size: 9px; fill: currentColor; opacity: .55; }
   .chev { font-size: 11px; fill: currentColor; opacity: .8; }
+  .sm { font-size: 18px; font-weight: 600; opacity: .9; }
+  .smhit { fill: transparent; pointer-events: all; cursor: pointer; }
   .edge { fill: none; stroke-width: 1.1; opacity: .55; }
   .edge:hover { opacity: 1; stroke-width: 2; }
   #tip {
@@ -1045,13 +1047,19 @@ export const SCRIPT = String.raw`
 
   /** A clickable mark that sits on a box edge, outside the box outline. */
   function sideMark(parent, x, y, glyph, tip, onClick, cls) {
-    const t = el('text', { x, y, 'text-anchor': 'middle', class: 'chev ' + cls });
+    // A transparent rect gives the small glyph a comfortable click target;
+    // both carry the edge class so queries still find the text by class.
+    const hit = el('rect', { x: x - 11, y: y - 13, width: 22, height: 24, class: 'smhit ' + cls });
+    const t = el('text', { x, y, 'text-anchor': 'middle', class: 'chev sm ' + cls });
     t.textContent = glyph;
-    t.addEventListener('mousedown', (ev) => ev.stopPropagation());
-    t.addEventListener('click', (ev) => { ev.stopPropagation(); onClick(); });
-    t.addEventListener('mouseenter', (ev) => showTip(ev, tip));
-    t.addEventListener('mousemove', moveTip);
-    t.addEventListener('mouseleave', hideTip);
+    for (const node of [hit, t]) {
+      node.addEventListener('mousedown', (ev) => ev.stopPropagation());
+      node.addEventListener('click', (ev) => { ev.stopPropagation(); onClick(); });
+      node.addEventListener('mouseenter', (ev) => showTip(ev, tip));
+      node.addEventListener('mousemove', moveTip);
+      node.addEventListener('mouseleave', hideTip);
+    }
+    parent.appendChild(hit);
     parent.appendChild(t);
   }
 
@@ -1158,7 +1166,7 @@ export const SCRIPT = String.raw`
       }
     }
     // Every box carries a '+' on each edge by default: the left one searches
-    // upward and reveals the whole containing chain at once (or hides the +
+    // one level upward and reveals the next containing module (or hides the +
     // when no containing module exists above), the right one toggles that
     // box's own children (or hides when there are none). Once revealed, the
     // '-' folds the chain/children back. These land after the header in the

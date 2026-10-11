@@ -575,6 +575,25 @@ test('each + reveals exactly one more containing module', () => {
   assert.equal(p.posted.filter((m) => m.type === 'ancestors')[1]?.shown, 2, 'the level above it is asked for next');
 });
 
+test('the edge +/- marks are enlarged and carry a bigger click target', () => {
+  const p = startPanel(ancestorGraph(0), { ancestorsShown: 0, ancestorsLeft: 1 });
+
+  const lm = find(p.group('top.u_mid').el,
+    (e) => e.tagName === 'text' && e.textContent === '+' && e.classList.contains('lm'));
+  assert.ok(lm, 'the left-edge + is drawn');
+  assert.ok(lm!.classList.contains('sm'), 'the edge mark carries the enlarged-sm class');
+
+  const hit = find(p.group('top.u_mid').el,
+    (e) => e.tagName === 'rect' && e.classList.contains('smhit') && e.classList.contains('lm'));
+  assert.ok(hit, 'a transparent hit rect backs the glyph');
+  assert.ok(Number(hit!.attrs.width) >= 20 && Number(hit!.attrs.height) >= 20,
+    'the hit target is at least 20x20 graph units');
+
+  // The hit rect is wired to the same action as the glyph.
+  fire(hit!, 'click');
+  assert.equal(p.posted.find((m) => m.type === 'ancestors')?.shown, 1, 'clicking the target reveals a level');
+});
+
 test('children start hidden and the + on the right edge reveals them one level per click', () => {
   // The extension builds a root with nothing expanded; the right-edge + then
   // reveals only that module's own direct children.
