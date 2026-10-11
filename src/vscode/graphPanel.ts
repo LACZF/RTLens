@@ -271,7 +271,12 @@ export class GraphPanel {
         if (!path) {
           return;
         }
-        const page = Math.max(1, this.svc.config.graphMaxSignalsPerGroup);
+        const cap = this.svc.config.graphMaxSignalsPerGroup;
+        if (cap <= 0) {
+          // Show all signals: raising further is not necessary.
+          return;
+        }
+        const page = cap;
         const current = this.signalLimits.get(path) ?? page;
         this.signalLimits.set(path, current + page);
         void this.refresh();
