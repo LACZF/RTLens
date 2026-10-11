@@ -143,6 +143,13 @@
           "default": false,
           "description": "Show parent/child containment edges in the connectivity graph."
         },
+        "hdl.connectView.graph.maxSignalsPerGroup": {
+          "type": "number",
+          "default": 40,
+          "minimum": 1,
+          "maximum": 500,
+          "description": "Maximum number of signal rows shown per module box in the connectivity graph; excess are collapsed under a '…' toggle."
+        },
         "hdl.connectView.followDefinition": {
           "type": "boolean",
           "default": true,

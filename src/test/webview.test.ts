@@ -283,12 +283,13 @@ before(async () => {
 
 function startPanel(
   graph: Graph,
-opts: {
+  opts: {
     focus?: string;
     collapsed?: string[];
     ancestorsShown?: number;
     ancestorsLeft?: number;
     expanded?: string[];
+    maxSignalsPerGroup?: number;
   } = {},
 ) {
   const posted: Record<string, unknown>[] = [];
@@ -343,6 +344,7 @@ opts: {
     ancestorsShown: opts.ancestorsShown ?? 0,
     ancestorsLeft: opts.ancestorsLeft ?? 0,
     expanded: opts.expanded ?? [],
+    maxSignalsPerGroup: opts.maxSignalsPerGroup,
   });
   const api = (svg as unknown as { __api: PanelApi }).__api;
   return {
@@ -391,6 +393,24 @@ test('every module is one box and its signals are rows inside it', () => {
   assert.equal(leaf.els.length, leaf.g.nets.length + 1);
   assert.ok(withClass(leaf.el, 'rowg'), 'rows are drawn as their own elements');
 });
+
+test('a module with many signals shows only a configurable subset behind a ... toggle', () => {
+  const p = startPanel(fixtureGraph(), { maxSignalsPerGroup: 2 });
+  const top = p.group('top');
+  assert.equal(top.g.nets.length, 6, 'the group still knows every one of its signals');
+  // Header plus the two visible rows; the rest is hidden.
+  assert.equal(top.els.length, 3, 'only the subset is drawn as rows');
+  let dots = find(top.el, (e) => e.tagName === 'text' && e.textContent === '...');
+  assert.ok(dots, 'the excess signals collapse under a ... toggle');
+
+  fire(dots!, 'click');
+  p.api.redraw();
+  const top2 = p.group('top');
+  dots = find(top2.el, (e) => e.tagName === 'text' && e.textContent === '...');
+  assert.equal(dots, undefined, 'the ... goes away once every signal is shown');
+  assert.equal(top2.els.length, 7, 'every signal is drawn after the toggle');
+});
+
 
 test('a port edge lands on the signal row inside the target module', () => {
   const p = startPanel(fixtureGraph());

@@ -14,6 +14,7 @@ export interface HdlConfig {
   maxInstances: number;
   graphMaxNodes: number;
   graphShowContainment: boolean;
+  graphMaxSignalsPerGroup: number;
   followDefinition: boolean;
   semanticHighlighting: boolean;
 }
@@ -39,6 +40,7 @@ export function readConfig(scope?: vscode.Uri): HdlConfig {
     maxInstances: cfg.get<number>('maxInstances') ?? 20000,
     graphMaxNodes: cfg.get<number>('graph.maxNodes') ?? 800,
     graphShowContainment: cfg.get<boolean>('graph.showContainment') ?? false,
+    graphMaxSignalsPerGroup: cfg.get<number>('graph.maxSignalsPerGroup') ?? 40,
     followDefinition: cfg.get<boolean>('followDefinition') ?? true,
     semanticHighlighting: cfg.get<boolean>('enableSemanticHighlighting') ?? true,
   };

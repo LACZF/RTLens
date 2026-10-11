@@ -192,6 +192,7 @@ export class GraphPanel {
       ancestorsShown: shown.length,
       ancestorsLeft: this.ancestors.length - shown.length,
       expanded: [...this.expanded],
+      maxSignalsPerGroup: this.svc.config.graphMaxSignalsPerGroup,
     });
     this.panel.webview.postMessage({ type: 'stats', text: statsLine(graph) });
   }
@@ -437,6 +438,8 @@ export const SCRIPT = String.raw`
   // the '+' on any box reveals the whole chain at once.
   let ancShown = 0;
   let ancLeft = 0;
+  let maxSignalsPerGroup = 40;
+  let netExpanded = new Set(); // group keys where all signals shown
 // How many levels of the root's subtree the extension is currently drawing,
 // and how many more are available below the deepest one. The children are
 // hidden by default: the plus on the root's right edge walks down one level
@@ -483,6 +486,17 @@ export const SCRIPT = String.raw`
 
   function labelW(s, fs) { return (s || '').length * fs * 0.62; }
   function truncate(s, n) { return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+  function visibleNets(g) {
+    if (!g || !g.nets) return g.nets;
+    if (netExpanded.has(g.key) || maxSignalsPerGroup <= 0) return g.nets;
+    const limit = maxSignalsPerGroup;
+    if (g.nets.length <= limit) return g.nets;
+    return g.nets.slice(0, limit);
+  }
+  /** The group has more signals than the configured limit. */
+  function isTruncated(g) {
+    return !!g && maxSignalsPerGroup > 0 && g.nets.length > maxSignalsPerGroup;
+  }
 
   function colorFor(n) {
     if (n.unresolved) return css('--vscode-editorWarning-foreground') || '#e0a03f';
@@ -531,17 +545,19 @@ export const SCRIPT = String.raw`
 
   function sizeGroup(g) {
     const p = headerParts(g);
-    const show = !folded.has(g.key) && g.nets.length > 0;
+    const vnets = visibleNets(g);
+    const show = !folded.has(g.key) && vnets.length > 0;
     let w = labelW(p.mod ? p.title + ' : ' + p.mod : p.title, 11.5) + 44;
     if (show) {
-      for (const n of g.nets) {
+      for (const n of vnets) {
         let rw = labelW(n.label, 10.5) + 40;
         if (n.width && n.width > 1) rw += labelW(n.width + 'b', 9) + 8;
         if (rw > w) w = rw;
       }
     }
     g.w = Math.max(MIN_W, Math.min(MAX_W, Math.ceil(w)));
-    g.h = HEAD_H + (show ? g.nets.length * ROW_H + 4 : 0);
+    const moreRow = !folded.has(g.key) && isTruncated(g) ? 1 : 0;
+    g.h = HEAD_H + (show ? (vnets.length + moreRow) * ROW_H + 4 : 0);
   }
 
   /** Group the visible nodes: every instance box owns the signals of its scope. */
@@ -683,10 +699,17 @@ export const SCRIPT = String.raw`
     if (g.head) { g.head.x = g.x; g.head.y = top + HEAD_H / 2; }
     const show = !folded.has(g.key) && g.nets.length > 0;
     const bodyTop = top + HEAD_H + 2;
+    const vnets = visibleNets(g);
+    const posBase = new Map(vnets.map((n, i) => [n.id, i]));
     for (let i = 0; i < g.nets.length; i++) {
       const n = g.nets[i];
       n.x = g.x;
-      n.y = show ? bodyTop + ROW_H / 2 + i * ROW_H : top + HEAD_H / 2;
+      const idx = posBase.get(n.id);
+      if (idx !== undefined && show) {
+        n.y = bodyTop + ROW_H / 2 + idx * ROW_H;
+      } else {
+        n.y = show ? (bodyTop + ROW_H / 2 + vnets.length * ROW_H) : (top + HEAD_H / 2);
+      }
     }
   }
 
@@ -1148,8 +1171,11 @@ export const SCRIPT = String.raw`
     if (g.head) els.push({ n: g.head, el: headg });
 
     if (!isFolded) {
-      for (let i = 0; i < g.nets.length; i++) {
-        const n = g.nets[i];
+      const vnets = visibleNets(g);
+      const truncated = isTruncated(g);
+      const expandedAll = netExpanded.has(g.key);
+      for (let i = 0; i < vnets.length; i++) {
+        const n = vnets[i];
         const ry = n.y;
         const rowg = el('g', { class: 'rowg' });
         if (i) {
@@ -1171,6 +1197,36 @@ export const SCRIPT = String.raw`
         attachRow(rhit, n, g);
         grp.appendChild(rowg);
         els.push({ n, el: rowg });
+      }
+      if (truncated) {
+        const ry = top + HEAD_H + 2 + ROW_H / 2 + vnets.length * ROW_H;
+        const rowg = el('g', { class: 'rowg' });
+        rowg.appendChild(el('line', {
+          x1: left + 10, y1: ry - ROW_H / 2, x2: right - 10, y2: ry - ROW_H / 2, class: 'rsep',
+        }));
+        const t = el('text', { x: left + 14, y: ry + 3.5, 'text-anchor': 'start', class: 'sig' });
+        t.textContent = expandedAll ? '…' : '...';
+        t.style.cursor = 'pointer';
+        const toggle = () => {
+          if (expandedAll) {
+            netExpanded.delete(g.key);
+          } else {
+            netExpanded.add(g.key);
+          }
+          scheduleDraw();
+        };
+        t.addEventListener('mousedown', (ev) => ev.stopPropagation());
+        t.addEventListener('click', (ev) => { ev.stopPropagation(); toggle(); });
+        t.addEventListener('mouseenter', (ev) => showTip(ev, expandedAll ? 'Show fewer signals' : 'Show more signals'));
+        t.addEventListener('mousemove', moveTip);
+        t.addEventListener('mouseleave', hideTip);
+        rowg.appendChild(t);
+        const rhit = el('rect', { x: left + 2, y: ry - ROW_H / 2, width: g.w - 4, height: ROW_H, class: 'hit' });
+        rhit.style.cursor = 'pointer';
+        rhit.addEventListener('mousedown', (ev) => ev.stopPropagation());
+        rhit.addEventListener('click', (ev) => { ev.stopPropagation(); toggle(); });
+        rowg.appendChild(rhit);
+        grp.appendChild(rowg);
       }
     }
     // Every box carries a '+' on each edge by default: the left one searches
@@ -1389,6 +1445,8 @@ export const SCRIPT = String.raw`
       expanded = new Set(msg.expanded || []);
       ancShown = Number(msg.ancestorsShown ?? 0) || 0;
       ancLeft = Number(msg.ancestorsLeft ?? 0) || 0;
+      if (msg.maxSignalsPerGroup !== undefined) maxSignalsPerGroup = Number(msg.maxSignalsPerGroup) || 40;
+      netExpanded = new Set();
       // A new model may settle differently under the force layout. The
       // hierarchy layout ignores the flag and re-columns on the next frame,
       // while a group the user dragged keeps its position either way.
