@@ -53,6 +53,7 @@
 | `hdl.connectView.maxInstances` | `20000` | 单次展开实例化的层次节点上限 |
 | `hdl.connectView.graph.maxNodes` | `800` | 连接图渲染的节点上限，超出后退化为邻域视图 |
 | `hdl.connectView.graph.showContainment` | `false` | 在连接图中显示父子包含边 |
+| `hdl.connectView.graph.maxSignalsPerGroup` | `40` | 每框信号行上限；按顺序先留实例端口连线、再 `assign` 两端、最后端口声明，超出的收进 `...`（点击逐页放开，设 `0` 全部显示） |
 | `hdl.connectView.followDefinition` | `true` | 在实例名上按 F12 跳到其 module 定义；关闭则在组成树中定位 |
 | `hdl.connectView.enableSemanticHighlighting` | `true` | 启用语义高亮（实例名、端口名、声明信号等） |
 

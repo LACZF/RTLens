@@ -132,9 +132,14 @@ export interface GraphOptions {
   /**
    * Maximum number of signal rows materialised in one scope. A scope with more
    * signals keeps the first `maxSignalsPerScope` and is listed in
-   * `Graph.cappedScopes`, so a generated module with thousands of ports cannot
-   * exhaust the node budget before its child boxes are drawn. Ports are added
-   * before internal wires, so I/O survives the cut. Default: no limit.
+   * `Graph.cappedScopes`, and the view offers a "show more" row behind it. The
+   * cap is absolute: it bounds how many signals a scope contributes to the graph
+   * whatever they are, so a fat generated module cannot drown the instance
+   * boxes below it. Order decides *which* signals survive, not *how many*: the
+   * scope's connections are materialised first - instance port wiring, then
+   * `assign`/`always` endpoints - and the scope's own port declarations last,
+   * so the wires a reader revealed a child to see win the cut, and only then
+   * does I/O fill what is left. Default: no limit.
    */
   maxSignalsPerScope?: number;
   /**
@@ -327,7 +332,12 @@ class GraphBuilder {
     }
   }
 
-  private addNetNode(scope: string, signal: string, depth: number, info: NetInfo): string | undefined {
+  private addNetNode(
+    scope: string,
+    signal: string,
+    depth: number,
+    info: NetInfo,
+  ): string | undefined {
     if (!this.showNetNodes) {
       return GraphBuilder.netIds(scope, signal);
     }
@@ -355,8 +365,8 @@ class GraphBuilder {
     }
     // The per-scope cap: a generated module can declare thousands of ports and
     // wires, and materialising all of them would exhaust `maxNodes` before the
-    // child boxes appear. Ports are added first, so the cut drops internal
-    // wires and only the tail of the I/O.
+    // child boxes appear, so the tail is cut. That the cap counts every net is
+    // what keeps it honest; `visit` decides which ones get here first.
     const limit = this.signalLimits.get(scope) ?? this.maxSignalsPerScope;
     const used = this.netCount.get(scope) ?? 0;
     if (limit !== Infinity && limit > 0 && used >= limit) {
@@ -435,29 +445,18 @@ class GraphBuilder {
       // Expansion mode: every box below the root shows its own scope, and only
       // the paths the user expanded (this module's own +/-) get their children.
       const parentDef = this.index.resolveModule(node.moduleName, node.file);
-        if (parentDef) {
-          this.connectScope(node, parentDef);
-        }
-      if (!this.expanded!.has(node.path)) {
+      const expand = this.expanded!.has(node.path);
+      // Wire the children before the box's own scope, so the connections the
+      // reader revealed the children to see claim the cap first. The scope's
+      // assigns come in `connectScope` below, its ports last.
+      const added = expand ? this.connectChildren(node, parentDef) : [];
+      if (added === null) {
         return;
       }
-      for (const child of node.children ?? []) {
-        if (this.nodes.size >= this.opts.maxNodes) {
-          this.overflowed = true;
-          this.truncatedPaths.add(node.path);
-          return;
-        }
-        this.addInstanceNode(child);
-        this.connectInstance(node, child, parentDef);
-        if (this.opts.showContainment) {
-          this.addEdge({
-            from: GraphBuilder.ids(node.path),
-            to: GraphBuilder.ids(child.path),
-            kind: 'containment',
-            label: child.moduleName,
-            dashed: true,
-          });
-        }
+      if (parentDef) {
+        this.connectScope(node, parentDef);
+      }
+      for (const child of added) {
         this.visit(child, limit, level);
       }
       return;
@@ -473,19 +472,51 @@ class GraphBuilder {
       return;
     }
     const parentDef = this.index.resolveModule(node.moduleName, node.file);
+    const added = this.connectChildren(node, parentDef);
+    if (added === null) {
+      return;
+    }
     if (parentDef) {
       // The node's own ports and continuous assigns belong to the graph even
-      // when it has no instances at all.
+      // when it has no instances at all. Added after the child wiring so the
+      // scope's connections win the signal cap.
       this.connectScope(node, parentDef);
     }
+    for (const child of added) {
+      this.visit(child, limit, level);
+    }
+  }
+
+  /**
+   * Add the child instance boxes and wire each to the parent scope's nets,
+   * before any of the parent's own signals are materialised. Returns the child
+   * nodes that were actually drawn (the caller recurses into exactly those), or
+   * null when the node budget ran out - the caller stops without touching the
+   * scope.
+   *
+   * Once the parent scope's signal cap is spent, a child that cannot claim a
+   * single wire would only clutter the view as an unconnected box, so the walk
+   * stops there: the paged "show more" row brings in the next children, whose
+   * connections then fit again.
+   */
+  private connectChildren(node: HierarchyNode, parentDef: ModuleDef | undefined): HierarchyNode[] | null {
+    const added: HierarchyNode[] = [];
     for (const child of node.children ?? []) {
       if (this.nodes.size >= this.opts.maxNodes) {
         this.overflowed = true;
         this.truncatedPaths.add(node.path);
-        return;
+        return null;
       }
       this.addInstanceNode(child);
+      const edgesBefore = this.edges.length;
       this.connectInstance(node, child, parentDef);
+      const wired = this.edges
+        .slice(edgesBefore)
+        .some((e) => this.nodes.has(e.from) && this.nodes.has(e.to));
+      if (!wired && this.cappedScopes.has(node.path)) {
+        this.nodes.delete(GraphBuilder.ids(child.path));
+        break;
+      }
       if (this.opts.showContainment) {
         this.addEdge({
           from: GraphBuilder.ids(node.path),
@@ -495,24 +526,27 @@ class GraphBuilder {
           dashed: true,
         });
       }
-      this.visit(child, limit, level);
+      added.push(child);
     }
+    return added;
   }
 
   /**
-   * Add the ports and continuous assigns of the module that `node` instantiates.
-   * Done once per visited node, so a leaf module still shows its own wiring.
+   * Add the continuous assigns then the ports of the module that `node`
+   * instantiates. Done once per visited node, so a leaf module still shows its
+   * own wiring. Assign endpoints are connections, so they outrank the plain port
+   * declarations when `maxSignalsPerScope` cuts the scope short.
    */
   private connectScope(node: HierarchyNode, def: ModuleDef): void {
     const scope = paramScopeForPath(this.index, node.path);
+    if (!this.opts.portWiringOnly) {
+      this.connectContinuousAssigns(node, def, scope);
+    }
     for (const p of def.ports) {
       if (p.direction === 'ref') {
         continue;
       }
       this.addNetNode(node.path, p.name, node.depth, this.netInfo(def, p.name, scope));
-    }
-    if (!this.opts.portWiringOnly) {
-      this.connectContinuousAssigns(node, def, scope);
     }
   }
 

@@ -210,14 +210,25 @@ test('graph respects the node budget and keeps the shallow nodes', () => {
   assert.ok(byId(g.nodes, 'i:top'), 'the root survives the cut');
 });
 
-test('graph caps the signals per scope and keeps the module I/O', () => {
+test('graph caps the signals per scope absolutely and keeps the connections', () => {
+  // The cap bounds how many signals a scope contributes whatever they are; the
+  // connections a reader revealed the child boxes for are what claim it first.
   const { g } = graph({ maxSignalsPerScope: 3 });
   const top = g.nodes.filter((n) => n.kind === 'net' && n.path.startsWith('top::'));
-  assert.equal(top.length, 3, 'only the first signals of the scope are materialised');
-  for (const n of top) {
-    assert.ok(['din', 'other', 'dout', 'flag'].includes(n.label), `${n.label} is a port of top`);
-  }
+  assert.equal(top.length, 3, 'exactly the cap, no more');
+  assert.deepEqual(
+    top.map((n) => n.label).sort(),
+    ['carry', 'din', 'mid_out'],
+    'the first three instance connections survive; the rest of the scope is cut',
+  );
   assert.ok(g.cappedScopes.includes('top'), 'the view is told the scope has more behind the cut');
+});
+
+test('graph keeps the nets that carry instance connections under the cap', () => {
+  const { g } = graph({ maxSignalsPerScope: 2 });
+  const midOut = g.nodes.find((n) => n.path === 'top::mid_out');
+  assert.ok(midOut, 'the wire feeding u_mid and u_leaf is materialised');
+  assert.ok(g.edges.some((e) => e.to === 'i:top.u_mid' && e.signal === 'mid_out'), 'and its port edge reaches the instance');
 });
 
 test('graph leaves cappedScopes empty when nothing was cut', () => {
@@ -238,6 +249,10 @@ test('graph: a fat scope no longer crowds out its child boxes', () => {
   const { g } = graph({ maxSignalsPerScope: 2, maxNodes: 100, expanded: ['top'] });
   assert.ok(inst(g, 'top.u_mid'), 'the child box is still drawn');
   assert.ok(inst(g, 'top.u_leaf'));
+  assert.ok(
+    g.nodes.find((n) => n.path === 'top::mid_out'),
+    'the wire the revealed child is wired through wins the cap over the box\'s port declarations',
+  );
   assert.equal(g.cappedScopes.length > 0, true, 'the cut scopes are flagged for a show-more control');
 });
 
@@ -503,6 +518,26 @@ test('graph: the modules that instantiate the root are included above it', () =>
   const roots = g.nodes.filter((n) => n.kind === 'root');
   assert.equal(roots.length, 1, 'the design root is the only root-kind node');
   assert.deepEqual(roots.map((n) => n.path), ['top']);
+});
+
+test('graph: ancestor contexts obey the signal cap so the root is not pruned away', () => {
+  // The ancestor scope once materialised every connection unbounded. When that
+  // scope sits above the root, its nets are shallower than the root, so a tight
+  // node budget pruned the root and its children away and only the ancestors
+  // remained. Capping every scope - ancestors included - keeps them.
+  const { index, h } = graph();
+  const root = findByPath(h.root, 'top.u_mid')!;
+  const chain = pathChain(h.root, root.path).slice(0, -1);
+  const gf = buildGraph(index, root, {
+    maxDepth: 8,
+    maxNodes: 4,
+    showContainment: true,
+    ancestors: chain,
+    expanded: [root.path],
+    maxSignalsPerScope: 2,
+  });
+  assert.ok(gf.nodes.find((n) => n.id === 'i:top.u_mid'), 'the graph root survives the tight budget');
+  assert.ok(gf.cappedScopes.includes('top'), 'the ancestor scope was capped');
 });
 
 test('graph: a collapsed instance keeps its box but hides everything inside it', () => {
