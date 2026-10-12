@@ -190,6 +190,35 @@ test('graph edge ids are unique', () => {
   assert.equal(new Set(g.edges.map((e) => e.id)).size, g.edges.length);
 });
 
+test('graph: internal nets between children keep a direction over implicit connections', () => {
+  // `mid_out`-style signals between two children got a direction on explicit
+  // `.port (net)` wiring, but `.name` and `.*` shorthand never inferred one, so
+  // the view (which hides nets without a direction) dropped exactly these rows.
+  for (const [kind, inst] of [
+    ['.name', 'source u_src (.clk(clk), .data); sink u_snk (.data, .done(done));'],
+    ['.*', 'source u_src (.*); sink u_snk (.*, .done(done));'],
+  ] as const) {
+    const index = new HdlIndex();
+    index.addFile('/w/impl.v', `
+      module source (input wire clk, output wire data); assign data = clk; endmodule
+      module sink (input wire data, output wire done); assign done = data; endmodule
+      module top (input wire clk, output wire done);
+        wire data;
+        ${inst}
+      endmodule
+    `);
+    const h = buildHierarchy(index, 'top', { maxDepth: 8 })!;
+    const g = buildGraph(index, h.root, { maxDepth: 8, maxNodes: 500 });
+    const net = g.nodes.find((n) => n.path === 'top::data');
+    assert.ok(net, `${kind}: the net between the two children is materialised`);
+    assert.equal((net as GraphNode).direction, 'inout', `${kind}: both a driving and a reading child are seen`);
+    assert.ok(
+      g.edges.some((e) => e.kind === 'port' && e.signal === 'data' && e.to === 'i:top.u_snk'),
+      `${kind}: the reading child is wired to it`,
+    );
+  }
+});
+
 test('graph respects the depth limit', () => {
   const { g } = graph({ maxDepth: 1 });
   assert.equal(byId(g.nodes, 'i:top.u_mid.u_inner'), undefined, 'grandchild not expanded');

@@ -584,7 +584,11 @@ class GraphBuilder {
       if (conn.shorthand && conn.portName === '*') {
         // `.*` binds every child port to the same-named signal of the parent.
         for (const p of childDef?.ports ?? []) {
-          const nid = this.addNetNode(parent.path, p.name, parent.depth, this.netInfo(parentDef, p.name, scope));
+          const info = this.netInfo(parentDef, p.name, scope);
+          if (info.direction === undefined) {
+            info.direction = parentSideDirection(p.direction);
+          }
+          const nid = this.addNetNode(parent.path, p.name, parent.depth, info);
           if (!nid && this.showNetNodes) {
             continue;
           }
@@ -606,7 +610,11 @@ class GraphBuilder {
       if (conn.shorthand) {
         // `.name` (SystemVerilog implicit port connection).
         const port = childDef?.ports.find((p) => p.name === conn.portName);
-        const nid = this.addNetNode(parent.path, conn.portName, parent.depth, this.netInfo(parentDef, conn.portName, scope));
+        const info = this.netInfo(parentDef, conn.portName, scope);
+        if (info.direction === undefined) {
+          info.direction = parentSideDirection(port?.direction);
+        }
+        const nid = this.addNetNode(parent.path, conn.portName, parent.depth, info);
         if (!nid && this.showNetNodes) {
           continue;
         }
@@ -642,8 +650,7 @@ class GraphBuilder {
         // Seen from this scope, the net flows opposite to the child port: an
         // input port of the child is fed from here, an output port feeds it.
         if (info.direction === undefined) {
-          const flow = flowDir(port?.direction);
-          info.direction = flow === 'output' ? 'input' : flow === 'input' ? 'output' : flow;
+          info.direction = parentSideDirection(port?.direction);
         }
         const netId = this.addNetNode(parent.path, ref.fullPath, parent.depth, info);
         if (!netId) {
@@ -786,6 +793,17 @@ class GraphBuilder {
 /** `ref` ports of SystemVerilog read *and* write, so they flow both ways. */
 export function flowDir(d: PortDir | undefined): 'input' | 'output' | 'inout' | undefined {
   return d === 'ref' ? 'inout' : d;
+}
+
+/**
+ * How a net of the enclosing scope flows, given the child port it is wired to:
+ * a child input port is fed from here (the net moves out tail-only in the model
+ * label), a child output port drives it. Wire ends are kept parallel so a net
+ * touching both a driving and a reading child merges to `inout`.
+ */
+export function parentSideDirection(d: PortDir | undefined): 'input' | 'output' | 'inout' | undefined {
+  const flow = flowDir(d);
+  return flow === 'output' ? 'input' : flow === 'input' ? 'output' : flow;
 }
 
 function declTypeName(found: NonNullable<ReturnType<HdlIndex['findDecl']>>): string {
