@@ -62,7 +62,10 @@ export function collectInputs(svc: IndexService, folder: vscode.Uri): FileInput[
   const out: FileInput[] = [];
   for (const file of svc.index.allFiles()) {
     const owner = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(file));
-    if (!owner || owner.uri.fsPath !== base) {
+    // Files owned by another folder belong to that folder's database. Unowned
+    // files come from `hdl.connectView.databasePaths` (a shared library outside
+    // the workspace) and are recorded in every folder that can see them.
+    if (owner && owner.uri.fsPath !== base) {
       continue;
     }
     const rel = path.relative(base, file).split(path.sep).join('/');

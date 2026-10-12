@@ -40,6 +40,8 @@ export class IndexService implements vscode.Disposable {
   /** Text last handed to the index per file, so an unchanged buffer is not re-parsed. */
   private readonly synced = new Map<string, string>();
   private readonly includedFiles = new Set<string>();
+  /** Files named directly by `hdl.connectView.databasePaths`; exclude rules do not apply. */
+  private explicitFiles = new Set<string>();
   private lastError: string | undefined;
 
   constructor(private readonly log: vscode.OutputChannel) {
@@ -80,6 +82,7 @@ export class IndexService implements vscode.Disposable {
     this.readyPromise = undefined;
     this.stopWatchers();
     this.includedFiles.clear();
+    this.explicitFiles.clear();
     this.synced.clear();
     this.index.clear();
     this.changeEmitter.fire();
@@ -99,22 +102,36 @@ export class IndexService implements vscode.Disposable {
     const started = Date.now();
     try {
       this.configValue = readConfig();
-      const folders = vscode.workspace.workspaceFolders ?? [];
-      if (folders.length === 0) {
+      const targets = this.scanTargets();
+      this.explicitFiles = new Set(targets.files);
+      if (targets.dirs.length === 0 && targets.files.length === 0) {
         this.finishScan(started, 0);
         return;
       }
-      const uris = await vscode.workspace.findFiles(
-        scanGlob(this.configValue),
-        this.configValue.exclude.length ? `{${this.configValue.exclude.join(',')}}` : null,
-        20000,
-      );
+      const uris: vscode.Uri[] = [];
+      for (const dir of targets.dirs) {
+        const found = await vscode.workspace.findFiles(
+          new vscode.RelativePattern(vscode.Uri.file(dir), scanGlob(this.configValue)),
+          this.configValue.exclude.length ? `{${this.configValue.exclude.join(',')}}` : null,
+          20000,
+        );
+        uris.push(...found);
+      }
+      for (const file of targets.files) {
+        uris.push(vscode.Uri.file(file));
+      }
+      const seen = new Set<string>();
       let parsed = 0;
       for (const uri of uris) {
-        if (isExcluded(uri.fsPath, this.configValue)) {
+        const file = uri.fsPath;
+        if (seen.has(file)) {
           continue;
         }
-        this.ingestFile(uri.fsPath);
+        seen.add(file);
+        if (!this.explicitFiles.has(file) && isExcluded(file, this.configValue)) {
+          continue;
+        }
+        this.ingestFile(file);
         parsed++;
         // Yield periodically so the workbench stays responsive.
         if (parsed % 200 === 0) {
@@ -187,12 +204,70 @@ export class IndexService implements vscode.Disposable {
     return undefined;
   }
 
+  /**
+   * Resolve the directories and files that make up a scan.
+   *
+   * Without `databasePathsOnly` every workspace folder is scanned, as before.
+   * `databasePaths` adds extra roots: a directory is scanned recursively with
+   * the `files` globs, a single HDL file is indexed directly. Relative entries
+   * resolve against each workspace folder, absolute ones are used verbatim, so
+   * a shared RTL library outside the workspace can be pulled in. Explicitly
+   * listed files bypass the exclude rules, which are about the bulk scan.
+   */
+  private scanTargets(): { dirs: string[]; files: string[] } {
+    const cfg = this.configValue;
+    const bases = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
+    const dirs: string[] = [];
+    const files: string[] = [];
+    const add = (p: string): void => {
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(p);
+      } catch {
+        return;
+      }
+      if (stat.isDirectory()) {
+        if (!dirs.includes(p)) {
+          dirs.push(p);
+        }
+      } else if (stat.isFile() && INCLUDE_EXT.test(p) && !files.includes(p) && !dirs.some((d) => isUnder(p, d))) {
+        files.push(p);
+      }
+    };
+    if (!cfg.databasePathsOnly) {
+      for (const base of bases) {
+        add(base);
+      }
+    }
+    for (const entry of cfg.databasePaths) {
+      if (path.isAbsolute(entry)) {
+        add(entry);
+      } else {
+        for (const base of bases) {
+          add(path.resolve(base, entry));
+        }
+      }
+    }
+    return { dirs, files };
+  }
+
   private startWatchers(): void {
-    for (const folder of vscode.workspace.workspaceFolders ?? []) {
-      // One watcher per folder, each anchored to that folder, so a multi-root
-      // workspace is watched exactly once per file.
+    const { dirs, files } = this.scanTargets();
+    for (const dir of dirs) {
+      // One watcher per scanned root, each anchored to that root, so a
+      // multi-root workspace is watched exactly once per file.
       const w = vscode.workspace.createFileSystemWatcher(
-        new vscode.RelativePattern(folder, scanGlob(this.configValue)),
+        new vscode.RelativePattern(vscode.Uri.file(dir), scanGlob(this.configValue)),
+      );
+      w.onDidCreate((uri) => this.upsert(uri.fsPath));
+      w.onDidChange((uri) => this.upsert(uri.fsPath));
+      w.onDidDelete((uri) => this.remove(uri.fsPath));
+      this.watchers.push(w);
+    }
+    for (const file of files) {
+      // A single file outside any scanned directory: watch just its basename.
+      const w = vscode.workspace.createFileSystemWatcher(
+        new vscode.RelativePattern(vscode.Uri.file(dirname(file)), basename(file)),
       );
       w.onDidCreate((uri) => this.upsert(uri.fsPath));
       w.onDidChange((uri) => this.upsert(uri.fsPath));
@@ -217,7 +292,7 @@ export class IndexService implements vscode.Disposable {
   }
 
   private upsert(file: string): void {
-    if (!INCLUDE_EXT.test(file) || isExcluded(file, this.configValue)) {
+    if (!INCLUDE_EXT.test(file) || (!this.explicitFiles.has(file) && isExcluded(file, this.configValue))) {
       return;
     }
     this.ingestFile(file);
@@ -284,7 +359,7 @@ export class IndexService implements vscode.Disposable {
     if (!INCLUDE_EXT.test(file)) {
       return;
     }
-    if (isExcluded(file, this.configValue)) {
+    if (!this.explicitFiles.has(file) && isExcluded(file, this.configValue)) {
       // Only indexed because it was open: closing it puts the workspace back
       // to what the exclude patterns asked for.
       if (this.synced.has(file)) {
@@ -448,4 +523,10 @@ function isReadable(p: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Whether `file` lives under directory `dir`. */
+function isUnder(file: string, dir: string): boolean {
+  const rel = path.relative(dir, file);
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
 }

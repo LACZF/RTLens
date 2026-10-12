@@ -56,6 +56,8 @@
 | `hdl.connectView.graph.maxSignalsPerGroup` | `40` | 每框信号行上限；按顺序先留实例端口连线、再 `assign` 两端、最后端口声明，超出的收进 `...`（点击逐页放开，设 `0` 全部显示） |
 | `hdl.connectView.followDefinition` | `true` | 在实例名上按 F12 跳到其 module 定义；关闭则在组成树中定位 |
 | `hdl.connectView.enableSemanticHighlighting` | `true` | 启用语义高亮（实例名、端口名、声明信号等） |
+| `hdl.connectView.databasePaths` | `[]` | 额外参与索引与数据库的路径或文件；相对路径按各工作区文件夹解析，绝对路径原样使用。目录按 `files` 递归扫描，文件直接索引 |
+| `hdl.connectView.databasePathsOnly` | `false` | 勾选后只扫描 `databasePaths` 指定的路径与文件，跳过当前打开的工作区；不勾选则在配置项之外同时扫描工作区 |
 
 ## 快速开始
 

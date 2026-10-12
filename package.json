@@ -159,6 +159,21 @@
           "type": "boolean",
           "default": true,
           "description": "Additionally highlight module instance names, port names and declared signals using semantic analysis."
+        },
+        "hdl.connectView.databasePaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Extra paths or files included when indexing and building the signal/module database. Relative entries are resolved against each workspace folder, absolute entries are used as-is. A directory is scanned recursively using `hdl.connectView.files`; a file is indexed directly.",
+          "scope": "resource"
+        },
+        "hdl.connectView.databasePathsOnly": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "When enabled, only the paths and files listed in `hdl.connectView.databasePaths` are scanned; the open workspace folders are skipped. When disabled, the configured paths and files are scanned in addition to the workspace folders.",
+          "scope": "resource"
         }
       }
     },

@@ -17,6 +17,8 @@ export interface HdlConfig {
   graphMaxSignalsPerGroup: number;
   followDefinition: boolean;
   semanticHighlighting: boolean;
+  databasePaths: string[];
+  databasePathsOnly: boolean;
 }
 
 export const SECTION = 'hdl.connectView';
@@ -43,6 +45,8 @@ export function readConfig(scope?: vscode.Uri): HdlConfig {
     graphMaxSignalsPerGroup: cfg.get<number>('graph.maxSignalsPerGroup') ?? 40,
     followDefinition: cfg.get<boolean>('followDefinition') ?? true,
     semanticHighlighting: cfg.get<boolean>('enableSemanticHighlighting') ?? true,
+    databasePaths: strArray(cfg, 'databasePaths', []),
+    databasePathsOnly: cfg.get<boolean>('databasePathsOnly') ?? false,
   };
 }
 
