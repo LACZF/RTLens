@@ -477,7 +477,7 @@ export class IndexService implements vscode.Disposable {
 
   graphFor(node: HierarchyNode, opts: GraphOptions = {}): Graph {
     return buildGraph(this.index, node, {
-      maxNodes: this.configValue.graphMaxNodes,
+      maxNodes: opts.maxNodes ?? this.configValue.graphMaxNodes,
       showContainment: this.configValue.graphShowContainment,
       maxDepth: opts.maxDepth ?? 8,
       ancestors: opts.ancestors,
@@ -485,6 +485,7 @@ export class IndexService implements vscode.Disposable {
       expanded: opts.expanded,
       maxSignalsPerScope: this.configValue.graphMaxSignalsPerGroup,
       signalLimits: opts.signalLimits,
+      childLimits: opts.childLimits,
     });
   }
 

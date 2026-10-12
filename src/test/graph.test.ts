@@ -285,6 +285,29 @@ test('graph: a fat scope no longer crowds out its child boxes', () => {
   assert.equal(g.cappedScopes.length > 0, true, 'the cut scopes are flagged for a show-more control');
 });
 
+test('graph: a child window pages the children of a wide scope', () => {
+  const { g } = graph({ expanded: ['top'], childLimits: { top: 3 } });
+  const children = g.nodes.filter((n) => n.kind === 'instance' && n.path.startsWith('top.'));
+  assert.equal(children.length, 3, 'only the first page of children is drawn');
+  assert.ok(g.pagedScopes.includes('top'), 'the scope keeps a show-more row while children remain');
+  // Raising the window brings the next children; once the last child is drawn
+  // the paged flag clears.
+  const { g: g2 } = graph({ expanded: ['top'], childLimits: { top: 6 } });
+  const children2 = g2.nodes.filter((n) => n.kind === 'instance' && n.path.startsWith('top.'));
+  assert.equal(children2.length, 5, 'all children fit the raised window');
+  assert.ok(!g2.pagedScopes.includes('top'), 'no children left behind the window');
+  assert.ok(!g.pagedScopes.includes('top.u_mid'), 'a scope with all its children is not paged');
+});
+
+test('graph: a scope cut by the node budget is paged, not a dead end', () => {
+  const { g } = graph({ expanded: ['top'], maxNodes: 7 });
+  assert.ok(g.truncated, 'the walk hit the budget');
+  assert.ok(g.pagedScopes.includes('top'), 'the box offers a show-more row instead of stalling');
+  // A graph that drew everything keeps the paged list empty.
+  const { g: g2 } = graph({ expanded: ['top'], maxNodes: 500 });
+  assert.equal(g2.pagedScopes.length, 0);
+});
+
 test('includeRoot=false omits the root but keeps its children', () => {
   const { g } = graph({ includeRoot: false });
   assert.equal(byId(g.nodes, 'i:top'), undefined);

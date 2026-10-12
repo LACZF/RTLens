@@ -95,6 +95,13 @@ export interface Graph {
    * every rendered scope is present.
    */
   cappedScopes: string[];
+  /**
+   * Scopes that still have direct children behind the child window, the node
+   * budget or the scope's signal cap. The view offers the same "show more"
+   * control on those boxes, and each page reveals the next children; a scope
+   * not listed here has every one of its children drawn.
+   */
+  pagedScopes: string[];
   issues: GraphIssue[];
 }
 
@@ -148,6 +155,14 @@ export interface GraphOptions {
    * missing key falls back to `maxSignalsPerScope`.
    */
   signalLimits?: Record<string, number>;
+  /**
+   * Per-scope cap on how many direct children are drawn, keyed by instance
+   * path. A scope with more children keeps the first `childLimits[path]` boxes
+   * and is listed in `Graph.pagedScopes` so the view can page the rest in. A
+   * missing key means no child window (all children that fit the other budgets
+   * are drawn).
+   */
+  childLimits?: Record<string, number>;
 }
 
 const DEFAULT_MAX_NODES = 800;
@@ -193,6 +208,13 @@ class GraphBuilder {
   /** Signals already materialised per scope, so the cap cuts the tail only. */
   private readonly netCount = new Map<string, number>();
   private readonly cappedScopes = new Set<string>();
+  private readonly childLimits: Map<string, number>;
+  /**
+   * Scopes that still have direct children behind the child window, the node
+   * budget or the signal cap. Mirrors `truncatedPaths` but is what the view
+   * pages on: while a scope sits here its box earns a "show more" row.
+   */
+  private readonly pagedScopes = new Set<string>();
 
   constructor(
     private readonly index: HdlIndex,
@@ -203,6 +225,7 @@ class GraphBuilder {
     this.expanded = opts.expanded === null ? null : new Set(opts.expanded as Iterable<string>);
     this.maxSignalsPerScope = opts.maxSignalsPerScope;
     this.signalLimits = new Map(Object.entries(opts.signalLimits));
+    this.childLimits = new Map(Object.entries(opts.childLimits));
   }
 
   build(root: HierarchyNode): Graph {
@@ -265,6 +288,7 @@ class GraphBuilder {
       },
       truncated,
       cappedScopes: [...this.cappedScopes].sort(),
+      pagedScopes: [...this.pagedScopes].sort(),
       issues: this.issues,
     };
   }
@@ -501,10 +525,25 @@ class GraphBuilder {
    */
   private connectChildren(node: HierarchyNode, parentDef: ModuleDef | undefined): HierarchyNode[] | null {
     const added: HierarchyNode[] = [];
-    for (const child of node.children ?? []) {
+    const children = node.children ?? [];
+    // The per-scope child window: a module with thousands of children reveals
+    // them in pages of `childLimits[node.path]`, so the first render never
+    // draws four thousand boxes at once. While children remain behind the
+    // window the scope is listed in `pagedScopes`, and the view's "show more"
+    // row raises the window to bring the next page out. The other two stops -
+    // the node budget and the net cap - also leave children behind, so both
+    // mark the scope paged too.
+    const climit = this.childLimits.get(node.path) ?? Infinity;
+    for (let i = 0; i < children.length; i++) {
+      if (added.length >= climit) {
+        this.pagedScopes.add(node.path);
+        return added;
+      }
+      const child = children[i];
       if (this.nodes.size >= this.opts.maxNodes) {
         this.overflowed = true;
         this.truncatedPaths.add(node.path);
+        this.pagedScopes.add(node.path);
         return null;
       }
       this.addInstanceNode(child);
@@ -515,6 +554,7 @@ class GraphBuilder {
         .some((e) => this.nodes.has(e.from) && this.nodes.has(e.to));
       if (!wired && this.cappedScopes.has(node.path)) {
         this.nodes.delete(GraphBuilder.ids(child.path));
+        this.pagedScopes.add(node.path);
         break;
       }
       if (this.opts.showContainment) {
@@ -928,6 +968,7 @@ export function buildGraph(index: HdlIndex, root: HierarchyNode, opts: GraphOpti
     showNetNodes: opts.showNetNodes ?? true,
     maxSignalsPerScope: opts.maxSignalsPerScope ?? Infinity,
     signalLimits: opts.signalLimits ?? {},
+    childLimits: opts.childLimits ?? {},
   });
   return builder.build(root);
 }

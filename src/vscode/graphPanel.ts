@@ -6,6 +6,20 @@ import { containingDesign, findByPath, pathChain } from '../core/hierarchy';
 import type { HierarchyNode } from '../core/ast';
 
 /**
+ * A child page: one "show more" click on a box whose children are paged reveals
+ * up to this many of them. The window is per scope, so the walk and the render
+ * stay bounded even when the module instantiates thousands of children.
+ */
+const CHILD_PAGE = 40;
+/**
+ * Parent-scope signals a child page may claim. Each revealed child attaches its
+ * wires to the parent's scope, so a page of `CHILD_PAGE` children needs more
+ * than one signal page of headroom; the child page grants this many extra
+ * signals so the newly drawn boxes are wired rather than dangling.
+ */
+const CHILD_SIGNALS = 120;
+
+/**
  * Connectivity graph panel.
  *
  * The webview is a single self-contained HTML document: the graph model arrives
@@ -56,6 +70,20 @@ export class GraphPanel {
    * raises that box's ceiling so the next build carries more of its signals.
    */
   private signalLimits = new Map<string, number>();
+  /**
+   * Per-box child window raised by the same "show more". A module with more
+   * children than fit the current budgets stays in `Graph.pagedScopes`, and
+   * every click on its paged box raises this page so the next build draws the
+   * next children instead of stalling on the node budget.
+   */
+  private childLimits = new Map<string, number>();
+  /**
+   * Effective node budget, `undefined` until the first page of children is
+   * asked for. Every child page grants the walk one more `graph.maxNodes`
+   * worth of nodes, so a huge module pages out one bounded window after another
+   * instead of stopping dead at the configured cap.
+   */
+  private nodeBudget: number | undefined;
 
   private constructor(
     private readonly panel: vscode.WebviewPanel,
@@ -152,6 +180,8 @@ export class GraphPanel {
     this.ancestorsShown = 0;
     this.expanded.clear();
     this.signalLimits.clear();
+    this.childLimits.clear();
+    this.nodeBudget = undefined;
     // `subtreeDepth` is no longer driving the per-module toggle; the extension
     // still computes it so external callers are unchanged, but it is ignored.
     // A collapse that would hide the new root (or anything on its ancestor
@@ -190,6 +220,8 @@ export class GraphPanel {
       collapsed: [...this.collapsed],
       expanded: [...this.expanded],
       signalLimits: Object.fromEntries(this.signalLimits),
+      childLimits: Object.fromEntries(this.childLimits),
+      maxNodes: this.nodeBudget,
     });
     this.panel.title = `Connectivity: ${graph.root}`;
     await this.panel.webview.postMessage({
@@ -265,20 +297,31 @@ export class GraphPanel {
         return;
       }
       case 'moreSignals': {
-        // The box wants another page of signals. Raise its ceiling by the
-        // configured page size and rebuild; the graph carries the extra rows.
+        // The box wants another page. Its own "show more" row rises two ways:
+        // paging signals raises the box's signal ceiling by the configured page
+        // size as before; paging children (the box is in `Graph.pagedScopes`)
+        // also raises the child window by one page and grants the walk one more
+        // node budget, so a module with thousands of children reveals one page
+        // at a time instead of stopping dead at `graph.maxNodes`.
         const path = String(msg.path ?? '');
         if (!path) {
           return;
         }
         const cap = this.svc.config.graphMaxSignalsPerGroup;
-        if (cap <= 0) {
-          // Show all signals: raising further is not necessary.
-          return;
+        const page = cap > 0 ? cap : CHILD_PAGE;
+        if (msg.children === true) {
+          const cl = this.childLimits.get(path) ?? page;
+          this.childLimits.set(path, cl + page);
+          if (cap > 0) {
+            const sig = this.signalLimits.get(path) ?? 0;
+            this.signalLimits.set(path, sig + CHILD_SIGNALS);
+          }
+          this.nodeBudget =
+            (this.nodeBudget ?? this.svc.config.graphMaxNodes) + this.svc.config.graphMaxNodes;
+        } else if (cap > 0) {
+          const current = this.signalLimits.get(path) ?? page;
+          this.signalLimits.set(path, current + page);
         }
-        const page = cap;
-        const current = this.signalLimits.get(path) ?? page;
-        this.signalLimits.set(path, current + page);
         void this.refresh();
         return;
       }
@@ -464,6 +507,7 @@ export const SCRIPT = String.raw`
   let ancShown = 0;
   let ancLeft = 0;
   let cappedScopes = new Set(); // group keys the graph cut short
+  let pagedScopes = new Set(); // group keys that still have children behind the cut
 // How many levels of the root's subtree the extension is currently drawing,
 // and how many more are available below the deepest one. The children are
 // hidden by default: the plus on the root's right edge walks down one level
@@ -512,12 +556,13 @@ export const SCRIPT = String.raw`
   function truncate(s, n) { return s.length > n ? s.slice(0, n - 1) + '…' : s; }
   // The graph itself caps how many signals it sends per scope; the view shows
   // every row it was given. A scope in cappedScopes has more behind the cut,
-  // so it earns a ... row that asks the extension for another page.
+  // a scope in pagedScopes still has children behind the window, and both
+  // earn a ... row that asks the extension for another page.
   function visibleNets(g) {
     return g && g.nets ? g.nets : [];
   }
   function hasMoreNets(g) {
-    return !!g && cappedScopes.has(g.key);
+    return !!g && (cappedScopes.has(g.key) || pagedScopes.has(g.key));
   }
 
   function colorFor(n) {
@@ -1228,10 +1273,13 @@ export const SCRIPT = String.raw`
         const t = el('text', { x: left + 14, y: ry + 3.5, 'text-anchor': 'start', class: 'sig' });
         t.textContent = '...';
         t.style.cursor = 'pointer';
-        const askMore = () => vscode.postMessage({ type: 'moreSignals', path: g.key });
+        const pagingChildren = pagedScopes.has(g.key);
+        const askMore = () =>
+          vscode.postMessage({ type: 'moreSignals', path: g.key, children: pagingChildren });
+        const moreTip = pagingChildren ? 'Show more children' : 'Show more signals';
         t.addEventListener('mousedown', (ev) => ev.stopPropagation());
         t.addEventListener('click', (ev) => { ev.stopPropagation(); askMore(); });
-        t.addEventListener('mouseenter', (ev) => showTip(ev, 'Show more signals'));
+        t.addEventListener('mouseenter', (ev) => showTip(ev, moreTip));
         t.addEventListener('mousemove', moveTip);
         t.addEventListener('mouseleave', hideTip);
         rowg.appendChild(t);
@@ -1460,6 +1508,7 @@ export const SCRIPT = String.raw`
       ancShown = Number(msg.ancestorsShown ?? 0) || 0;
       ancLeft = Number(msg.ancestorsLeft ?? 0) || 0;
       cappedScopes = new Set((model && model.cappedScopes) || []);
+      pagedScopes = new Set((model && model.pagedScopes) || []);
       // A new model may settle differently under the force layout. The
       // hierarchy layout ignores the flag and re-columns on the next frame,
       // while a group the user dragged keeps its position either way.

@@ -27,6 +27,7 @@ const FIXTURES = path.resolve(__dirname, '..', '..', 'test', 'fixtures');
 
 interface WebviewPanel {
   __posted: { type: string; [k: string]: unknown }[];
+  __send: (m: unknown) => void;
 }
 
 async function setup() {
@@ -81,5 +82,49 @@ test('graphpanel: a real top keeps an empty chain', async () => {
   const meta = lastMeta();
   assert.equal(graph.root, 'chip_top', 'a top is its own root');
   assert.equal(meta.ancestorsLeft, 0, 'nothing sits above a top');
+  GraphPanel.disposeAll();
+});
+
+test('graphpanel: "show more" pages the children of a wide module', async () => {
+  const { svc, GraphPanel } = await setup();
+  // Wide enough that drawing every child and its wiring exceeds the default
+  // node budget: the paged "show more" must grant budget pages, not just widen
+  // the signal window, or the last children stay behind the 800-node cut.
+  const N = 250;
+  let src = 'module leaf (input wire a, input wire b, output wire s); assign s = a & b; endmodule\n';
+  src += 'module wide (input wire din, output wire dout);\n';
+  for (let i = 0; i < N; i++) {
+    src += `  wire a${i}, b${i}, s${i};\n`;
+  }
+  for (let i = 0; i < N; i++) {
+    src += `  leaf u${i} (.a(a${i}), .b(b${i}), .s(s${i}));\n`;
+  }
+  src += '  assign dout = s0;\nendmodule\n';
+  svc.index.addFile('/w/wide.v', src);
+  const { buildHierarchy } = await import('../core/hierarchy');
+  const root = buildHierarchy(svc.index, 'wide')!.root;
+  GraphPanel.show(svc, vscode.Uri.file('/ww'), root, root.path);
+  const panels = (vscode as unknown as { __webviews: WebviewPanel[] }).__webviews;
+  const panel = panels[panels.length - 1];
+  const flip = () => new Promise((r) => setTimeout(r, 0));
+  const latest = () => panel.__posted.filter((p) => p.type === 'graph').pop() as unknown as {
+    graph: { nodes: { kind: string }[]; pagedScopes: string[] };
+  };
+  const instanceCount = () => latest().graph.nodes.filter((n) => n.kind === 'instance' || n.kind === 'root').length;
+  const paged = () => latest().graph.pagedScopes;
+
+  panel.__send({ type: 'descendants', path: root.path, expanded: true });
+  await flip();
+  const firstPage = instanceCount();
+  assert.ok(firstPage < 30, 'the first page is capped by the signal budget');
+  assert.ok(paged().includes(root.path), 'the box stays paged while children remain');
+
+  for (let i = 0; i < 12 && paged().includes(root.path); i++) {
+    panel.__send({ type: 'moreSignals', path: root.path, children: true });
+    await flip();
+  }
+  assert.ok(instanceCount() > firstPage, 'each paged click reveals more children than before');
+  assert.equal(instanceCount(), N + 1, 'every child of the wide module is drawn once the pages add up');
+  assert.ok(paged().length === 0, 'nothing is left behind the raised window');
   GraphPanel.disposeAll();
 });
