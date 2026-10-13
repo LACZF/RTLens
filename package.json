@@ -330,14 +330,12 @@
       },
       {
         "command": "hdl.connectView.traceUp",
-        "key": "ctrl+alt+u",
-        "mac": "cmd+alt+u",
+        "key": "f3",
         "when": "editorTextFocus && (editorLangId == verilog || editorLangId == systemverilog)"
       },
       {
         "command": "hdl.connectView.traceDown",
-        "key": "ctrl+alt+d",
-        "mac": "cmd+alt+d",
+        "key": "f4",
         "when": "editorTextFocus && (editorLangId == verilog || editorLangId == systemverilog)"
       }
     ],

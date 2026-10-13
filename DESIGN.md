@@ -18,7 +18,7 @@
 | 3 | 可视化查看信号与 module 的连接关系 | Webview 交互图（SVG，层次分列默认、力导向可切），一个 module 一个容器框、信号是框内行，边为端口连接/网络 |
 | 4 | 已生成 module 之间的组成关系 | 侧边栏 "Composition" 树视图（层次树）+ 层次路径面包屑 |
 | 5 | 可视化生成 module | 从图中选中实例 → 自动生成包装 module（wrapper）源码，含端口方向/位宽推导 |
-| 6 | 信号追踪 | 光标处信号沿驱动/负载跨层次逐跳追踪（`Ctrl+Alt+U` / `Ctrl+Alt+D`），落点直接跳转 |
+| 6 | 信号追踪 | 光标处信号沿驱动/负载跨层次逐跳追踪（`F3` / `F4`），落点直接跳转 |
 
 ### 1.2 非目标（v0.1 明确不做）
 
@@ -510,7 +510,7 @@ resolve(name, scope) 优先级从高到低：
 
 ### 5.7 信号追踪（fan-in / fan-out）
 
-光标放在信号或端口上，`HDL: Trace Signal Up`（`Ctrl+Alt+U`）向上追驱动源、`HDL: Trace Signal Down`（`Ctrl+Alt+D`）向下追负载。**每次只跨一跳**，不是传递闭包：跳到落点后可以从那里继续追，路径由用户一步步走，`up`/`down` 的语义始终明确（避免“一键展开全图”那种分不清方向的输出）。
+光标放在信号或端口上，`HDL: Trace Signal Up`（`F3`）向上追驱动源、`HDL: Trace Signal Down`（`F4`）向下追负载。**每次只跨一跳**，不是传递闭包：跳到落点后可以从那里继续追，路径由用户一步步走，`up`/`down` 的语义始终明确（避免“一键展开全图”那种分不清方向的输出）。
 
 - **纯核心** `src/core/trace.ts`（不碰 `vscode`）：`traceSignal(index, file, source, line, character, direction)` 用既有的 `resolveAt` 取光标下的声明，只接受 `port`/`signal` 两种 kind（module/参数/宏没有可追的连线）。每一跳有以下几种：
   - **赋值**：信号在 `lhs` 被驱动，则 `up` 落到 `rhs` 的每个引用（右值为常量时落到赋值语句本身）；信号在 `rhs` 被读取，则 `down` 落到 `lhs`。
