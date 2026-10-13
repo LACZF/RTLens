@@ -6,18 +6,12 @@ import { containingDesign, findByPath, pathChain } from '../core/hierarchy';
 import type { HierarchyNode } from '../core/ast';
 
 /**
- * A child page: one "show more" click on a box whose children are paged reveals
- * up to this many of them. The window is per scope, so the walk and the render
- * stay bounded even when the module instantiates thousands of children.
- */
-const CHILD_PAGE = 40;
-/**
  * Parent-scope signals a child page may claim. Each revealed child attaches its
- * wires to the parent's scope, so a page of `CHILD_PAGE` children needs more
- * than one signal page of headroom; the child page grants this many extra
+ * wires to the parent's scope, so a page of `defaultChildLimit` children needs
+ * more than one signal page of headroom; the child page grants this many extra
  * signals so the newly drawn boxes are wired rather than dangling.
  */
-const CHILD_SIGNALS = 120;
+const CHILD_SIGNAL_FACTOR = 3;
 
 /**
  * Connectivity graph panel.
@@ -297,30 +291,31 @@ export class GraphPanel {
         return;
       }
       case 'moreSignals': {
-        // The box wants another page. Its own "show more" row rises two ways:
-        // paging signals raises the box's signal ceiling by the configured page
-        // size as before; paging children (the box is in `Graph.pagedScopes`)
-        // also raises the child window by one page and grants the walk one more
-        // node budget, so a module with thousands of children reveals one page
-        // at a time instead of stopping dead at `graph.maxNodes`.
+        // Two distinct rows ask this: the box's `...` row (its signals were cut
+        // by the cap) and its `more children` row (its children are paged). The
+        // signal row raises the box's signal ceiling by the configured page size
+        // as before; `children: true` (the box is in `Graph.pagedScopes`) instead
+        // raises the child window by one page and grants the walk one more node
+        // budget, so a module with thousands of children reveals one page at a
+        // time instead of stopping dead at `graph.maxNodes`.
         const path = String(msg.path ?? '');
         if (!path) {
           return;
         }
         const cap = this.svc.config.graphMaxSignalsPerGroup;
-        const page = cap > 0 ? cap : CHILD_PAGE;
+        const childPage = this.svc.config.defaultChildLimit;
         if (msg.children === true) {
-          const cl = this.childLimits.get(path) ?? page;
-          this.childLimits.set(path, cl + page);
+          const cl = this.childLimits.get(path) ?? childPage;
+          this.childLimits.set(path, cl + childPage);
           if (cap > 0) {
-            const sig = this.signalLimits.get(path) ?? 0;
-            this.signalLimits.set(path, sig + CHILD_SIGNALS);
+            const sig = this.signalLimits.get(path) ?? cap;
+            this.signalLimits.set(path, sig + childPage * CHILD_SIGNAL_FACTOR);
           }
           this.nodeBudget =
             (this.nodeBudget ?? this.svc.config.graphMaxNodes) + this.svc.config.graphMaxNodes;
         } else if (cap > 0) {
-          const current = this.signalLimits.get(path) ?? page;
-          this.signalLimits.set(path, current + page);
+          const current = this.signalLimits.get(path) ?? cap;
+          this.signalLimits.set(path, current + cap);
         }
         void this.refresh();
         return;
@@ -555,14 +550,20 @@ export const SCRIPT = String.raw`
   function labelW(s, fs) { return (s || '').length * fs * 0.62; }
   function truncate(s, n) { return s.length > n ? s.slice(0, n - 1) + '…' : s; }
   // The graph itself caps how many signals it sends per scope; the view shows
-  // every row it was given. A scope in cappedScopes has more behind the cut,
-  // a scope in pagedScopes still has children behind the window, and both
-  // earn a ... row that asks the extension for another page.
+  // every row it was given. A scope in cappedScopes has more signals behind the
+  // cut and earns a ... row that asks for another signal page; a scope in
+  // pagedScopes still has children behind the child window and earns a separate
+  // "more children" row that asks for the next child page instead. The two
+  // controls stay distinct: the ... row is about the module's own signal rows,
+  // the more-children row about the boxes below it.
   function visibleNets(g) {
     return g && g.nets ? g.nets : [];
   }
   function hasMoreNets(g) {
-    return !!g && (cappedScopes.has(g.key) || pagedScopes.has(g.key));
+    return !!g && cappedScopes.has(g.key);
+  }
+  function hasMoreChildren(g) {
+    return !!g && pagedScopes.has(g.key);
   }
 
   function colorFor(n) {
@@ -624,7 +625,8 @@ export const SCRIPT = String.raw`
     }
     g.w = Math.max(MIN_W, Math.min(MAX_W, Math.ceil(w)));
     const moreRow = !folded.has(g.key) && hasMoreNets(g) ? 1 : 0;
-    g.h = HEAD_H + (show ? (vnets.length + moreRow) * ROW_H + 4 : 0);
+    const childRow = !folded.has(g.key) && hasMoreChildren(g) ? 1 : 0;
+    g.h = HEAD_H + (show || childRow ? (vnets.length + moreRow + childRow) * ROW_H + 4 : 0);
   }
 
   /** Group the visible nodes: every instance box owns the signals of its scope. */
@@ -1240,6 +1242,7 @@ export const SCRIPT = String.raw`
     if (!isFolded) {
       const vnets = visibleNets(g);
       const more = hasMoreNets(g);
+      const childMore = hasMoreChildren(g);
       for (let i = 0; i < vnets.length; i++) {
         const n = vnets[i];
         const ry = n.y;
@@ -1273,13 +1276,10 @@ export const SCRIPT = String.raw`
         const t = el('text', { x: left + 14, y: ry + 3.5, 'text-anchor': 'start', class: 'sig' });
         t.textContent = '...';
         t.style.cursor = 'pointer';
-        const pagingChildren = pagedScopes.has(g.key);
-        const askMore = () =>
-          vscode.postMessage({ type: 'moreSignals', path: g.key, children: pagingChildren });
-        const moreTip = pagingChildren ? 'Show more children' : 'Show more signals';
+        const askMore = () => vscode.postMessage({ type: 'moreSignals', path: g.key });
         t.addEventListener('mousedown', (ev) => ev.stopPropagation());
         t.addEventListener('click', (ev) => { ev.stopPropagation(); askMore(); });
-        t.addEventListener('mouseenter', (ev) => showTip(ev, moreTip));
+        t.addEventListener('mouseenter', (ev) => showTip(ev, 'Show more signals'));
         t.addEventListener('mousemove', moveTip);
         t.addEventListener('mouseleave', hideTip);
         rowg.appendChild(t);
@@ -1287,6 +1287,34 @@ export const SCRIPT = String.raw`
         rhit.style.cursor = 'pointer';
         rhit.addEventListener('mousedown', (ev) => ev.stopPropagation());
         rhit.addEventListener('click', (ev) => { ev.stopPropagation(); askMore(); });
+        rowg.appendChild(rhit);
+        grp.appendChild(rowg);
+      }
+      // Children paged behind the child window get their own row, below the
+      // signal rows: it asks the extension to reveal the next child page
+      // (granting an extra node budget), leaving the signal ... row to its own
+      // page of rows.
+      if (childMore) {
+        const ry = top + HEAD_H + 2 + ROW_H / 2 + (vnets.length + (more ? 1 : 0)) * ROW_H;
+        const rowg = el('g', { class: 'rowg' });
+        rowg.appendChild(el('line', {
+          x1: left + 10, y1: ry - ROW_H / 2, x2: right - 10, y2: ry - ROW_H / 2, class: 'rsep',
+        }));
+        const t = el('text', { x: left + 14, y: ry + 3.5, 'text-anchor': 'start', class: 'sig' });
+        t.textContent = 'more children';
+        t.style.cursor = 'pointer';
+        const askChildren = () =>
+          vscode.postMessage({ type: 'moreSignals', path: g.key, children: true });
+        t.addEventListener('mousedown', (ev) => ev.stopPropagation());
+        t.addEventListener('click', (ev) => { ev.stopPropagation(); askChildren(); });
+        t.addEventListener('mouseenter', (ev) => showTip(ev, 'Show more children'));
+        t.addEventListener('mousemove', moveTip);
+        t.addEventListener('mouseleave', hideTip);
+        rowg.appendChild(t);
+        const rhit = el('rect', { x: left + 2, y: ry - ROW_H / 2, width: g.w - 4, height: ROW_H, class: 'hit' });
+        rhit.style.cursor = 'pointer';
+        rhit.addEventListener('mousedown', (ev) => ev.stopPropagation());
+        rhit.addEventListener('click', (ev) => { ev.stopPropagation(); askChildren(); });
         rowg.appendChild(rhit);
         grp.appendChild(rowg);
       }

@@ -54,6 +54,7 @@
 | `hdl.connectView.graph.maxNodes` | `800` | 连接图渲染的节点上限，超出后退化为邻域视图 |
 | `hdl.connectView.graph.showContainment` | `false` | 在连接图中显示父子包含边 |
 | `hdl.connectView.graph.maxSignalsPerGroup` | `40` | 每框信号行上限；按顺序先留实例端口连线、再 `assign` 两端、最后端口声明，超出的收进 `...`（点击逐页放开，设 `0` 全部显示） |
+| `hdl.connectView.defaultChildLimit` | `40` | 单页带出的下级子框数：组合树首屏只画一页、尾部一行 `show N more children` 点击加载下一页；连接图里右缘 `+` 揭示下级时也只画一页，框内另有一行 `more children`，点击补一页下级并顺带放行一页节点预算（与信号 `...` 行各自独立） |
 | `hdl.connectView.followDefinition` | `true` | 在实例名上按 F12 跳到其 module 定义；关闭则在组成树中定位 |
 | `hdl.connectView.enableSemanticHighlighting` | `true` | 启用语义高亮（实例名、端口名、声明信号等） |
 | `hdl.connectView.databasePaths` | `[]` | 额外参与索引与数据库的路径或文件；相对路径按各工作区文件夹解析，绝对路径原样使用。目录按 `files` 递归扫描，文件直接索引 |

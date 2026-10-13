@@ -299,6 +299,18 @@ test('graph: a child window pages the children of a wide scope', () => {
   assert.ok(!g.pagedScopes.includes('top.u_mid'), 'a scope with all its children is not paged');
 });
 
+test('graph: a scope with no explicit window pages on defaultChildLimit', () => {
+  const { g } = graph({ expanded: ['top'], defaultChildLimit: 2 });
+  const kids = g.nodes.filter(
+    (n) => n.kind === 'instance' && n.path.startsWith('top.') && n.path.split('.').length === 2,
+  );
+  assert.equal(kids.length, 2, 'a scope with no childLimits keeps only the default page');
+  assert.ok(g.pagedScopes.includes('top'), 'the rest of the children stay behind a show-more row');
+  // An explicit childLimits entry still wins over the default window.
+  const { g: g2 } = graph({ expanded: ['top'], defaultChildLimit: 2, childLimits: { top: 5 } });
+  assert.equal(g2.pagedScopes.includes('top'), false, 'an explicit window overrides the default');
+});
+
 test('graph: a scope cut by the node budget is paged, not a dead end', () => {
   const { g } = graph({ expanded: ['top'], maxNodes: 7 });
   assert.ok(g.truncated, 'the walk hit the budget');

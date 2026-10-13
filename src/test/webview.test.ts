@@ -404,10 +404,45 @@ test('a scope the graph cut short wears a ... row that asks for more signals', (
   const ask = p.posted.find((m) => m.type === 'moreSignals');
   assert.ok(ask, 'the click asks the extension for another page');
   assert.equal(ask!.path, 'top');
+  assert.equal(ask!.children, undefined, 'the ... row pages signals, not children');
 
   const leaf = p.group('top.u_leaf');
   assert.equal(find(leaf.el, (e) => e.tagName === 'text' && e.textContent === '...'), undefined,
     'a scope the graph left whole has no ... row');
+});
+
+test('a scope with children behind its window wears a separate more-children row', () => {
+  const g = fixtureGraph();
+  g.pagedScopes = ['top'];
+  const p = startPanel(g);
+  const top = p.group('top');
+  assert.equal(find(top.el, (e) => e.tagName === 'text' && e.textContent === '...'), undefined,
+    'pending children alone do not dress the box in a signal ... row');
+  const moreChildren = find(top.el, (e) => e.tagName === 'text' && e.textContent === 'more children');
+  assert.ok(moreChildren,
+    'a scope still holding children behind the child window offers a more-children row');
+
+  fire(moreChildren!, 'click');
+  const ask = p.posted.filter((m) => m.type === 'moreSignals').pop();
+  assert.ok(ask, 'the click asks the extension to reveal more children');
+  assert.equal(ask!.path, 'top');
+  assert.equal(ask!.children, true, 'the more-children row sends the child paging flag');
+});
+
+test('a scope cut both ways wears both rows and they page independently', () => {
+  const g = fixtureGraph();
+  g.cappedScopes = ['top'];
+  g.pagedScopes = ['top'];
+  const p = startPanel(g);
+  const top = p.group('top');
+  const signals = find(top.el, (e) => e.tagName === 'text' && e.textContent === '...');
+  const children = find(top.el, (e) => e.tagName === 'text' && e.textContent === 'more children');
+  assert.ok(signals && children, 'a scope with signals and children both pending offers both rows');
+  fire(signals!, 'click');
+  fire(children!, 'click');
+  const asks = p.posted.filter((m) => m.type === 'moreSignals');
+  assert.equal(asks[0].children, undefined, 'the ... row pages signals');
+  assert.equal(asks[1].children, true, 'the more-children row pages children');
 });
 
 

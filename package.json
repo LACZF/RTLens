@@ -150,6 +150,12 @@
           "maximum": 500,
           "description": "Maximum number of signal rows shown per module box in the connectivity graph; 0 means show all."
         },
+        "hdl.connectView.defaultChildLimit": {
+          "type": "number",
+          "default": 40,
+          "minimum": 1,
+          "description": "Number of child modules revealed per page: the composition tree shows this many children before a load-more row, and the connectivity graph draws this many children per box (the first reveal included) before a 'more children' row that adds one more page."
+        },
         "hdl.connectView.followDefinition": {
           "type": "boolean",
           "default": true,
@@ -219,6 +225,11 @@
       {
         "command": "hdl.connectView.copyInstancePath",
         "title": "HDL: Copy Hierarchical Path of Current Instance",
+        "category": "HDL"
+      },
+      {
+        "command": "hdl.connectView.showMoreChildren",
+        "title": "HDL: Show More Children",
         "category": "HDL"
       }
     ],

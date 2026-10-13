@@ -204,6 +204,12 @@ export function activate(context: vscode.ExtensionContext): void {
     void vscode.window.setStatusBarMessage(`HDL: copied ${node.path}`, 3000);
   });
 
+  reg('hdl.connectView.showMoreChildren', (path?: string) => {
+    if (typeof path === 'string') {
+      composition.moreChildren(path);
+    }
+  });
+
   // `revealInstance` is the click target of the composition and nets rows. The
   // two row types do not carry the same data - a composition row knows the
   // hierarchy node it came from, a nets row only knows a line - so both shapes

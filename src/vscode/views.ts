@@ -22,6 +22,12 @@ export class CompositionTreeProvider implements vscode.TreeDataProvider<Composit
    * `getTreeItem` handed out, and the item is created from data.
    */
   private readonly rendered = new Map<string, vscode.TreeItem>();
+  /**
+   * Children shown per node before the list ends in a "load more" row. Keyed by
+   * node path so one wide module can be walked page by page without any other
+   * node (or the whole tree) paying for its size.
+   */
+  private readonly windows = new Map<string, number>();
 
   constructor(private readonly svc: IndexService) {
     this.svc.onDidChange(() => this.refresh());
@@ -52,10 +58,33 @@ export class CompositionTreeProvider implements vscode.TreeDataProvider<Composit
     this.cached = node;
     this.rootModule = moduleName ?? node?.moduleName;
     this.rendered.clear();
+    this.windows.clear();
+    this.emitter.fire(undefined);
+  }
+
+  /** Reveal the next page of children under `path`. */
+  moreChildren(path: string): void {
+    const page = this.svc.config.defaultChildLimit;
+    const current = this.windows.get(path) ?? page;
+    this.windows.set(path, current + page);
     this.emitter.fire(undefined);
   }
 
   getTreeItem(e: CompositionItem): vscode.TreeItem {
+    if (e.more) {
+      const item = new vscode.TreeItem(e.label, vscode.TreeItemCollapsibleState.None);
+      item.id = `hdl:more:${e.node.path}`;
+      item.description = 'click to show the next page of children';
+      item.tooltip = e.tooltip;
+      item.contextValue = 'hdl.more';
+      item.iconPath = new vscode.ThemeIcon('chevron-down');
+      item.command = {
+        command: 'hdl.connectView.showMoreChildren',
+        title: 'Show More Children',
+        arguments: [e.node.path],
+      };
+      return item;
+    }
     const cached = this.rendered.get(e.node.path);
     if (cached) {
       return cached;
@@ -67,7 +96,8 @@ export class CompositionTreeProvider implements vscode.TreeDataProvider<Composit
 
   /**
    * Expand every ancestor of `path` and return the matching row, so the caller
-   * can hand it to `TreeView.reveal`.
+   * can hand it to `TreeView.reveal`. A path that sits behind a "load more" row
+   * widens the ancestor's window instead of silently missing the row.
    */
   modelFor(path: string): CompositionItem | undefined {
     const root = this.cached;
@@ -78,8 +108,31 @@ export class CompositionTreeProvider implements vscode.TreeDataProvider<Composit
     if (!node) {
       return undefined;
     }
+    this.ensureRevealWindows(root, path);
     this.emitter.fire(undefined);
     return this.toItem(node, node.path === root.path);
+  }
+
+  /**
+   * Raise the child window of every ancestor on the path to `path`, so a target
+   * beyond the first page of a wide module is actually handed to the tree.
+   */
+  private ensureRevealWindows(root: HierarchyNode, path: string): void {
+    const parts = path.split('.');
+    for (let i = 0; i + 1 < parts.length; i++) {
+      const ancPath = parts.slice(0, i + 1).join('.');
+      const anc = findByPath(root, ancPath);
+      const childPath = parts.slice(0, i + 2).join('.');
+      const idx = (anc?.children ?? []).findIndex((c) => c.path === childPath);
+      if (idx < 0) {
+        continue;
+      }
+      const page = this.svc.config.defaultChildLimit;
+      const window = this.windows.get(ancPath) ?? page;
+      if (idx >= window) {
+        this.windows.set(ancPath, idx + 1);
+      }
+    }
   }
 
   private render(e: CompositionItem): vscode.TreeItem {
@@ -111,11 +164,38 @@ export class CompositionTreeProvider implements vscode.TreeDataProvider<Composit
       const node = this.ensureRoot();
       return node ? [this.toItem(node, true)] : [];
     }
-    return (e.node.children ?? []).map((c) => this.toItem(c, false));
+    if (e.more) {
+      return [];
+    }
+    const kids = e.node.children ?? [];
+    const page = this.svc.config.defaultChildLimit;
+    const window = this.windows.get(e.node.path) ?? page;
+    const shown = kids.slice(0, window);
+    const rows = shown.map((c) => this.toItem(c, false));
+    const hidden = kids.length - shown.length;
+    if (hidden > 0) {
+      rows.push(this.toMoreItem(e.node, hidden));
+    }
+    return rows;
+  }
+
+  private toMoreItem(parent: HierarchyNode, hidden: number): CompositionItem {
+    return {
+      node: parent,
+      label: `show ${hidden} more children`,
+      note: '',
+      badge: '',
+      icon: 'chevron-down',
+      file: undefined,
+      childCount: 0,
+      unresolved: false,
+      tooltip: `${hidden} more child${hidden === 1 ? '' : 'ren'} of ${parent.moduleName}. Click to reveal the next page; the page size is set by hdl.connectView.defaultChildLimit.`,
+      more: true,
+    };
   }
 
   getParent(e: CompositionItem): CompositionItem | undefined {
-    if (!e.node.parentPath) {
+    if (e.more || !e.node.parentPath) {
       return undefined;
     }
     const node = this.ensureRoot();
@@ -185,6 +265,11 @@ export interface CompositionItem {
   childCount: number;
   unresolved: boolean;
   tooltip: string;
+  /**
+   * Placeholder "load more" row: not backed by a child node of its own. `node`
+   * is the parent whose next page this row would reveal.
+   */
+  more?: boolean;
 }
 
 /** Nets of the module in the active editor: the signals worth looking at. */

@@ -159,10 +159,18 @@ export interface GraphOptions {
    * Per-scope cap on how many direct children are drawn, keyed by instance
    * path. A scope with more children keeps the first `childLimits[path]` boxes
    * and is listed in `Graph.pagedScopes` so the view can page the rest in. A
-   * missing key means no child window (all children that fit the other budgets
-   * are drawn).
+   * missing key falls back to `defaultChildLimit`.
    */
   childLimits?: Record<string, number>;
+  /**
+   * Child window applied to every scope that has no explicit `childLimits`
+   * entry. The graph reveals this many direct children per scope and lists the
+   * rest in `Graph.pagedScopes`, so expanding a module with thousands of
+   * children shows one page (and a "more children" row) instead of drawing
+   * everything the node budget allows. `Infinity` (the default) keeps the old
+   * behaviour of drawing all children that fit the other budgets.
+   */
+  defaultChildLimit?: number;
 }
 
 const DEFAULT_MAX_NODES = 800;
@@ -209,6 +217,8 @@ class GraphBuilder {
   private readonly netCount = new Map<string, number>();
   private readonly cappedScopes = new Set<string>();
   private readonly childLimits: Map<string, number>;
+  /** Fallback child window for scopes with no explicit `childLimits` entry. */
+  private readonly defaultChildLimit: number;
   /**
    * Scopes that still have direct children behind the child window, the node
    * budget or the signal cap. Mirrors `truncatedPaths` but is what the view
@@ -226,6 +236,7 @@ class GraphBuilder {
     this.maxSignalsPerScope = opts.maxSignalsPerScope;
     this.signalLimits = new Map(Object.entries(opts.signalLimits));
     this.childLimits = new Map(Object.entries(opts.childLimits));
+    this.defaultChildLimit = opts.defaultChildLimit;
   }
 
   build(root: HierarchyNode): Graph {
@@ -527,13 +538,13 @@ class GraphBuilder {
     const added: HierarchyNode[] = [];
     const children = node.children ?? [];
     // The per-scope child window: a module with thousands of children reveals
-    // them in pages of `childLimits[node.path]`, so the first render never
-    // draws four thousand boxes at once. While children remain behind the
-    // window the scope is listed in `pagedScopes`, and the view's "show more"
-    // row raises the window to bring the next page out. The other two stops -
-    // the node budget and the net cap - also leave children behind, so both
-    // mark the scope paged too.
-    const climit = this.childLimits.get(node.path) ?? Infinity;
+    // them in pages of `childLimits[node.path]` (falling back to
+    // `defaultChildLimit`), so the first render never draws four thousand boxes
+    // at once. While children remain behind the window the scope is listed in
+    // `pagedScopes`, and the view's "more children" row raises the window to
+    // bring the next page out. The other two stops - the node budget and the net
+    // cap - also leave children behind, so both mark the scope paged too.
+    const climit = this.childLimits.get(node.path) ?? this.defaultChildLimit;
     for (let i = 0; i < children.length; i++) {
       if (added.length >= climit) {
         this.pagedScopes.add(node.path);
@@ -969,6 +980,7 @@ export function buildGraph(index: HdlIndex, root: HierarchyNode, opts: GraphOpti
     maxSignalsPerScope: opts.maxSignalsPerScope ?? Infinity,
     signalLimits: opts.signalLimits ?? {},
     childLimits: opts.childLimits ?? {},
+    defaultChildLimit: opts.defaultChildLimit ?? Infinity,
   });
   return builder.build(root);
 }
