@@ -23,8 +23,10 @@ import {
 import { GraphPanel } from './vscode/graphPanel';
 import { runGenerateWrapper } from './vscode/generate';
 import { DatabaseService, pickRefreshMode } from './vscode/database';
-import type { HierarchyNode } from './core/ast';
+import type { HierarchyNode, Range } from './core/ast';
 import { findByPath } from './core/hierarchy';
+import { basename } from './core/index';
+import { traceSignal, type TraceDirection, type TraceStep } from './core/trace';
 
 const LANGUAGES = ['verilog', 'systemverilog'];
 
@@ -210,6 +212,42 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   });
 
+  // Signal tracing: one hop of fan-in / fan-out from the name under the cursor,
+  // then jump to the chosen target. The hop logic is pure (`core/trace`); this is
+  // only the editor glue, so the command stays a shortcut and not a panel.
+  const trace = async (direction: TraceDirection) => {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || !LANGUAGES.includes(editor.document.languageId)) {
+      return;
+    }
+    await svc.ensureReady();
+    svc.syncOpenDocuments();
+    const pos = editor.selection.active;
+    const res = traceSignal(
+      svc.index,
+      editor.document.fileName,
+      editor.document.getText(),
+      pos.line,
+      pos.character,
+      direction,
+    );
+    if (!res) {
+      void vscode.window.showInformationMessage('HDL: put the cursor on a signal to trace it.');
+      return;
+    }
+    if (!res.targets.length) {
+      const what = direction === 'up' ? 'driver' : 'load';
+      void vscode.window.showInformationMessage(`HDL: no ${what} found for ${res.name}.`);
+      return;
+    }
+    const target = await pickTraceTarget(res.name, direction, res.targets);
+    if (target) {
+      await revealLocation(target.file, target.range);
+    }
+  };
+  reg('hdl.connectView.traceUp', () => trace('up'));
+  reg('hdl.connectView.traceDown', () => trace('down'));
+
   // `revealInstance` is the click target of the composition and nets rows. The
   // two row types do not carry the same data - a composition row knows the
   // hierarchy node it came from, a nets row only knows a line - so both shapes
@@ -336,4 +374,40 @@ function expandTo(
   }
   composition.setRoot(result.root, def.name);
   return composition.modelFor(result.root.path);
+}
+
+/**
+ * A single trace target jumps straight there; several are ranked by the core and
+ * offered in a quick pick, so an ambiguous net does not silently pick one.
+ */
+async function pickTraceTarget(
+  name: string,
+  direction: TraceDirection,
+  targets: TraceStep[],
+): Promise<TraceStep | undefined> {
+  if (targets.length === 1) {
+    return targets[0];
+  }
+  const pick = await vscode.window.showQuickPick(
+    targets.map((step) => ({
+      label: step.label,
+      description: step.detail,
+      detail: `${basename(step.file)}:${step.range.start.line + 1}`,
+      step,
+    })),
+    {
+      title: `HDL: ${direction === 'up' ? 'drivers of' : 'loads of'} ${name}`,
+      placeHolder: 'Choose where to trace',
+    },
+  );
+  return pick?.step;
+}
+
+/** Open `file` with the cursor on `target` and the range in view. */
+async function revealLocation(file: string, target: Range): Promise<void> {
+  const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+  const editor = await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One, preview: true });
+  const position = new vscode.Position(target.start.line, target.start.character);
+  editor.selection = new vscode.Selection(position, position);
+  editor.revealRange(range(target), vscode.TextEditorRevealType.InCenter);
 }

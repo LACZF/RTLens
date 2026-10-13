@@ -231,6 +231,16 @@
         "command": "hdl.connectView.showMoreChildren",
         "title": "HDL: Show More Children",
         "category": "HDL"
+      },
+      {
+        "command": "hdl.connectView.traceUp",
+        "title": "HDL: Trace Signal Up (drivers)",
+        "category": "HDL"
+      },
+      {
+        "command": "hdl.connectView.traceDown",
+        "title": "HDL: Trace Signal Down (loads)",
+        "category": "HDL"
       }
     ],
     "viewsContainers": {
@@ -298,6 +308,16 @@
           "command": "hdl.connectView.generateWrapper",
           "when": "editorLangId == verilog || editorLangId == systemverilog",
           "group": "hdl@2"
+        },
+        {
+          "command": "hdl.connectView.traceUp",
+          "when": "editorLangId == verilog || editorLangId == systemverilog",
+          "group": "hdl@3"
+        },
+        {
+          "command": "hdl.connectView.traceDown",
+          "when": "editorLangId == verilog || editorLangId == systemverilog",
+          "group": "hdl@4"
         }
       ]
     },
@@ -306,6 +326,18 @@
         "command": "hdl.connectView.showGraphForSelection",
         "key": "ctrl+alt+g",
         "mac": "cmd+alt+g",
+        "when": "editorTextFocus && (editorLangId == verilog || editorLangId == systemverilog)"
+      },
+      {
+        "command": "hdl.connectView.traceUp",
+        "key": "ctrl+alt+u",
+        "mac": "cmd+alt+u",
+        "when": "editorTextFocus && (editorLangId == verilog || editorLangId == systemverilog)"
+      },
+      {
+        "command": "hdl.connectView.traceDown",
+        "key": "ctrl+alt+d",
+        "mac": "cmd+alt+d",
         "when": "editorTextFocus && (editorLangId == verilog || editorLangId == systemverilog)"
       }
     ],
