@@ -485,6 +485,7 @@ export class IndexService implements vscode.Disposable {
       expanded: opts.expanded,
       maxSignalsPerScope: this.configValue.graphMaxSignalsPerGroup,
       signalLimits: opts.signalLimits,
+      includeSignals: opts.includeSignals,
       childLimits: opts.childLimits,
       defaultChildLimit: this.configValue.defaultChildLimit,
     });

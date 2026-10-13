@@ -843,6 +843,28 @@ test('the search field is centred between the instance name and the module name'
   assert.ok(Number(mod!.getAttribute('x')) > x + w, 'the module name stays on the right');
 });
 
+test('a box search can reach an internal signal that is normally hidden', () => {
+  const index = new HdlIndex();
+  index.addFile('/w/int.v', [
+    'module top(input wire a, output wire y);',
+    '  wire t;',
+    '  assign t = a;',
+    '  assign y = t;',
+    'endmodule',
+  ].join('\n'));
+  const h = buildHierarchy(index, 'top', { maxDepth: 8 })!;
+  const g = buildGraph(index, h.root, { maxDepth: 8, maxNodes: 500 });
+  const p = startPanel(g);
+
+  assert.equal(p.group('top').g.nets.some((n) => n.label === 't'), false,
+    'an internal signal with no direction is not drawn on its own');
+  const inp = find(p.group('top').el, (e) => e.tagName === 'input' && e.classList.contains('boxsearch'))!;
+  inp.value = 't';
+  fire(inp, 'keydown', { key: 'Enter' });
+  assert.ok(p.group('top').g.nets.some((n) => n.label === 't'),
+    'the searched internal signal is added as a row');
+});
+
 
 test('wires between two modules do not cross', () => {
   const p = startPanel(fixtureGraph());

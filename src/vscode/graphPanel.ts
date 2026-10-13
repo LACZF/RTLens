@@ -93,6 +93,13 @@ export class GraphPanel {
   private searchChildLimits = new Map<string, number>();
   /** Signal-ceiling bumps for scopes holding a matching signal. */
   private searchSignalLimits = new Map<string, number>();
+  /**
+   * Signals a search matched that the graph would not otherwise carry, keyed by
+   * instance path. A net that is only named in a sensitivity list or a plain
+   * declaration has no port and no assign endpoint, so without this the row the
+   * reader searched for would never be materialised.
+   */
+  private searchSignals = new Map<string, string[]>();
 
   private constructor(
     private readonly panel: vscode.WebviewPanel,
@@ -195,6 +202,7 @@ export class GraphPanel {
     this.searchExpanded.clear();
     this.searchChildLimits.clear();
     this.searchSignalLimits.clear();
+    this.searchSignals.clear();
     // `subtreeDepth` is no longer driving the per-module toggle; the extension
     // still computes it so external callers are unchanged, but it is ignored.
     // A collapse that would hide the new root (or anything on its ancestor
@@ -233,6 +241,7 @@ export class GraphPanel {
       collapsed: [...this.collapsed],
       expanded: [...this.expanded, ...this.searchExpanded],
       signalLimits: { ...Object.fromEntries(this.signalLimits), ...Object.fromEntries(this.searchSignalLimits) },
+      includeSignals: Object.fromEntries(this.searchSignals),
       childLimits: { ...Object.fromEntries(this.childLimits), ...Object.fromEntries(this.searchChildLimits) },
       maxNodes: this.nodeBudget,
     });
@@ -372,6 +381,7 @@ export class GraphPanel {
       this.searchExpanded.clear();
       this.searchChildLimits.clear();
       this.searchSignalLimits.clear();
+      this.searchSignals.clear();
       return;
     }
     // A new query adds to what earlier queries revealed rather than reshuffling
@@ -401,7 +411,15 @@ export class GraphPanel {
       return cached;
     };
     // The module's own signals.
-    const signalHit = signalsOf(scope).some((name) => name.toLowerCase().includes(q));
+    const matchedSignals = signalsOf(scope).filter((name) => name.toLowerCase().includes(q));
+    const signalHit = matchedSignals.length > 0;
+    // Carry the matched names forward so the graph materialises them even when
+    // they are not a port or an assign endpoint; the union keeps an earlier
+    // query's internal signals on screen.
+    if (matchedSignals.length) {
+      const prev = this.searchSignals.get(scope.path) ?? [];
+      this.searchSignals.set(scope.path, Array.from(new Set([...prev, ...matchedSignals])));
+    }
     // Its direct children, and no deeper: the walk stops here.
     let childHit = false;
     const kids = scope.children ?? [];
@@ -832,8 +850,10 @@ export const SCRIPT = String.raw`
     };
     for (const n of ns) {
       if (n.kind === 'net') {
-        // Only show I/O-facing signals (ports or signals connected to child ports).
-        if (n.direction !== undefined && n.direction !== null) {
+        // Only I/O-facing signals (ports or signals connected to child ports)
+        // are shown by default; a box search may also pin one internal signal,
+        // so a matched net is drawn even with no direction.
+        if ((n.direction !== undefined && n.direction !== null) || isBoxMatch(n)) {
           grab(scopeOf(n)).nets.push(n);
         }
       } else {

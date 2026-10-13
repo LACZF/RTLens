@@ -156,6 +156,14 @@ export interface GraphOptions {
    */
   signalLimits?: Record<string, number>;
   /**
+   * Signals to materialise in a scope even though nothing else references them,
+   * keyed by instance path. The view fills this with the signals a box search
+   * matched, so an internal net that is neither a port nor an assign endpoint
+   * (a sensitivity list only, say) can still be drawn instead of being reported
+   * as missing.
+   */
+  includeSignals?: Record<string, string[]>;
+  /**
    * Per-scope cap on how many direct children are drawn, keyed by instance
    * path. A scope with more children keeps the first `childLimits[path]` boxes
    * and is listed in `Graph.pagedScopes` so the view can page the rest in. A
@@ -593,6 +601,15 @@ class GraphBuilder {
     if (!this.opts.portWiringOnly) {
       this.connectContinuousAssigns(node, def, scope);
     }
+    // Signals a search asked for even though no port or assign mentions them:
+    // they outrank the plain port declarations so the cap cannot drop the very
+    // row the reader searched for.
+    const extra = this.opts.includeSignals?.[node.path];
+    if (extra) {
+      for (const name of extra) {
+        this.addNetNode(node.path, name, node.depth, this.netInfo(def, name, scope));
+      }
+    }
     for (const p of def.ports) {
       if (p.direction === 'ref') {
         continue;
@@ -979,6 +996,7 @@ export function buildGraph(index: HdlIndex, root: HierarchyNode, opts: GraphOpti
     showNetNodes: opts.showNetNodes ?? true,
     maxSignalsPerScope: opts.maxSignalsPerScope ?? Infinity,
     signalLimits: opts.signalLimits ?? {},
+    includeSignals: opts.includeSignals ?? {},
     childLimits: opts.childLimits ?? {},
     defaultChildLimit: opts.defaultChildLimit ?? Infinity,
   });

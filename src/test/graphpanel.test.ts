@@ -175,3 +175,31 @@ test('graphpanel: a per-box search reveals what paging and the signal cap hid', 
   assert.ok(manyPaths().includes(manyRoot.path + '::p55'), 'the searched signal is revealed');
   GraphPanel.disposeAll();
 });
+
+test('graphpanel: a box search reaches an internal signal the graph never carried', async () => {
+  const { svc, GraphPanel } = await setup();
+  // `en` is a plain declaration that only shows up in a sensitivity list, so it
+  // is neither a port nor an assign endpoint and the builder would never make a
+  // node for it. A search has to pull it in on its own.
+  svc.index.addFile('/w/evt.v', [
+    'module evt (input wire clk, input wire d, output reg q);',
+    '  wire en;',
+    '  always @(posedge en) q <= d;',
+    'endmodule',
+  ].join('\n'));
+  const { buildHierarchy } = await import('../core/hierarchy');
+  const root = buildHierarchy(svc.index, 'evt')!.root;
+  GraphPanel.show(svc, vscode.Uri.file('/we'), root, root.path);
+  const panels = (vscode as unknown as { __webviews: WebviewPanel[] }).__webviews;
+  const panel = panels[panels.length - 1];
+  const flip = () => new Promise((r) => setTimeout(r, 0));
+  const paths = () => (panel.__posted.filter((p) => p.type === 'graph').pop()!.graph as {
+    nodes: { path: string }[];
+  }).nodes.map((n) => n.path);
+
+  assert.ok(!paths().includes(root.path + '::en'), 'the event-only net is not in the graph to begin with');
+  panel.__send({ type: 'boxSearch', path: root.path, query: 'en' });
+  await flip();
+  assert.ok(paths().includes(root.path + '::en'), 'the searched internal signal is materialised');
+  GraphPanel.disposeAll();
+});
