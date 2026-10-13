@@ -746,6 +746,104 @@ test('searching a signal brings its whole module group along', () => {
   assert.equal(p.group('top.u_leaf').g.nets.length, 4);
 });
 
+test('every module box carries its own search field', () => {
+  const p = startPanel(fixtureGraph());
+  for (const gd of p.api._els!.groups) {
+    const inp = find(gd.el, (e) => e.tagName === 'input' && e.classList.contains('boxsearch'));
+    assert.ok(inp, gd.g.key + ' has a search field in its header');
+    assert.equal(inp!.getAttribute('data-key'), gd.g.key, 'the field knows which box it belongs to');
+  }
+});
+
+test('a box search adds its matches without hiding what is on screen', () => {
+  const p = startPanel(fixtureGraph());
+  const before = p.api._els!.groups.map((gd) => gd.g.key).sort();
+  const inp = find(p.group('top').el, (e) => e.tagName === 'input' && e.classList.contains('boxsearch'))!;
+  inp.value = 'dangling';
+  fire(inp, 'keydown', { key: 'Enter' });
+
+  const after = p.api._els!.groups.map((gd) => gd.g.key).sort();
+  assert.deepEqual(after, before, 'nothing that was already on screen changed');
+  assert.ok(p.group('top.u_dangling').el.classList.contains('match'), 'the matched box is highlighted');
+  assert.equal(p.group('top').g.nets.length, 6, 'no box pours its signals in just because a match was added');
+  assert.ok(find(p.group('top.u_dangling').el, (e) => e.tagName === 'input'), 'the box keeps its search field');
+});
+
+test('a box search brings a hidden match in on top of the current view', () => {
+  const p = startPanel(fixtureGraph());
+  p.search().value = 'mid_out';
+  fire(p.search(), 'input');
+  assert.deepEqual(p.api._els!.groups.map((gd) => gd.g.key).sort(),
+    ['top', 'top.u_leaf', 'top.u_mid'], 'the global filter is in force');
+
+  const inp = find(p.group('top').el, (e) => e.tagName === 'input' && e.classList.contains('boxsearch'))!;
+  inp.value = 'dangling';
+  fire(inp, 'keydown', { key: 'Enter' });
+
+  assert.deepEqual(p.api._els!.groups.map((gd) => gd.g.key).sort(),
+    ['top', 'top.u_dangling', 'top.u_leaf', 'top.u_mid'],
+    'the hidden match is added and the earlier view is left alone');
+  assert.equal(p.group('top.u_dangling').g.nets.length, 0, 'the added box brings no unrelated signal rows');
+});
+
+test('a box search highlights the matching signal row without dropping others', () => {
+  const p = startPanel(fixtureGraph());
+  const before = p.group('top').g.nets.map((n) => n.label).sort();
+  const inp = find(p.group('top').el, (e) => e.tagName === 'input' && e.classList.contains('boxsearch'))!;
+  inp.value = 'mid_out';
+  fire(inp, 'keydown', { key: 'Enter' });
+
+  assert.deepEqual(p.group('top').g.nets.map((n) => n.label).sort(), before, 'the module keeps every row');
+  const row = find(p.group('top').el, (e) => e.tagName === 'text' && e.textContent === 'mid_out');
+  assert.ok(row && row.parent!.classList.contains('match'), 'the matching row is highlighted');
+});
+
+test('a box search starts on Enter, not while typing', async () => {
+  const p = startPanel(fixtureGraph());
+  const inp = find(p.group('top').el, (e) => e.tagName === 'input' && e.classList.contains('boxsearch'))!;
+  inp.value = 'u_deep';
+  fire(inp, 'input');
+  await new Promise((r) => setTimeout(r, 220));
+  assert.equal(p.posted.filter((m) => m.type === 'boxSearch').length, 0, 'typing alone searches nothing');
+
+  fire(inp, 'keydown', { key: 'Enter' });
+  await new Promise((r) => setTimeout(r, 220));
+  const msg = p.posted.filter((m) => m.type === 'boxSearch').pop();
+  assert.ok(msg, 'Enter sends the box search to the extension');
+  assert.equal(msg!.path, 'top');
+  assert.equal(msg!.query, 'u_deep');
+});
+
+test('a box search reaches only the box own signals and its direct children', () => {
+  const p = startPanel(fixtureGraph());
+  const top = find(p.group('top').el, (e) => e.tagName === 'input' && e.classList.contains('boxsearch'))!;
+  top.value = 'inner';
+  fire(top, 'keydown', { key: 'Enter' });
+  assert.deepEqual(
+    p.api._els!.groups.filter((gd) => gd.el.classList.contains('match')).map((gd) => gd.g.key),
+    [], 'a grandchild name does not match from the top box');
+
+  const mid = find(p.group('top.u_mid').el, (e) => e.tagName === 'input' && e.classList.contains('boxsearch'))!;
+  mid.value = 'inner';
+  fire(mid, 'keydown', { key: 'Enter' });
+  assert.ok(p.group('top.u_mid.u_inner').el.classList.contains('match'),
+    'the direct child matches from its own parent box');
+});
+
+test('the search field is centred between the instance name and the module name', () => {
+  const p = startPanel(fixtureGraph());
+  const gd = p.group('top');
+  const fo = find(gd.el, (e) => e.tagName === 'foreignObject')!;
+  const x = Number(fo.getAttribute('x')), w = Number(fo.getAttribute('width'));
+  assert.ok(Math.abs(x + w / 2 - gd.g.x) < 0.01, 'the field sits in the middle of the box');
+  const title = find(gd.el, (e) => e.classList.contains('hd'))!;
+  assert.ok(Number(title.getAttribute('x')) < x, 'the instance name stays on the left');
+  const mod = find(gd.el, (e) => e.classList.contains('hm'));
+  assert.ok(mod, 'the module name is drawn');
+  assert.ok(Number(mod!.getAttribute('x')) > x + w, 'the module name stays on the right');
+});
+
+
 test('wires between two modules do not cross', () => {
   const p = startPanel(fixtureGraph());
   const groups = p.api._els!.groups;

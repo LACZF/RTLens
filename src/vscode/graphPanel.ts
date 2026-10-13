@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import type { IndexService } from './indexService';
 import type { Graph } from '../core/graph';
 import { containingDesign, findByPath, pathChain } from '../core/hierarchy';
+import { signalUsage } from '../core/nets';
 import type { HierarchyNode } from '../core/ast';
 
 /**
@@ -78,6 +79,20 @@ export class GraphPanel {
    * instead of stopping dead at the configured cap.
    */
   private nodeBudget: number | undefined;
+  /**
+   * The per-module search: the box the webview typed in, and what was typed.
+   * Its matches are revealed on the next refresh by expanding their ancestor
+   * chain and raising the signal/child ceilings along it, so a signal or child
+   * module that was paged or capped away shows up instead of only being
+   * reported as missing.
+   */
+  private boxSearch: { path: string; query: string } | null = null;
+  /** Instance paths expanded only to reach a match of `boxSearch`. */
+  private searchExpanded = new Set<string>();
+  /** Child-window bumps that keep a matching child inside the drawn page. */
+  private searchChildLimits = new Map<string, number>();
+  /** Signal-ceiling bumps for scopes holding a matching signal. */
+  private searchSignalLimits = new Map<string, number>();
 
   private constructor(
     private readonly panel: vscode.WebviewPanel,
@@ -176,6 +191,10 @@ export class GraphPanel {
     this.signalLimits.clear();
     this.childLimits.clear();
     this.nodeBudget = undefined;
+    this.boxSearch = null;
+    this.searchExpanded.clear();
+    this.searchChildLimits.clear();
+    this.searchSignalLimits.clear();
     // `subtreeDepth` is no longer driving the per-module toggle; the extension
     // still computes it so external callers are unchanged, but it is ignored.
     // A collapse that would hide the new root (or anything on its ancestor
@@ -212,9 +231,9 @@ export class GraphPanel {
       maxDepth: 8,
       ancestors: shown,
       collapsed: [...this.collapsed],
-      expanded: [...this.expanded],
-      signalLimits: Object.fromEntries(this.signalLimits),
-      childLimits: Object.fromEntries(this.childLimits),
+      expanded: [...this.expanded, ...this.searchExpanded],
+      signalLimits: { ...Object.fromEntries(this.signalLimits), ...Object.fromEntries(this.searchSignalLimits) },
+      childLimits: { ...Object.fromEntries(this.childLimits), ...Object.fromEntries(this.searchChildLimits) },
       maxNodes: this.nodeBudget,
     });
     this.panel.title = `Connectivity: ${graph.root}`;
@@ -320,12 +339,97 @@ export class GraphPanel {
         void this.refresh();
         return;
       }
+      case 'boxSearch': {
+        // One module box was searched. Recompute what has to be revealed so the
+        // matches are actually drawn (their ancestor chain expanded, the child
+        // windows and signal ceilings along it raised), then rebuild.
+        const path = String(msg.path ?? '');
+        const query = String(msg.query ?? '').trim();
+        this.boxSearch = query ? { path, query } : null;
+        this.rebuildSearchReveal();
+        void this.refresh();
+        return;
+      }
       case 'error':
         void vscode.window.showErrorMessage(`HDL: ${String(msg.message ?? 'unknown error')}`);
         return;
       default:
         return;
     }
+  }
+
+  /**
+   * Work out what the current per-module search needs drawn. A match is one of
+   * the box's own signals whose name contains the query, or a direct child
+   * instance whose instance or module name does. Only the searched box's own
+   * signal ceiling is lifted and only its child window is widened far enough to
+   * reach the matched child; nothing deeper is expanded, so a box search never
+   * unfolds a whole subtree.
+   */
+  private rebuildSearchReveal(): void {
+    const s = this.boxSearch;
+    if (!s || !this.node) {
+      this.searchExpanded.clear();
+      this.searchChildLimits.clear();
+      this.searchSignalLimits.clear();
+      return;
+    }
+    // A new query adds to what earlier queries revealed rather than reshuffling
+    // it: once a box or row has been brought on screen it stays, so typing a
+    // second search never takes the first one's results away.
+    const scope =
+      s.path === this.node.path
+        ? this.node
+        : findByPath(this.chainRoot, s.path) ?? findByPath(this.node, s.path);
+    if (!scope) {
+      return;
+    }
+    const q = s.query.toLowerCase();
+    const names = new Map<string, string[]>();
+    const signalsOf = (n: HierarchyNode): string[] => {
+      const key = n.moduleName + '\u0000' + n.file;
+      let cached = names.get(key);
+      if (!cached) {
+        const def = this.svc.index.resolveModule(n.moduleName, n.file);
+        // The graph can draw a module's ports and any signal its assignments or
+        // port connections name, so those are the names a search may match.
+        cached = def
+          ? [...def.ports.map((p) => p.name), ...signalUsage(this.svc.index, def).keys()]
+          : [];
+        names.set(key, cached);
+      }
+      return cached;
+    };
+    // The module's own signals.
+    const signalHit = signalsOf(scope).some((name) => name.toLowerCase().includes(q));
+    // Its direct children, and no deeper: the walk stops here.
+    let childHit = false;
+    const kids = scope.children ?? [];
+    for (let i = 0; i < kids.length; i++) {
+      const c = kids[i];
+      const hit = (c.instName || '').toLowerCase().includes(q)
+        || (c.moduleName || '').toLowerCase().includes(q);
+      if (!hit) {
+        continue;
+      }
+      childHit = true;
+      const cur = this.searchChildLimits.get(scope.path) ?? 0;
+      if (i + 1 > cur) {
+        this.searchChildLimits.set(scope.path, i + 1);
+      }
+    }
+    // A revealed child is only drawn if it can claim a wire into the parent
+    // scope, so lifting the box's signal ceiling is what lets the match show.
+    if (signalHit || childHit) {
+      this.searchSignalLimits.set(scope.path, Infinity);
+    }
+    if (childHit) {
+      this.searchExpanded.add(scope.path);
+    }
+    // The reveal brings in a child the walk would otherwise not have budgeted
+    // for; grant a page of headroom so it is not cut off.
+    const budget = this.svc.config.graphMaxNodes;
+    this.nodeBudget = Math.max(this.nodeBudget ?? 0, budget + this.searchExpanded.size * budget);
   }
 
   private html(): string {
@@ -439,6 +543,16 @@ const STYLE = `
   .chev { font-size: 11px; fill: currentColor; opacity: .8; }
   .sm { font-size: 18px; font-weight: 600; opacity: .9; }
   .smhit { fill: transparent; pointer-events: all; cursor: pointer; }
+  .bsearch { overflow: visible; }
+  .boxsearch {
+    width: 100%; height: 100%; box-sizing: border-box; padding: 0 4px;
+    font-family: inherit; font-size: 10px; line-height: 1;
+    color: var(--vscode-input-foreground); background: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border, transparent); border-radius: 2px; outline: none;
+  }
+  .grp.match > .mod { stroke-width: 2.6; }
+  .rowg .mhl { opacity: .5; pointer-events: none; }
+  .rowg.match > .sig { font-weight: 700; }
   .edge { fill: none; stroke-width: 1.4; opacity: .55; }
   .edge:hover { opacity: 1; stroke-width: 2; }
   #tip {
@@ -516,6 +630,16 @@ export const SCRIPT = String.raw`
   var interacted = false;
   let drag = null;
   let highlight = null;
+  // Per-module search: the box a query was typed into and the query itself.
+  // Only one module is searched at a time - typing in another box moves it.
+  let boxSearch = null;
+  // What the view already showed when the box search was committed. A box search
+  // only ever adds its matches; this set keeps every node that was on screen
+  // before from changing, so the result is the old picture plus the results.
+  let searchBase = null;
+  // The box input the caret was last in, so a redraw can put it back.
+  let searchFocus = null;
+  var boxSearchTimer = null;
   // Redraws are coalesced into one per frame: a rebuild of the whole graph
   // costs more than a frame, and mousemove fires far more often than the
   // display refreshes.
@@ -579,6 +703,75 @@ export const SCRIPT = String.raw`
     return (n.label || '').toLowerCase().includes(s)
       || (n.moduleName || '').toLowerCase().includes(s)
       || (n.path || '').toLowerCase().includes(s);
+  }
+
+  // A per-module search reaches only the module's own signals and its direct
+  // child instances - matching by name, never by path, and never down a whole
+  // subtree. Searching a module name must not pull in every row whose scope
+  // happens to contain that name, nor anything below a grandchild.
+  function boxHit(n, q) {
+    if (!boxSearch) return false;
+    const s = q.toLowerCase();
+    if (n.kind === 'net') {
+      return scopeOf(n) === boxSearch.key && (n.label || '').toLowerCase().includes(s);
+    }
+    return isBoxChild(n.path) && ((n.label || '').toLowerCase().includes(s)
+      || (n.moduleName || '').toLowerCase().includes(s));
+  }
+
+  // The path of a direct child of the searched box, e.g. "top.u_mid" when the
+  // search is in "top" (and nothing deeper).
+  function isBoxChild(path) {
+    const k = boxSearch.key;
+    const prefix = k ? k + '.' : '';
+    if (path.indexOf(prefix) !== 0) return false;
+    const rest = path.slice(prefix.length);
+    return rest.length > 0 && rest.indexOf('.') < 0;
+  }
+
+  // A node the per-module search matched: kept, and drawn highlighted.
+  function isBoxMatch(n) {
+    return !!boxSearch && boxHit(n, boxSearch.q);
+  }
+
+  function queueBoxSearch() {
+    if (boxSearchTimer) clearTimeout(boxSearchTimer);
+    boxSearchTimer = setTimeout(function () {
+      boxSearchTimer = null;
+      vscode.postMessage(boxSearch
+        ? { type: 'boxSearch', path: boxSearch.key, query: boxSearch.q }
+        : { type: 'boxSearch', path: '', query: '' });
+    }, 150);
+  }
+
+  // A box search starts on Enter. It never takes anything away: the view as it
+  // stands is frozen into searchBase, and the redraw adds only the matches the
+  // extension reveals. Clearing the field and pressing Enter puts it back.
+  function commitBoxSearch(key, raw) {
+    const q = raw.trim();
+    const shown = new Set();
+    for (const n of visible().n) shown.add(n.id);
+    searchBase = searchBase ? new Set([...searchBase, ...shown]) : shown;
+    boxSearch = q ? { key: key, q: q } : null;
+    if (!boxSearch) searchBase = null;
+    searchFocus = { key: key, start: raw.length, end: raw.length };
+    queueBoxSearch();
+    draw();
+  }
+
+  /** Give the caret back to the box input a redraw just rebuilt. */
+  function restoreSearchFocus(drawn) {
+    if (!searchFocus) return;
+    for (const gd of drawn) {
+      if (gd.input && gd.g.key === searchFocus.key) {
+        if (gd.input.focus) gd.input.focus();
+        try {
+          gd.input.selectionStart = searchFocus.start;
+          gd.input.selectionEnd = searchFocus.end;
+        } catch (e) { /* selection is best-effort */ }
+        return;
+      }
+    }
   }
 
   // A hierarchy-collapsed box hides everything whose path lives inside it: its
@@ -809,15 +1002,41 @@ export const SCRIPT = String.raw`
   function visible() {
     if (!model) return { n: [], e: [] };
     const q = search.value.trim();
+    const bq = boxSearch ? boxSearch.q.trim() : '';
     let keep = new Set();
-    for (const n of model.nodes) if (matches(n, q)) keep.add(n.id);
-    if (q) {
-      // keep direct neighbours of a match so the wiring stays visible
-      for (const e of model.edges) {
-        if (keep.has(e.from)) keep.add(e.to);
-        if (keep.has(e.to)) keep.add(e.from);
+    if (bq) {
+      // The per-module search adds only its results on top of what is already
+      // on screen. It never takes a whole group and never drops a node that was
+      // shown when the search was committed, so a module search leaves the old
+      // picture alone and just brings the matches in.
+      if (searchBase) for (const id of searchBase) keep.add(id);
+      const heads = new Set();
+      let p = boxSearch.key;
+      while (p) {
+        heads.add(p);
+        const i = p.lastIndexOf('.');
+        p = i < 0 ? '' : p.slice(0, i);
       }
-      keep = withGroups(keep);
+      for (const n of model.nodes) {
+        if (!boxHit(n, bq)) continue;
+        keep.add(n.id);
+        if (n.kind === 'net') heads.add(scopeOf(n)); else heads.add(n.path);
+      }
+      for (const n of model.nodes) {
+        if (n.kind !== 'net' && heads.has(n.path)) keep.add(n.id);
+      }
+    } else {
+      for (const n of model.nodes) {
+        if (matches(n, q)) keep.add(n.id);
+      }
+      if (q) {
+        // keep direct neighbours of a match so the wiring stays visible
+        for (const e of model.edges) {
+          if (keep.has(e.from)) keep.add(e.to);
+          if (keep.has(e.to)) keep.add(e.from);
+        }
+        keep = withGroups(keep);
+      }
     }
     if (cbNeigh.checked && highlight) {
       keep = withGroups(nearOf(highlight));
@@ -1179,6 +1398,7 @@ export const SCRIPT = String.raw`
       drawn.push(gd);
     }
     api._els = { groups: drawn, edgeEls };
+    restoreSearchFocus(drawn);
   }
 
   /** A clickable mark that sits on a box edge, outside the box outline. */
@@ -1206,6 +1426,7 @@ export const SCRIPT = String.raw`
     const left = g.x - g.w / 2, right = g.x + g.w / 2;
     const hy = top + HEAD_H / 2;
     const grp = el('g', { class: 'grp' });
+    if (g.head && isBoxMatch(g.head)) grp.classList.add('match');
     grp.appendChild(el('rect', {
       x: left, y: top, width: g.w, height: g.h, rx: 6,
       fill: 'var(--vscode-editorWidget-background, #252526)',
@@ -1261,16 +1482,57 @@ export const SCRIPT = String.raw`
 
     const p = headerParts(g);
     const markW = marks.length ? 9 + marks.length * 17 : 16;
-    const modW = p.mod ? labelW(p.mod, 10.5) + 8 : 0;
-    const avail = Math.max(4, Math.floor((g.w - markW - modW) / 6.6));
-    const title = el('text', { x: left + markW, y: hy + 4, 'text-anchor': 'start', class: 'hd' });
-    title.textContent = truncate(p.title, avail);
+    // The search field sits in the middle of the header; the instance name stays
+    // on the left and the module name on the right, exactly as before.
+    const inpW = Math.min(112, Math.max(56, Math.round(g.w * 0.4)));
+    const inpX = g.x - inpW / 2;
+    const roomLeft = inpX - 6;          // right edge of the instance-name area
+    const roomRight = inpX + inpW + 6;  // left edge of the module-name area
+    const titleX = left + markW;
+    const modX = right - 7;
+    const leftSpace = Math.max(0, roomLeft - titleX);
+    const rightSpace = Math.max(0, modX - roomRight);
+    const title = el('text', { x: titleX, y: hy + 4, 'text-anchor': 'start', class: 'hd' });
+    title.textContent = truncate(p.title, Math.max(4, Math.floor(leftSpace / 6.6)));
     headg.appendChild(title);
-    if (p.mod) {
-      const mt = el('text', { x: right - 10, y: hy + 4, 'text-anchor': 'end', class: 'hm' });
-      mt.textContent = truncate(p.mod, Math.max(4, Math.floor((g.w - markW - labelW(p.title, 11.5)) / 6)));
+    if (p.mod && rightSpace > 24) {
+      const mt = el('text', { x: modX, y: hy + 4, 'text-anchor': 'end', class: 'hm' });
+      mt.textContent = truncate(p.mod, Math.max(4, Math.floor(rightSpace / 6)));
       headg.appendChild(mt);
     }
+    // The box's own search: type a signal or a direct child-module name and
+    // press Enter. The extension reveals the matches among this module's signals
+    // and its immediate children, and the redraw adds them without touching what
+    // is already on screen. The field sits in the header, centred, so every
+    // module can be searched where it stands; focus survives the redraw.
+    const fo = el('foreignObject', { x: inpX, y: top + 4, width: inpW, height: HEAD_H - 8, class: 'bsearch' });
+    const inp = document.createElement('input');
+    inp.setAttribute('type', 'search');
+    inp.setAttribute('class', 'boxsearch');
+    inp.setAttribute('placeholder', 'find');
+    inp.setAttribute('spellcheck', 'false');
+    inp.setAttribute('data-key', g.key);
+    inp.value = boxSearch && boxSearch.key === g.key ? boxSearch.q : '';
+    inp.addEventListener('mousedown', (ev) => ev.stopPropagation());
+    inp.addEventListener('click', (ev) => ev.stopPropagation());
+    inp.addEventListener('focus', () => {
+      searchFocus = { key: g.key, start: inp.selectionStart || 0, end: inp.selectionEnd || 0 };
+    });
+    inp.addEventListener('input', () => {
+      const v = inp.value;
+      searchFocus = {
+        key: g.key,
+        start: inp.selectionStart || v.length,
+        end: inp.selectionEnd !== undefined ? inp.selectionEnd : v.length,
+      };
+    });
+    inp.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Enter' && ev.keyCode !== 13) return;
+      ev.preventDefault();
+      commitBoxSearch(g.key, inp.value);
+    });
+    fo.appendChild(inp);
+    headg.appendChild(fo);
     attachHead(hit, g);
     grp.appendChild(headg);
     if (g.head) els.push({ n: g.head, el: headg });
@@ -1283,6 +1545,14 @@ export const SCRIPT = String.raw`
         const n = vnets[i];
         const ry = n.y;
         const rowg = el('g', { class: 'rowg' });
+        const hit = isBoxMatch(n);
+        if (hit) {
+          rowg.classList.add('match');
+          rowg.appendChild(el('rect', {
+            x: left + 2, y: ry - ROW_H / 2, width: g.w - 4, height: ROW_H, rx: 3, class: 'mhl',
+            fill: 'var(--vscode-editor-findMatchHighlightBackground, #613214)',
+          }));
+        }
         if (i) {
           rowg.appendChild(el('line', {
             x1: left + 10, y1: ry - ROW_H / 2, x2: right - 10, y2: ry - ROW_H / 2, class: 'rsep',
@@ -1400,7 +1670,7 @@ export const SCRIPT = String.raw`
       sideMark(grp, right + 12, hy + 4, '+', 'No child modules below',
         () => { probedDown.add(g.head.path); scheduleDraw(); }, 'rm');
     }
-    return { el: grp, g, els };
+    return { el: grp, g, els, input: inp };
   }
 
   function attachHead(hit, g) {
@@ -1560,11 +1830,20 @@ export const SCRIPT = String.raw`
   window.addEventListener('message', (ev) => {
     const msg = ev.data;
     if (msg.type === 'graph') {
+      // A new root is a different picture: the box that was searched no longer
+      // exists, so drop the per-module search with it.
+      if (model && msg.graph && msg.graph.root !== model.root) {
+        boxSearch = null;
+        searchFocus = null;
+        searchBase = null;
+      }
       model = msg.graph;
       highlight = null;
       nodes = []; edges = [];
       groups = [];
-      interacted = false;
+      // A reveal answer must not yank a view the user is typing in; every other
+      // rebuild keeps the fit-to-view.
+      if (!boxSearch) interacted = false;
       // The extension owns the collapse set once it has answered; a message
       // without the field (older hosts) keeps whatever we toggled locally.
       if (msg.collapsed !== undefined) collapsed = new Set(msg.collapsed || []);

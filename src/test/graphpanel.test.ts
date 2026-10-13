@@ -128,3 +128,50 @@ test('graphpanel: "show more" pages the children of a wide module', async () => 
   assert.ok(paged().length === 0, 'nothing is left behind the raised window');
   GraphPanel.disposeAll();
 });
+
+test('graphpanel: a per-box search reveals what paging and the signal cap hid', async () => {
+  const { svc, GraphPanel } = await setup();
+  // 250 children so a searched child sits well past the first child page, and
+  // 60 ports so a searched signal sits past the per-scope cap.
+  let wide = 'module leaf (input wire a, input wire b, output wire s); assign s = a & b; endmodule\n';
+  wide += 'module wide (input wire din, output wire dout);\n';
+  for (let i = 0; i < 250; i++) wide += `  wire a${i}, b${i}, s${i};\n`;
+  for (let i = 0; i < 250; i++) wide += `  leaf u${i} (.a(a${i}), .b(b${i}), .s(s${i}));\n`;
+  wide += '  assign dout = s0;\nendmodule\n';
+  svc.index.addFile('/w/wide.v', wide);
+  let many = 'module many (';
+  for (let i = 0; i < 60; i++) many += `input wire p${i}, `;
+  many += 'output wire out); assign out = p0; endmodule\n';
+  svc.index.addFile('/w/many.v', many);
+
+  const { buildHierarchy } = await import('../core/hierarchy');
+  const panels = (vscode as unknown as { __webviews: WebviewPanel[] }).__webviews;
+  const flip = () => new Promise((r) => setTimeout(r, 0));
+
+  const wideRoot = buildHierarchy(svc.index, 'wide')!.root;
+  GraphPanel.show(svc, vscode.Uri.file('/wq'), wideRoot, wideRoot.path);
+  const widePanel = panels[panels.length - 1];
+  const widePaths = () =>
+    (widePanel.__posted.filter((p) => p.type === 'graph').pop()!.graph as {
+      nodes: { path: string }[];
+    }).nodes.map((n) => n.path);
+
+  assert.ok(!widePaths().includes(wideRoot.path + '.u200'), 'the deep child is not drawn up front');
+  widePanel.__send({ type: 'boxSearch', path: wideRoot.path, query: 'u200' });
+  await flip();
+  assert.ok(widePaths().includes(wideRoot.path + '.u200'), 'the searched child is revealed');
+
+  const manyRoot = buildHierarchy(svc.index, 'many')!.root;
+  GraphPanel.show(svc, vscode.Uri.file('/wm'), manyRoot, manyRoot.path);
+  const manyPanel = panels[panels.length - 1];
+  const manyPaths = () =>
+    (manyPanel.__posted.filter((p) => p.type === 'graph').pop()!.graph as {
+      nodes: { path: string }[];
+    }).nodes.map((n) => n.path);
+
+  assert.ok(!manyPaths().includes(manyRoot.path + '::p55'), 'the late port is capped away up front');
+  manyPanel.__send({ type: 'boxSearch', path: manyRoot.path, query: 'p55' });
+  await flip();
+  assert.ok(manyPaths().includes(manyRoot.path + '::p55'), 'the searched signal is revealed');
+  GraphPanel.disposeAll();
+});
