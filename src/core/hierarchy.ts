@@ -221,12 +221,37 @@ class Builder {
   }
 }
 
-/** Locate an instance by plain name or generate-prefixed name. */
-export function findInstance(def: ModuleDef, segment: string) {
-  return (
-    def.instances.find((i) => i.name === segment) ??
-    def.instances.find((i) => (i.genPrefix ? `${i.genPrefix}.${i.name}` : i.name) === segment)
-  );
+/**
+ * Locate an instance by plain name or generate-prefixed name.
+ *
+ * The linear scan this used to be is O(instances) per call, and the graph asks
+ * once per visited child, so a module with thousands of instances turned the
+ * whole build quadratic. The name -> instance map is built once per module and
+ * cached; a plain name wins over a generate-prefixed one, exactly as the two
+ * ordered scans did.
+ */
+const instanceNameCache = new WeakMap<ModuleDef, Map<string, InstanceSite>>();
+
+export function findInstance(def: ModuleDef, segment: string): InstanceSite | undefined {
+  let byName = instanceNameCache.get(def);
+  if (!byName) {
+    byName = new Map<string, InstanceSite>();
+    // Two passes so every plain name beats every prefixed name, matching the
+    // old `find(name) ?? find(prefixed)` order.
+    for (const i of def.instances) {
+      if (!byName.has(i.name)) {
+        byName.set(i.name, i);
+      }
+    }
+    for (const i of def.instances) {
+      const full = i.genPrefix ? `${i.genPrefix}.${i.name}` : i.name;
+      if (!byName.has(full)) {
+        byName.set(full, i);
+      }
+    }
+    instanceNameCache.set(def, byName);
+  }
+  return byName.get(segment);
 }
 
 /** Build the instance tree for a top module. */

@@ -547,10 +547,20 @@ resolve(name, scope) 优先级从高到低：
 
 | 规模 | 全工作区索引 | 关系表首次构建 | 稳态 jump 查询 | findDecl | moduleAtLine |
 |------|--------------|----------------|----------------|----------|--------------|
-| 400 module × 100 signal / 20 文件 | 583ms | 22.5ms（f0：20 module） | 433ns | 293ns | 51ns |
-| 2000 module × 200 signal / 50 文件 | 7.8s | 124ms（f0：40 module） | 1.1µs | 512ns | 51ns |
+| 400 module × 100 signal / 20 文件 | 387ms | 17.7ms（f0：20 module） | 385ns | 240ns | 46ns |
+| 2000 module × 200 signal / 50 文件 | 4.2s | 46.3ms（f0：40 module） | 510ns | 271ns | 49ns |
 
 索引耗时由扫描期的 parse 主导（后台进度条，与光标无关）；跳转只有**首次**查询付建表成本，之后三个热路径都是常数级，与工作区规模无关。
+
+**大文件热路径**（`test/gpt2_tiny_top.v`，6MB / 98 module / 7895 instance）：
+
+| 操作 | 优化前 | 优化后 | 手段 |
+|------|--------|--------|------|
+| `HdlIndex.addFile`（解析+索引） | 1712ms | ~1.1s | 词法器按字符码扫描、`skipWhile` 不建字符串 |
+| `buildFileJumps`（关系表建表） | 858–1381ms | ~0.52s | 同上；每行只查一次 `moduleAtLine` |
+| 关系图（depth 8 / 50000 节点） | 1145ms | ~450ms | `findInstance`/端口表/参数作用域按 module 记忆化 |
+
+词法器（`core/lexer.ts`）是索引与建表共同的瓶颈：它过去对每个字符都调一次 `advance()` 并 `out += ch` 拼字符串、谓词用正则。现在 `advance`/`skipWhile` 只推进下标并维护 line/col，原始文本在每个 token 处 `slice` 一次；字符分类（空白、标识符、数字）改用整数码比较。词法结果是逐字节等价的（同一文件 token 数与 range 哈希不变）。`graph.ts`/`hierarchy.ts` 的端口、实例名、参数作用域都按 `ModuleDef` 用 `WeakMap` 缓存，模块级对象不变则不再线性重扫。
 
 ---
 

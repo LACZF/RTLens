@@ -11,7 +11,32 @@ import { generateScopedName, generateScopes } from './index';
 import type { HdlIndex } from './index';
 import type { HierarchyNode, ModuleDef, PortDir, PortDecl, Range } from './ast';
 import { findInstance, paramScopeForPath } from './hierarchy';
+import { scopeIndexOf } from './scopeIndex';
 import { evalExpression, rangeWidth, typeWidth, type FoldScope } from './fold';
+
+/**
+ * Port name -> port declaration, built once per module.
+ *
+ * A connection is wired by finding the child's formal port, and the old
+ * `childDef.ports.find(...)` scanned the whole port list for every connection
+ * of every instance. A module instantiated thousands of times, each with many
+ * ports, made the graph quadratic in ports x connections.
+ */
+const portNameCache = new WeakMap<ModuleDef, Map<string, PortDecl>>();
+
+function portMapOf(def: ModuleDef): Map<string, PortDecl> {
+  let map = portNameCache.get(def);
+  if (!map) {
+    map = new Map<string, PortDecl>();
+    for (const p of def.ports) {
+      if (!map.has(p.name)) {
+        map.set(p.name, p);
+      }
+    }
+    portNameCache.set(def, map);
+  }
+  return map;
+}
 
 export type GraphNodeKind = 'root' | 'instance' | 'net';
 export type GraphEdgeKind = 'port' | 'net' | 'containment';
@@ -233,6 +258,17 @@ class GraphBuilder {
    * pages on: while a scope sits here its box earns a "show more" row.
    */
   private readonly pagedScopes = new Set<string>();
+  /**
+   * Parameter scope per instance path, computed once per build.
+   *
+   * `connectScope` needs a node's scope once and `connectInstance` needs the
+   * same node's scope once per child, and rebuilding it walked from the design
+   * root every time (resolving modules and folding parameters along the path).
+   * A module with thousands of children paid that walk once per child; the
+   * cache makes it once per node. The scope is a pure function of the path and
+   * the current index, so a build-local cache is always fresh.
+   */
+  private readonly scopeCache = new Map<string, FoldScope>();
 
   constructor(
     private readonly index: HdlIndex,
@@ -590,6 +626,16 @@ class GraphBuilder {
     return added;
   }
 
+  /** Parameter scope at an instance path, computed once per build. */
+  private scopeAt(path: string): FoldScope {
+    let scope = this.scopeCache.get(path);
+    if (!scope) {
+      scope = paramScopeForPath(this.index, path);
+      this.scopeCache.set(path, scope);
+    }
+    return scope;
+  }
+
   /**
    * Add the continuous assigns then the ports of the module that `node`
    * instantiates. Done once per visited node, so a leaf module still shows its
@@ -597,7 +643,7 @@ class GraphBuilder {
    * declarations when `maxSignalsPerScope` cuts the scope short.
    */
   private connectScope(node: HierarchyNode, def: ModuleDef): void {
-    const scope = paramScopeForPath(this.index, node.path);
+    const scope = this.scopeAt(node.path);
     if (!this.opts.portWiringOnly) {
       this.connectContinuousAssigns(node, def, scope);
     }
@@ -634,7 +680,7 @@ class GraphBuilder {
     const childDef = this.index.resolveModule(child.moduleName, child.file);
     // Nets of the parent scope: the ports and assigns of the instantiating
     // module, as seen with its own parameters bound.
-    const scope = paramScopeForPath(this.index, parent.path);
+    const scope = this.scopeAt(parent.path);
     const childId = GraphBuilder.ids(child.path);
 
     for (const conn of inst.connections) {
@@ -677,7 +723,7 @@ class GraphBuilder {
       }
       if (conn.shorthand) {
         // `.name` (SystemVerilog implicit port connection).
-        const port = childDef?.ports.find((p) => p.name === conn.portName);
+        const port = childDef ? portMapOf(childDef).get(conn.portName) : undefined;
         const info = this.netInfo(parentDef, conn.portName, scope);
         if (info.direction === undefined) {
           info.direction = parentSideDirection(port?.direction);
@@ -702,7 +748,7 @@ class GraphBuilder {
         continue;
       }
 
-      const port = conn.portName ? childDef?.ports.find((p) => p.name === conn.portName) : undefined;
+      const port = conn.portName && childDef ? portMapOf(childDef).get(conn.portName) : undefined;
       if (conn.portName && !port) {
         this.issues.push({
           severity: 'warning',
@@ -824,7 +870,7 @@ class GraphBuilder {
       // one. Without this the node stayed unresolved, the edge was dropped and
       // whatever the assignment drove had no driver at all.
       const local = generateScopedName(name, generateScopes(def));
-      const decl = local === undefined ? undefined : def.decls.find((d) => d.name === local);
+      const decl = local === undefined ? undefined : scopeIndexOf(def).decls.get(local);
       if (decl) {
         found = { kind: 'var', decl, owner: def };
       }

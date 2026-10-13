@@ -55,6 +55,11 @@ export function buildFileJumps(index: HdlIndex, file: string, source: string): F
   const targetFiles = new Set<string>();
   const toks = tokenize(source).filter((t) => t.kind !== 'comment' && t.kind !== 'eof');
   let count = 0;
+  // Tokens arrive in source order, so several per line share a module lookup;
+  // resolving the owning module once per line rather than once per token is a
+  // large saving on files with many identifiers.
+  let lastLine = -1;
+  let lastMod: ReturnType<HdlIndex['moduleAtLine']>;
 
   for (let i = 0; i < toks.length; i++) {
     const word = wordAtToken(toks, i);
@@ -63,7 +68,14 @@ export function buildFileJumps(index: HdlIndex, file: string, source: string): F
     }
     const tok = toks[i];
     const line = tok.range.start.line;
-    const mod = index.moduleAtLine(file, line);
+    let mod: ReturnType<HdlIndex['moduleAtLine']>;
+    if (line === lastLine) {
+      mod = lastMod;
+    } else {
+      mod = index.moduleAtLine(file, line);
+      lastLine = line;
+      lastMod = mod;
+    }
     // One name is by far the common case, and splitting it would allocate an
     // array per identifier in the file.
     const path = word.fullPath.includes('.') ? word.fullPath.split('.') : [word.fullPath];

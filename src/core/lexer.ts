@@ -50,10 +50,6 @@ export interface LexOptions {
   keepComments?: boolean;
 }
 
-// `$` starts a system identifier ($display, $clog2, ...) but never a user one.
-const ID_START = /[A-Za-z_$]/;
-const ID_PART = /[A-Za-z0-9_$]/;
-
 /** Keywords recognised for colouring / structural decisions. */
 export const KEYWORDS = new Set<string>([
   // module / compilation unit
@@ -145,6 +141,31 @@ export const DIRECTIVE_KEYWORDS = new Set<string>([
   'switch', 'remove', 'noremove', 'timescale',
 ]);
 
+// Character classification by code point. The hot loops (whitespace, identifier,
+// number) used to run a regex test per character and concatenate a string per
+// character in `advance`; on a multi-megabyte file that alone was the bulk of
+// indexing and of the jump-table build. These compare integer codes instead.
+const NL = 10;
+function isIdPartCode(c: number): boolean {
+  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 || c === 36;
+}
+function isIdStartCode(c: number): boolean {
+  return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 || c === 36;
+}
+function isSpaceCode(c: number): boolean {
+  return c === 32 || c === 9 || c === 13 || c === 10 || c === 12;
+}
+function isDigitCode(c: number): boolean {
+  return c >= 48 && c <= 57;
+}
+function isDigit(ch: string): boolean {
+  return ch >= '0' && ch <= '9';
+}
+
+function isHexCode(c: number): boolean {
+  return (c >= 48 && c <= 57) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70);
+}
+
 class Scanner {
   pos = 0;
   line = 0;
@@ -156,40 +177,83 @@ class Scanner {
   }
 
   peek(offset = 0): string {
-    return this.src[this.pos + offset] ?? '';
+    const i = this.pos + offset;
+    return i < this.src.length ? this.src[i] : '';
   }
 
-  advance(n = 1): string {
-    let out = '';
-    for (let i = 0; i < n && this.pos < this.src.length; i++) {
-      const ch = this.src[this.pos++];
-      out += ch;
-      if (ch === '\n') {
-        this.line++;
-        this.col = 0;
+  /** Advance `n` characters, tracking line/column. Allocates nothing. */
+  advance(n = 1): void {
+    const src = this.src;
+    let end = this.pos + n;
+    if (end > src.length) {
+      end = src.length;
+    }
+    let line = this.line;
+    let col = this.col;
+    for (let i = this.pos; i < end; i++) {
+      if (src.charCodeAt(i) === NL) {
+        line++;
+        col = 0;
       } else {
-        this.col++;
+        col++;
       }
     }
-    return out;
+    this.pos = end;
+    this.line = line;
+    this.col = col;
   }
 
-  /** Consume while the predicate holds. */
-  takeWhile(pred: (ch: string) => boolean): string {
-    let out = '';
-    while (!this.eof && pred(this.peek())) {
-      out += this.advance();
+  /** Advance one character and return it ('' at EOF). */
+  eat(): string {
+    const i = this.pos;
+    if (i >= this.src.length) {
+      return '';
     }
-    return out;
+    const ch = this.src[i];
+    this.pos = i + 1;
+    if (ch === '\n') {
+      this.line++;
+      this.col = 0;
+    } else {
+      this.col++;
+    }
+    return ch;
   }
-}
 
-function isDigit(ch: string): boolean {
-  return ch >= '0' && ch <= '9';
-}
+  /**
+   * Consume while the code-point predicate holds. The text is recovered with a
+   * single `slice` by `takeWhile`, so the discarded-result loops here allocate
+   * nothing at all.
+   */
+  skipWhile(pred: (code: number) => boolean): void {
+    const src = this.src;
+    let pos = this.pos;
+    let line = this.line;
+    let col = this.col;
+    while (pos < src.length) {
+      const code = src.charCodeAt(pos);
+      if (!pred(code)) {
+        break;
+      }
+      if (code === NL) {
+        line++;
+        col = 0;
+      } else {
+        col++;
+      }
+      pos++;
+    }
+    this.pos = pos;
+    this.line = line;
+    this.col = col;
+  }
 
-function isHex(ch: string): boolean {
-  return /[0-9a-fA-F]/.test(ch);
+  /** Consume while the predicate holds and return the consumed text. */
+  takeWhile(pred: (code: number) => boolean): string {
+    const start = this.pos;
+    this.skipWhile(pred);
+    return this.src.slice(start, this.pos);
+  }
 }
 
 /**
@@ -208,7 +272,7 @@ function readNumber(s: Scanner): { text: string; base?: string; width?: number }
 
   // Optional size: decimal digits (allow _ separators) followed by `'` or whitespace-then-'
   const sizeStart = s.pos;
-  let sizeText = s.takeWhile((ch) => isDigit(ch) || ch === '_');
+  let sizeText = s.takeWhile((c) => isDigitCode(c) || c === 95);
   let sawSize = sizeText.length > 0;
 
   if (s.peek() === "'") {
@@ -232,16 +296,16 @@ function readNumber(s: Scanner): { text: string; base?: string; width?: number }
       // Digits, possibly separated by whitespace (tolerated).
       const valid =
         b === 'b'
-          ? (ch: string) => /[01xXzZ?_]/.test(ch)
+          ? (c: number) => c === 48 || c === 49 || c === 120 || c === 88 || c === 122 || c === 90 || c === 63 || c === 95
           : b === 'o'
-            ? (ch: string) => /[0-7xXzZ?_]/.test(ch)
+            ? (c: number) => (c >= 48 && c <= 55) || c === 120 || c === 88 || c === 122 || c === 90 || c === 63 || c === 95
             : b === 'd'
-              ? (ch: string) => /[0-9xXzZ?_]/.test(ch)
-              : (ch: string) => isHex(ch) || /[xXzZ?_]/.test(ch);
-      s.takeWhile((ch) => valid(ch) || ch === '_' || ch === '?');
+              ? (c: number) => isDigitCode(c) || c === 120 || c === 88 || c === 122 || c === 90 || c === 63 || c === 95
+              : (c: number) => isHexCode(c) || c === 120 || c === 88 || c === 122 || c === 90 || c === 63 || c === 95;
+      s.skipWhile((c) => valid(c) || c === 95 || c === 63);
     } else {
       // Unbased unsized literal: '0 '1 'x 'z 'X 'Z
-      s.takeWhile((ch) => /[01xXzZ]/.test(ch) || ch === '_');
+      s.skipWhile((c) => c === 48 || c === 49 || c === 120 || c === 88 || c === 122 || c === 90 || c === 95);
       base = 'u';
     }
     if (sawSize) {
@@ -262,7 +326,7 @@ function readNumber(s: Scanner): { text: string; base?: string; width?: number }
   // Plain decimal / real / time literal.
   if (s.peek() === '.' && isDigit(s.peek(1))) {
     s.advance();
-    s.takeWhile((ch) => isDigit(ch) || ch === '_');
+    s.skipWhile((c) => isDigitCode(c) || c === 95);
   }
   if (s.peek() === 'e' || s.peek() === 'E') {
     const save = { pos: s.pos, col: s.col };
@@ -271,7 +335,7 @@ function readNumber(s: Scanner): { text: string; base?: string; width?: number }
       s.advance();
     }
     if (isDigit(s.peek())) {
-      s.takeWhile((ch) => isDigit(ch) || ch === '_');
+      s.skipWhile((c) => isDigitCode(c) || c === 95);
     } else {
       // Not an exponent after all (e.g. `4e` identifier-ish garbage).
       s.pos = save.pos;
@@ -283,7 +347,7 @@ function readNumber(s: Scanner): { text: string; base?: string; width?: number }
   if (unitMatch) {
     // Only treat as a time literal when the source cannot continue as an identifier.
     const nxt = s.peek(1 + unitMatch[0].length);
-    if (!ID_PART.test(nxt)) {
+    if (!isIdPartCode(nxt.charCodeAt(0))) {
       s.advance(unitMatch[0].length);
     }
   }
@@ -297,16 +361,15 @@ export function tokenize(src: string, opts: LexOptions = {}): Token[] {
   const keepComments = opts.keepComments === true;
 
   const push = (kind: TokenKind, startPos: number, startLine: number, startCol: number, extra?: Partial<Token>) => {
-    const range: Range = {
-      start: { line: startLine, character: startCol },
-      end: { line: s.line, character: s.col },
-    };
-    tokens.push({
-      kind,
-      text: src.slice(startPos, s.pos),
-      range,
-      ...extra,
-    });
+    const text = src.slice(startPos, s.pos);
+    const start: Pos = { line: startLine, character: startCol };
+    const end: Pos = { line: s.line, character: s.col };
+    if (extra === undefined) {
+      // The common case (ident / keyword / punct): skip the object spread.
+      tokens.push({ kind, text, range: { start, end } });
+    } else {
+      tokens.push({ kind, text, range: { start, end }, ...extra });
+    }
   };
 
   while (!s.eof) {
@@ -317,13 +380,13 @@ export function tokenize(src: string, opts: LexOptions = {}): Token[] {
 
     // --- whitespace ---
     if (ch === ' ' || ch === '\t' || ch === '\r' || ch === '\n' || ch === '\f') {
-      s.takeWhile((c) => c === ' ' || c === '\t' || c === '\r' || c === '\n' || c === '\f');
+      s.skipWhile(isSpaceCode);
       continue;
     }
 
     // --- comments ---
     if (ch === '/' && s.peek(1) === '/') {
-      s.takeWhile((c) => c !== '\n');
+      s.skipWhile((c) => c !== NL);
       if (keepComments) {
         push('comment', startPos, startLine, startCol, { isLineComment: true });
       }
@@ -344,7 +407,7 @@ export function tokenize(src: string, opts: LexOptions = {}): Token[] {
     // --- escaped identifier: \foo.bar  (terminated by whitespace) ---
     if (ch === '\\') {
       s.advance();
-      s.takeWhile((c) => !/\s/.test(c));
+      s.skipWhile((c) => !isSpaceCode(c));
       push('ident', startPos, startLine, startCol);
       continue;
     }
@@ -383,11 +446,11 @@ export function tokenize(src: string, opts: LexOptions = {}): Token[] {
       }
       if (s.peek() === '\\' || s.peek() === '"') {
         // Unterminated / unusual directive: skip the line.
-        s.takeWhile((c) => c !== '\n');
+        s.skipWhile((c) => c !== NL);
         push('directive', startPos, startLine, startCol, { name: 'unknown' });
         continue;
       }
-      const name = s.takeWhile((c) => ID_PART.test(c));
+      const name = s.takeWhile(isIdPartCode);
       if (name.length === 0) {
         // Lone backtick.
         push('punct', startPos, startLine, startCol);
@@ -396,14 +459,14 @@ export function tokenize(src: string, opts: LexOptions = {}): Token[] {
       const lower = name.toLowerCase();
       if (DIRECTIVE_KEYWORDS.has(lower)) {
         // Directives are line oriented; `` `define `` bodies run to end of line.
-        s.takeWhile((c) => c !== '\n');
+        s.skipWhile((c) => c !== NL);
         push('directive', startPos, startLine, startCol, { name: lower });
       } else {
         // Macro reference such as `WIDTH or `ARGS(...)
         if (s.peek() === '(') {
           let depth = 0;
           do {
-            const c = s.advance();
+            const c = s.eat();
             if (c === '(') {
               depth++;
             } else if (c === ')') {
@@ -463,8 +526,8 @@ export function tokenize(src: string, opts: LexOptions = {}): Token[] {
     }
 
     // --- identifier / keyword ---
-    if (ID_START.test(ch)) {
-      const text = s.takeWhile((c) => ID_PART.test(c));
+    if (isIdStartCode(ch.charCodeAt(0))) {
+      const text = s.takeWhile(isIdPartCode);
       push(KEYWORDS.has(text) ? 'keyword' : 'ident', startPos, startLine, startCol);
       continue;
     }
