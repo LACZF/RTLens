@@ -973,6 +973,42 @@ export const SCRIPT = String.raw`
       }
       x += maxW + GAP_H;
     }
+    settleHeld(gs);
+  }
+
+  /**
+   * A group the user dragged keeps its dropped spot, so the auto-placed groups
+   * have to clear it rather than being stacked as if its slot were still empty.
+   * Without this, expanding a box re-lays the column and lands a fresh group on
+   * top of the one that was moved aside. Packed top-down then bottom-up so a
+   * held box shoves its neighbours both ways and no two boxes overlap.
+   */
+  function settleHeld(gs) {
+    var cols = new Map();
+    for (var i = 0; i < gs.length; i++) {
+      var d = gs[i].depth || 0;
+      var col = cols.get(d);
+      if (!col) cols.set(d, col = []);
+      col.push(gs[i]);
+    }
+    cols.forEach(function (col) {
+      var held = false;
+      for (var h = 0; h < col.length; h++) if (ensurePos(col[h]).moved) { held = true; break; }
+      if (!held) return;
+      col.sort(function (a, b) { return ensurePos(a).y - ensurePos(b).y; });
+      var y = -Infinity;
+      for (var i = 0; i < col.length; i++) {
+        var g = col[i], st = ensurePos(g);
+        if (st.moved) { y = Math.max(y, st.y + g.h / 2); }
+        else { st.y = Math.max(st.y, y + GAP_V + g.h / 2); y = st.y + g.h / 2; }
+      }
+      y = Infinity;
+      for (var i = col.length - 1; i >= 0; i--) {
+        var g = col[i], st = ensurePos(g);
+        if (st.moved) { y = Math.min(y, st.y - g.h / 2); }
+        else { st.y = Math.min(st.y, y - GAP_V - g.h / 2); y = st.y - g.h / 2; }
+      }
+    });
   }
 
   /**

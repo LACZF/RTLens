@@ -335,6 +335,9 @@ function startPanel(
   const message = (data: Record<string, unknown>): void => {
     for (const fn of winListeners.message ?? []) fn({ data });
   };
+  const winFire = (type: string, ev: Record<string, unknown>): void => {
+    for (const fn of winListeners[type] ?? []) fn(event(ev));
+  };
   message({
     type: 'graph',
     graph,
@@ -350,6 +353,7 @@ function startPanel(
     api,
     posted,
     message,
+    winFire,
     group: (k: string) => api._els!.groups.find((gd) => gd.g.key === k)!,
     search: () => elements.search,
     edge: (to: string, port: string) =>
@@ -782,4 +786,34 @@ test('wires between two modules do not cross', () => {
       }
     }
   }
+});
+
+test('a box dragged onto a sibling shoves it aside instead of overlapping', () => {
+  const p = startPanel(rootGraph(['top']));
+  const target = p.group('top.u_leaf');
+  const hit = find(target.el, (e) => e.classList.contains('hit'));
+  assert.ok(hit, 'the box has a header to grab');
+  // Drop u_leaf down onto u_mid's row, then expand the subtree so the column is
+  // laid out again with the held box in the middle.
+  fire(hit!, 'mousedown', { clientX: 0, clientY: 0 });
+  p.winFire('mousemove', { clientX: 0, clientY: 80 });
+  p.winFire('mouseup', {});
+  p.api.redraw();
+  const heldY = p.group('top.u_leaf').g.y;
+  p.message({
+    type: 'graph',
+    graph: rootGraph(['top', 'top.u_mid', 'top.u_leaf']),
+    collapsed: [],
+    expanded: ['top', 'top.u_mid', 'top.u_leaf'],
+  });
+
+  const rects = p.api._els!.groups.map((d) => d.g);
+  const overlaps = (a: Geom, b: Geom): boolean =>
+    Math.abs(a.x - b.x) < (a.w + b.w) / 2 && Math.abs(a.y - b.y) < (a.h + b.h) / 2;
+  for (let i = 0; i < rects.length; i++) {
+    for (let j = i + 1; j < rects.length; j++) {
+      assert.ok(!overlaps(rects[i], rects[j]), `${rects[i].key} overlaps ${rects[j].key}`);
+    }
+  }
+  assert.equal(p.group('top.u_leaf').g.y, heldY, 'the dragged box keeps the row it was dropped on');
 });
