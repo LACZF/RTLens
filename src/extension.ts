@@ -212,9 +212,11 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   });
 
-  // Signal tracing: one hop of fan-in / fan-out from the name under the cursor,
-  // then jump to the chosen target. The hop logic is pure (`core/trace`); this is
-  // only the editor glue, so the command stays a shortcut and not a panel.
+  // Hierarchy tracing: up walks a signal to its declaration and a port to the
+  // parent instance that drives it; down walks a signal to the child instances
+  // connected to it and then into their port. One hop per press, then jump. The
+  // hop logic is pure (`core/trace`); this is only the editor glue, so the
+  // command stays a shortcut and not a panel.
   const trace = async (direction: TraceDirection) => {
     const editor = vscode.window.activeTextEditor;
     if (!editor || !LANGUAGES.includes(editor.document.languageId)) {
@@ -236,8 +238,8 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
     if (!res.targets.length) {
-      const what = direction === 'up' ? 'driver' : 'load';
-      void vscode.window.showInformationMessage(`HDL: no ${what} found for ${res.name}.`);
+      const what = direction === 'up' ? `nothing above ${res.name}` : `nothing below ${res.name}`;
+      void vscode.window.showInformationMessage(`HDL: ${what}.`);
       return;
     }
     const target = await pickTraceTarget(res.name, direction, res.targets);
@@ -396,7 +398,7 @@ async function pickTraceTarget(
       step,
     })),
     {
-      title: `HDL: ${direction === 'up' ? 'drivers of' : 'loads of'} ${name}`,
+      title: `HDL: where ${name} ${direction === 'up' ? 'comes from' : 'goes'}`,
       placeHolder: 'Choose where to trace',
     },
   );

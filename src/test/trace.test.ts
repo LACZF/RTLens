@@ -23,23 +23,19 @@ function indexDir(dir: string): HdlIndex {
 // 1:   assign o = i;
 // 2: endmodule
 // 3:
-// 4: module mid (input wire a, input wire c, output wire y);
+// 4: module top (input wire a, output wire y);
 // 5:   wire n;
-// 6:   wire m;
+// 6:   leaf u1 (.i(n), .o(y));
 // 7:   assign n = a;
-// 8:   assign m = n;
-// 9:   leaf u1 (.i(n), .o(y));
-// 10: endmodule
+// 8: endmodule
 const SRC = `module leaf (input wire i, output wire o);
   assign o = i;
 endmodule
 
-module mid (input wire a, input wire c, output wire y);
+module top (input wire a, output wire y);
   wire n;
-  wire m;
-  assign n = a;
-  assign m = n;
   leaf u1 (.i(n), .o(y));
+  assign n = a;
 endmodule`;
 
 /** Column of the start of `needle` on 0-based `line` of `text`. */
@@ -55,186 +51,275 @@ function ctx() {
   return { index, src: SRC };
 }
 
-test('trace: down follows a net into the assignment it drives', () => {
-  const { index, src } = ctx();
-  // `n` is read by `assign m = n;`, whose left side is the sink.
-  const res = traceSignal(index, '/w/t.v', src, 5, col(5, 'n'), 'down')!;
-  assert.equal(res.name, 'n');
-  assert.equal(res.module, 'mid');
-  const sink = res.targets.find((t) => t.kind === 'sink');
-  assert.ok(sink, 'n drives m');
-  assert.equal(sink.label, 'm');
-  assert.equal(sink.range.start.line, 8);
-});
+/** Line/column index (0-based) of the first occurrence of `needle`. */
+function locate(text: string, needle: string): number {
+  return text.indexOf(needle);
+}
 
-test('trace: down follows a net into a child input port', () => {
-  const { index, src } = ctx();
-  const res = traceSignal(index, '/w/t.v', src, 5, col(5, 'n'), 'down')!;
-  const into = res.targets.find((t) => t.kind === 'into-child');
-  assert.ok(into, 'n enters leaf.i');
-  assert.equal(into.label, 'u1.i');
-  assert.equal(into.file, '/w/t.v');
-  assert.equal(into.range.start.line, 0, 'lands on the child port declaration');
-});
+function at(src: string, needle: string, offset = 0): { line: number; character: number } {
+  const idx = locate(src, needle);
+  assert.notEqual(idx, -1, `"${needle}" is present`);
+  const before = src.slice(0, idx + offset);
+  const line = before.split('\n').length - 1;
+  const character = before.length - (before.lastIndexOf('\n') + 1);
+  return { line, character };
+}
 
-test('trace: up follows a net back to what drives it', () => {
-  const { index, src } = ctx();
-  // `assign n = a;` drives n from a.
-  const res = traceSignal(index, '/w/t.v', src, 5, col(5, 'n'), 'up')!;
-  assert.equal(res.name, 'n');
-  const source = res.targets.find((t) => t.kind === 'source');
-  assert.ok(source, 'n is driven by a');
-  assert.equal(source.label, 'a');
-  assert.equal(source.range.start.line, 7);
-});
+// ---------------------------------------------------------------------------
+// up: a use goes to its declaration, then a port to the parent instance
+// ---------------------------------------------------------------------------
 
-test('trace: up follows a child output port into the child', () => {
+test('trace up: a signal use jumps to its declaration in the same module', () => {
   const { index, src } = ctx();
-  // y is driven by u1.o, which is leaf's output.
-  const res = traceSignal(index, '/w/t.v', src, 4, col(4, 'y)'), 'up')!;
-  assert.equal(res.name, 'y');
-  const from = res.targets.find((t) => t.kind === 'from-child');
-  assert.ok(from, 'y comes out of leaf.o');
-  assert.equal(from.label, 'u1.o');
-  assert.equal(from.range.start.line, 0);
-});
-
-test('trace: an input port fans in from the parent instance connection', () => {
-  const index = new HdlIndex();
-  const src = `module leaf (input wire i, output wire o);
-  assign o = i;
-endmodule
-module top (input wire a, output wire y);
-  leaf u1 (.i(a), .o(y));
-endmodule`;
-  index.addFile('/w/p.v', src);
-  // `i` is leaf's input; up crosses to the parent-side net `a`.
-  const res = traceSignal(index, '/w/p.v', src, 0, col(0, 'i,', src), 'up')!;
+  // `i` is read by `assign o = i;`; its declaration is in the header.
+  const p = at(src, 'o = i');
+  const res = traceSignal(index, '/w/t.v', src, p.line, p.character + 4, 'up')!;
   assert.equal(res.name, 'i');
   assert.equal(res.module, 'leaf');
-  const fromParent = res.targets.find((t) => t.kind === 'from-parent');
-  assert.ok(fromParent, 'i comes from the parent net a');
-  assert.equal(fromParent.label, 'a');
-  assert.equal(fromParent.range.start.line, 4);
+  assert.equal(res.targets.length, 1);
+  assert.equal(res.targets[0].kind, 'declaration');
+  assert.equal(res.targets[0].range.start.line, 0);
 });
 
-test('trace: an output port fans out to the parent instance connection', () => {
+test('trace up: a port declaration jumps to the parent instance connection', () => {
+  const { index, src } = ctx();
+  // `i` is leaf's input; its use site is the parent instance `u1.i(n)`.
+  const p = at(src, 'wire i');
+  const res = traceSignal(index, '/w/t.v', src, p.line, p.character + 5, 'up')!;
+  assert.equal(res.name, 'i');
+  assert.equal(res.module, 'leaf');
+  const net = res.targets.find((t) => t.kind === 'parent-net');
+  assert.ok(net, 'i crosses to the parent-side net n');
+  assert.equal(net.label, 'u1.i');
+  assert.equal(net.range.start.line, 6);
+  assert.equal(src.split('\n')[net.range.start.line].slice(net.range.start.character, net.range.end.character), 'n');
+});
+
+test('trace up: an output port also crosses to the parent instance', () => {
+  const { index, src } = ctx();
+  const p = at(src, 'output wire o');
+  const res = traceSignal(index, '/w/t.v', src, p.line, p.character + 12, 'up')!;
+  assert.equal(res.name, 'o');
+  const net = res.targets.find((t) => t.kind === 'parent-net');
+  assert.ok(net);
+  assert.equal(net.label, 'u1.o');
+  assert.equal(src.split('\n')[net.range.start.line].slice(net.range.start.character, net.range.end.character), 'y');
+});
+
+test('trace up: a bus port declaration crosses to the parent instance', () => {
+  // The packed range before the name must not hide the port: it used to glom
+  // the type keyword on (`wire.d`), so up from a bus port found nothing.
+  const index = new HdlIndex();
+  const src = `module child (input wire [7:0] d, output wire [7:0] q);
+endmodule
+
+module top (input wire [7:0] a, output wire [7:0] y);
+  child u (.d(a), .q(y));
+endmodule`;
+  index.addFile('/w/b.v', src);
+  const p = at(src, 'output wire [7:0] q');
+  const res = traceSignal(index, '/w/b.v', src, p.line, p.character + 18, 'up')!;
+  assert.equal(res.name, 'q');
+  const net = res.targets.find((t) => t.kind === 'parent-net');
+  assert.ok(net, 'the bus output crosses to the parent net');
+  assert.equal(net.label, 'u.q');
+});
+
+test('trace up: a top-level port has no parent to cross to', () => {
+  const { index, src } = ctx();
+  const p = at(src, 'wire a');
+  const res = traceSignal(index, '/w/t.v', src, p.line, p.character + 5, 'up')!;
+  assert.equal(res.name, 'a');
+  assert.deepEqual(res.targets, [], 'top is never instantiated');
+});
+
+test('trace up: a non-port declaration has nowhere to go', () => {
+  const { index, src } = ctx();
+  const p = at(src, 'wire n');
+  const res = traceSignal(index, '/w/t.v', src, p.line, p.character + 5, 'up')!;
+  assert.equal(res.name, 'n');
+  assert.deepEqual(res.targets, []);
+});
+
+// ---------------------------------------------------------------------------
+// down: a signal to the child connection, then into the child port
+// ---------------------------------------------------------------------------
+
+test('trace down: a signal jumps to the child connection that touches it', () => {
+  const { index, src } = ctx();
+  // `n` feeds `u1.i`; the first hop is the connection itself, still in top.
+  const p = at(src, 'wire n');
+  const res = traceSignal(index, '/w/t.v', src, p.line, p.character + 5, 'down')!;
+  assert.equal(res.name, 'n');
+  const conn = res.targets.find((t) => t.kind === 'child-connection');
+  assert.ok(conn, 'n is connected to u1.i');
+  assert.equal(conn.label, 'u1.i');
+  assert.equal(conn.file, '/w/t.v', 'the connection is in the current module');
+  assert.equal(conn.range.start.line, 6);
+});
+
+test('trace down: a connection enters the child port declaration', () => {
+  const { index, src } = ctx();
+  const p = at(src, '.i(n)');
+  const res = traceSignal(index, '/w/t.v', src, p.line, p.character + 1, 'down')!;
+  assert.equal(res.name, 'i');
+  const port = res.targets.find((t) => t.kind === 'child-port');
+  assert.ok(port, 'the connection opens the child port');
+  assert.equal(port.label, 'u1.i');
+  assert.equal(port.range.start.line, 0);
+});
+
+test('trace down: the net in a connection is reported, and going up returns there', () => {
+  const { index, src } = ctx();
+  const p = at(src, '.i(n)');
+  const res = traceSignal(index, '/w/t.v', src, p.line, p.character + 1, 'up')!;
+  const net = res.targets.find((t) => t.kind === 'connection-net');
+  assert.ok(net, 'up from a connection lands on the parent-side net');
+  assert.equal(net.label, 'n');
+  assert.equal(net.range.start.line, 6);
+});
+
+test('trace down: at the bottom a signal falls to its use in the module body', () => {
+  const { index, src } = ctx();
+  // `a` is a top-level input no child instance connects, so the deepest hop is
+  // its use in `assign n = a;`.
+  const p = at(src, 'wire a');
+  const res = traceSignal(index, '/w/t.v', src, p.line, p.character + 5, 'down')!;
+  assert.equal(res.name, 'a');
+  const use = res.targets.find((t) => t.kind === 'usage');
+  assert.ok(use, 'a is read in the assign');
+  assert.equal(use.range.start.line, 7);
+  assert.equal(src.split('\n')[7].slice(use.range.start.character, use.range.end.character), 'a');
+});
+
+test('trace down: a signal used only to gate a block falls to that use', () => {
+  const index = new HdlIndex();
+  const src = `module m (input wire clk, input wire en, input wire d, output reg q);
+  always_ff @(posedge clk) if (en) q <= d;
+endmodule`;
+  index.addFile('/w/e.v', src);
+  const p = at(src, 'wire en');
+  const res = traceSignal(index, '/w/e.v', src, p.line, p.character + 5, 'down')!;
+  const use = res.targets.find((t) => t.kind === 'usage');
+  assert.ok(use, 'en gates the block');
+  assert.equal(src.split('\n')[use.range.start.line].slice(use.range.start.character, use.range.end.character), 'en');
+});
+
+test('trace down: a leaf port falls to where the body drives it', () => {
+  // The user's case: down reaches the leaf module's port, and the next press
+  // must show where that port is used inside the leaf, not stop dead.
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'adder.v');
+  const src = fs.readFileSync(file, 'utf8');
+  const p = at(src, 'sum,');
+  const res = traceSignal(index, file, src, p.line, p.character + 1, 'down')!;
+  assert.equal(res.name, 'sum');
+  const use = res.targets.find((t) => t.kind === 'usage');
+  assert.ok(use, 'sum is driven inside the leaf');
+  assert.match(src.split('\n')[use.range.start.line], /assign sum\b/, 'the driver of the port');
+});
+
+// ---------------------------------------------------------------------------
+// hierarchical references and non-signals
+// ---------------------------------------------------------------------------
+
+test('trace: a hierarchical reference enters the child and tracks its net', () => {
   const index = new HdlIndex();
   const src = `module leaf (input wire i, output wire o);
   assign o = i;
 endmodule
-module top (input wire a, output wire y);
-  leaf u1 (.i(a), .o(y));
-endmodule`;
-  index.addFile('/w/p.v', src);
-  // `o` is leaf's output; down crosses to the parent-side net `y`.
-  const res = traceSignal(index, '/w/p.v', src, 0, col(0, 'o)', src), 'down')!;
-  assert.equal(res.name, 'o');
-  const toParent = res.targets.find((t) => t.kind === 'to-parent');
-  assert.ok(toParent, 'o reaches the parent net y');
-  assert.equal(toParent.label, 'y');
-  assert.equal(toParent.range.start.line, 4);
-});
 
-test('trace: a top-level input has nowhere to fan in from', () => {
-  const { index, src } = ctx();
-  const res = traceSignal(index, '/w/t.v', src, 4, col(4, 'a,'), 'up')!;
-  assert.equal(res.name, 'a');
-  assert.deepEqual(res.targets, [], 'mid is never instantiated');
+module top (input wire a, output wire y, output wire z);
+  wire n;
+  leaf u1 (.i(n), .o(y));
+  assign n = a;
+  assign z = u1.o;
+endmodule`;
+  index.addFile('/w/h.v', src);
+  const p = at(src, 'u1.o');
+
+  const down = traceSignal(index, '/w/h.v', src, p.line, p.character + 3, 'down')!;
+  assert.equal(down.name, 'o');
+  const port = down.targets.find((t) => t.kind === 'child-port');
+  assert.ok(port);
+  assert.equal(port.label, 'u1.o');
+  assert.equal(port.range.start.line, 0);
+
+  const up = traceSignal(index, '/w/h.v', src, p.line, p.character + 3, 'up')!;
+  const net = up.targets.find((t) => t.kind === 'connection-net');
+  assert.ok(net);
+  assert.equal(net.label, 'y');
 });
 
 test('trace: an unresolved cursor is not traceable', () => {
   const { index, src } = ctx();
-  // A blank line has no identifier, and a module name has no fan-in/fan-out.
   assert.equal(traceSignal(index, '/w/t.v', src, 3, 0, 'down'), undefined);
-  assert.equal(traceSignal(index, '/w/t.v', src, 4, col(4, 'mid'), 'down'), undefined);
+  assert.equal(traceSignal(index, '/w/t.v', src, 4, col(4, 'top'), 'down'), undefined);
 });
 
-test('trace: the same signal reached two ways is reported once', () => {
-  const { index, src } = ctx();
-  const res = traceSignal(index, '/w/t.v', src, 5, col(5, 'n'), 'down')!;
-  const keys = res.targets.map((t) => `${t.range.start.line}:${t.range.start.character}`);
-  assert.equal(new Set(keys).size, keys.length, 'no duplicate jump targets');
-});
+// ---------------------------------------------------------------------------
+// a generate loop collapses copies that share a source range
+// ---------------------------------------------------------------------------
 
-test('trace: an unrolled generate copy does not duplicate a target', () => {
-  // Both copies of `assign t = a;` carry the same source range (line 5), so the
-  // driver `a` would be offered twice if the steps were not collapsed.
+test('trace down: an unrolled instance connection is reported once', () => {
   const index = new HdlIndex();
-  const src = `module m (input wire a, output wire y);
-  wire t;
-  genvar i;
+  const src = `module leaf (input wire i);
+endmodule
+module m (input wire a);
+  genvar g;
   generate
-    for (i = 0; i < 2; i = i + 1) begin : g
-      assign t = a;
+    for (g = 0; g < 2; g = g + 1) begin : blk
+      leaf u (.i(a));
     end
   endgenerate
-  assign y = g[0].t | g[1].t;
 endmodule`;
   index.addFile('/w/g.v', src);
-  const res = traceSignal(index, '/w/g.v', src, 5, col(5, 't', src), 'up')!;
-  assert.equal(res.name, 't');
-  const sources = res.targets.filter((t) => t.kind === 'source');
-  assert.equal(sources.length, 1, 'the two generate copies collapse to one hop');
-  assert.equal(sources[0].label, 'a');
-
-  // `g[0].t` and `g[1].t` are the same net as `t`, so tracing down from `t`
-  // still reaches `y` - without the scope normalisation neither reference is a
-  // match and the net looks as if nothing reads it.
-  const down = traceSignal(index, '/w/g.v', src, 5, col(5, 't', src), 'down')!;
-  const sink = down.targets.find((t) => t.kind === 'sink');
-  assert.ok(sink, 'the generate-path spelling of the same net is followed');
-  assert.equal(sink.label, 'y');
+  const p = at(src, 'wire a');
+  const res = traceSignal(index, '/w/g.v', src, p.line, p.character + 5, 'down')!;
+  const conns = res.targets.filter((t) => t.kind === 'child-connection');
+  assert.equal(conns.length, 1, 'the two unrolled copies collapse to one hop');
+  assert.equal(conns[0].label, 'u.i');
 });
 
-/** Line/column of the first occurrence of `needle` in `text`. */
-function locate(text: string, needle: string): { line: number; character: number } {
-  const lines = text.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    const character = lines[i].indexOf(needle);
-    if (character !== -1) {
-      return { line: i, character };
-    }
-  }
-  throw new Error(`not found: ${needle}`);
-}
+// ---------------------------------------------------------------------------
+// a real multi-file design
+// ---------------------------------------------------------------------------
 
-test('trace: a fixture net fans in from the child that produces it', () => {
-  // datapath's `alu_sum` comes out of u_adder.sum and runs on to the regfile's
-  // write data - a real multi-file trace, not a single module.
+test('trace: a fixture net fans out to the child instances that connect it', () => {
   const index = indexDir(FIXTURES);
   const file = path.join(FIXTURES, 'datapath.v');
   const src = fs.readFileSync(file, 'utf8');
-  const cursor = locate(src, ': alu_sum;');
+  // A use of alu_sum in the ternary, not its declaration.
+  const p = at(src, ': alu_sum;');
 
-  const up = traceSignal(index, file, src, cursor.line, cursor.character + 2, 'up')!;
-  assert.equal(up.name, 'alu_sum');
-  assert.equal(up.module, 'datapath');
-  const from = up.targets.find((t) => t.kind === 'from-child');
-  assert.ok(from, 'alu_sum is driven by u_adder.sum');
-  assert.equal(from.label, 'u_adder.sum');
-  assert.equal(path.basename(from.file), 'adder.v', 'the jump crosses into the child file');
+  const down = traceSignal(index, file, src, p.line, p.character + 2, 'down')!;
+  assert.equal(down.name, 'alu_sum');
+  assert.equal(down.module, 'datapath');
+  const labels = down.targets.filter((t) => t.kind === 'child-connection').map((t) => t.label).sort();
+  assert.deepEqual(labels, ['u_adder.sum', 'u_regfile.wdata']);
+  assert.ok(down.targets.every((t) => t.file === file), 'every first hop stays in datapath');
 
-  const down = traceSignal(index, file, src, cursor.line, cursor.character + 2, 'down')!;
-  assert.ok(down.targets.some((t) => t.kind === 'sink' && t.label === 'stage_in'), 'alu_sum feeds stage_in');
-  const into = down.targets.find((t) => t.kind === 'into-child');
-  assert.ok(into, 'alu_sum enters u_regfile.wdata');
-  assert.equal(into.label, 'u_regfile.wdata');
-  assert.equal(path.basename(into.file), 'regfile.v');
+  // The first hop from a child connection opens the child port in another file.
+  const wdata = down.targets.find((t) => t.label === 'u_regfile.wdata')!;
+  const into = traceSignal(index, file, src, wdata.range.start.line, wdata.range.start.character, 'down')!;
+  const port = into.targets.find((t) => t.kind === 'child-port');
+  assert.ok(port, 'the connection opens regfile.wdata');
+  assert.equal(port.label, 'u_regfile.wdata');
+  assert.equal(path.basename(port.file), 'regfile.v');
 });
 
-test('trace: a fixture output port fans out to the parent connection', () => {
-  // datapath.carry is an output; going down crosses to the chip_top net that
-  // catches it in `.carry(dp_carry)`.
+test('trace: a fixture output port crosses up to the parent instance', () => {
+  // datapath.carry is an output; up crosses to the chip_top net that catches it
+  // in `.carry(dp_carry)`.
   const index = indexDir(FIXTURES);
   const file = path.join(FIXTURES, 'datapath.v');
   const src = fs.readFileSync(file, 'utf8');
-  const cursor = locate(src, 'carry');
+  const p = at(src, 'carry');
 
-  const down = traceSignal(index, file, src, cursor.line, cursor.character + 1, 'down')!;
-  assert.equal(down.name, 'carry');
-  const toParent = down.targets.find((t) => t.kind === 'to-parent');
-  assert.ok(toParent, 'carry reaches the parent net');
-  assert.equal(toParent.label, 'dp_carry');
-  assert.equal(path.basename(toParent.file), 'chip_top.v');
+  const up = traceSignal(index, file, src, p.line, p.character, 'up')!;
+  assert.equal(up.name, 'carry');
+  const net = up.targets.find((t) => t.kind === 'parent-net');
+  assert.ok(net, 'carry crosses to the parent instance');
+  assert.equal(net.label, 'u_dpath.carry');
+  assert.equal(path.basename(net.file), 'chip_top.v');
 });

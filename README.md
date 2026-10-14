@@ -12,7 +12,7 @@
 
 - **语法高亮**：自带的 TextMate 语法（`syntaxes/`），覆盖 Verilog-1995 / 2001 与 SystemVerilog；另有语言配置（注释、括号、折叠、缩进）。可选**语义高亮**：按语义分析区分 module 类型、实例名、端口、信号、参数、函数、genvar、typedef / 类型名等。
 - **跳转与导航**：定义跳转（Go to Definition）、引用（Find References）、重命名（Rename）、悬停（Hover）、文档符号（Document Symbols），基于**全工作区索引 + 层次化名字解析**，跨文件、跨 generate / 块作用域均可解析。
-- **信号追踪**：光标放在信号或端口上，`F3` 向上追踪驱动源（fan-in）、`F4` 向下追踪负载（fan-out）。每次只跨一跳 —— 赋值两端、子实例端口、以及端口到父实例的连线；结果唯一时直接跳到对应位置，有多个目标时弹出列表选择，可从落点继续追踪。
+- **信号追踪**：光标放在信号或端口上，`F3` 向顶层逐跳追踪（信号的使用处先到本模块的声明处，端口声明处再跨到上级模块里例化本模块的实例），`F4` 向叶子逐跳追踪，分两步：先在当前模块内落到连着该信号的子实例连接处，再进入子模块的端口声明；到最底层（叶子端口，或没有子实例连着的信号）时最后一跳落在该模块体里信号被使用的位置。每次只跨一跳，结果唯一时直接跳到对应位置，有多个目标时弹出列表选择，可从落点继续追踪，连按即可走到顶 / 到底。
 - **连接关系图**：SVG 交互式 webview。一个 module 一个容器框、信号是框内的行，边表示端口连接与网络。默认按层次分列布局（可切换力导向），支持缩放 / 平移 / 拖拽、按信号搜索（顶部全局搜索，以及**每个 module 框 header 内的搜索框**（居中放在实例名与 module 名之间；输入后按 Enter 才开始搜索，范围只限本框自己的信号（含未接到下级端口的内部信号）与它的直接子模块：原有画面保持不变，只把匹配到的框/信号行新增进来并高亮——不整组带出，搜一个模块名不会把它的全部信号行都拉进来，也不下钻孙辈，同时自动展开被分页或信号上限藏起来的匹配））、只看选中子树、折叠信号行与子树，以及沿实例层级上下钻取。
 - **组成树（Composition）**：侧边栏层次树，展示 module 之间的例化关系，带层次路径面包屑，可跳转到源码。
 - **Net 视图与问题视图**：列出网络与解析过程中的告警（未声明信号、缺失 module、被丢弃的 typedef 等）。
@@ -39,8 +39,8 @@
 | `HDL: Show Connectivity Graph for Current Module` | 打开光标所在 module 的图（快捷键 `Ctrl+Alt+G` / macOS `Cmd+Alt+G`） |
 | `HDL: Set Graph Root to Current Module` | 把图根设为当前 module |
 | `HDL: Generate Wrapper Module for Instance` | 由实例生成包装 module |
-| `HDL: Trace Signal Up (drivers)` | 从光标处的信号向上追踪驱动源（快捷键 `F3`） |
-| `HDL: Trace Signal Down (loads)` | 从光标处的信号向下追踪负载（快捷键 `F4`） |
+| `HDL: Trace Signal Up (to parent)` | 从光标处的信号向顶层逐跳追踪（快捷键 `F3`） |
+| `HDL: Trace Signal Down (toward leaves)` | 从光标处的信号向叶子逐跳追踪（快捷键 `F4`） |
 | `HDL: Reveal Current Module in Composition Tree` | 在组成树中定位当前 module |
 | `HDL: Copy Hierarchical Path of Current Instance` | 复制当前实例的层次路径 |
 

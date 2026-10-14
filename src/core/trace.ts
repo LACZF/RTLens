@@ -1,41 +1,40 @@
-import type { PortDecl, Range, RefSite } from './ast';
+import type { InstanceSite, ModuleDef, PortConn, Range, RefSite } from './ast';
 import type { HdlIndex } from './index';
 import { generateScopes, generateScopedName } from './index';
-import { instancesOf, resolveAt } from './resolve';
+import { instancesOf, resolveAt, type ResolvedDecl } from './resolve';
 
 /**
- * Signal tracing: from a name under the cursor, follow one hop of the design
- * across module boundaries.
+ * Signal tracing through the hierarchy, one hop per invocation.
  *
- * `down` follows fan-out - what the signal drives (a load): the left side of an
- * assignment that reads it, and the input port of a child it feeds. `up`
- * follows fan-in - what drives it: the right side of an assignment that writes
- * it, and the output port of a child that produces it. A port additionally
- * crosses to its containing instance: an `input` comes from the parent-side
- * net, an `output` goes to it.
+ * `up` walks toward the top level: from a use of a signal to its declaration in
+ * the same module, then from a port declaration to the connection at the parent
+ * instance that instantiates the module. `down` walks toward the leaves: from a
+ * signal to the child instance connections that touch it (the instantiation
+ * positions), then from such a connection into the child module's port
+ * declaration. At the bottom - a leaf port, or a signal no child instance
+ * touches - the last hop is the use of that signal inside the module body.
  *
- * Each direction is one hop, not a transitive closure: the caller jumps to a
- * target and can trace again from there, so paths are walked a step at a time
- * and the user stays in control. The result is plain data; opening editors and
- * asking the user to disambiguate is the host layer's job.
+ * The trace is deliberately *not* a transitive closure: the caller jumps to the
+ * chosen target and the user can trace again from there, so a path is walked a
+ * step at a time and every landing is an ordinary source position. The result is
+ * plain data; opening editors and asking the user to disambiguate is the host
+ * layer's job.
  */
 export type TraceDirection = 'up' | 'down';
 
 export type TraceStepKind =
-  /** A source feeding the signal, from an assignment's right-hand side. */
-  | 'source'
-  /** A sink the signal drives, from an assignment's left-hand side. */
-  | 'sink'
-  /** The signal runs into a child input. */
-  | 'into-child'
-  /** The signal comes out of a child output. */
-  | 'from-child'
-  /** A port is driven by its parent instance's connection. */
-  | 'from-parent'
-  /** A port drives its parent instance's connection. */
-  | 'to-parent'
-  /** An assignment drives the signal from a constant. */
-  | 'constant';
+  /** A signal use jumps to its declaration in the same module. */
+  | 'declaration'
+  /** A port declaration jumps to the connection at the parent instance. */
+  | 'parent-net'
+  /** A connection jumps to the parent-side net it carries. */
+  | 'connection-net'
+  /** A signal jumps to the child instance connection that touches it. */
+  | 'child-connection'
+  /** A connection jumps into the child module's port declaration. */
+  | 'child-port'
+  /** At the bottom, a signal jumps to where the module body uses it. */
+  | 'usage';
 
 export interface TraceStep {
   file: string;
@@ -48,12 +47,12 @@ export interface TraceStep {
 }
 
 export interface TraceResult {
-  /** Signal name under the cursor. */
+  /** Signal or port name under the cursor. */
   name: string;
-  /** Module the signal belongs to. */
+  /** Module the cursor's signal belongs to. */
   module: string;
   direction: TraceDirection;
-  /** The declaration the cursor resolved to. */
+  /** The declaration or connection the cursor resolved to. */
   file: string;
   range: Range;
   targets: TraceStep[];
@@ -68,127 +67,269 @@ export function traceSignal(
   direction: TraceDirection,
 ): TraceResult | undefined {
   const hit = resolveAt(index, file, source, line, character);
-  if (!hit || !hit.resolution.ok) {
+  if (!hit) {
     return undefined;
   }
-  const decl = hit.resolution.decl;
-  // Only signals and ports are traceable; a module, parameter or macro has no
-  // fan-in/fan-out to follow.
-  if (decl.kind !== 'port' && decl.kind !== 'signal') {
+  const cursorMod = hit.mod;
+  if (!cursorMod) {
     return undefined;
   }
-  const mod = decl.moduleName ? index.resolveModule(decl.moduleName, decl.file) : hit.mod;
-  if (!mod) {
-    return undefined;
-  }
-  const name = decl.name;
-  // The same net is written once bare and once as a generate scope path, e.g.
-  // `t` and `g[0].t`. Normalise both spellings to the name the net list uses.
-  const scopes = generateScopes(mod);
-  const norm = (full: string) => generateScopedName(full, scopes) ?? full;
-  const matches = (ref: RefSite) => norm(ref.fullPath) === name;
 
-  const ports = new Map<string, PortDecl>(mod.ports.map((p) => [p.name, p]));
-  const steps: TraceStep[] = [];
-  const seen = new Set<string>();
-  const keyOf = (f: string, r: Range) => `${f}:${r.start.line}:${r.start.character}`;
-  const add = (s: TraceStep) => {
-    // Never point at the signal's own declaration - that is where the cursor
-    // already is.
-    if (s.file === decl.file && keyOf(s.file, s.range) === keyOf(decl.file, decl.nameRange)) {
-      return;
-    }
-    const key = keyOf(s.file, s.range);
-    if (seen.has(key)) {
-      return;
-    }
-    seen.add(key);
-    steps.push(s);
-  };
-
-  for (const a of mod.assigns) {
-    if (a.local) {
-      continue;
-    }
-    // A signal on the left side is driven; on the right side it is read.
-    if (direction === 'up' && a.lhs.some(matches)) {
-      if (a.rhs.length === 0) {
-        add({ file: mod.file, range: a.range, kind: 'constant', label: 'constant', detail: `assign in ${mod.name}` });
+  if (hit.resolution.ok) {
+    const decl = hit.resolution.decl;
+    if (decl.kind === 'port' || decl.kind === 'signal') {
+      const owner = decl.moduleName ? index.resolveModule(decl.moduleName, decl.file) : cursorMod;
+      if (owner && sameModule(owner, cursorMod)) {
+        const onDecl = samePos(hit.word.nameRange, decl.nameRange);
+        return signalTrace(index, owner, decl, onDecl, direction);
       }
-      for (const r of a.rhs) {
-        add({ file: mod.file, range: r.range, kind: 'source', label: r.fullPath, detail: `assign in ${mod.name}` });
-      }
-    }
-    if (direction === 'down' && a.rhs.some(matches)) {
-      for (const r of a.lhs) {
-        add({ file: mod.file, range: r.range, kind: 'sink', label: r.fullPath, detail: `assign in ${mod.name}` });
-      }
-    }
-  }
-
-  for (const inst of mod.instances) {
-    const child = index.resolveModule(inst.moduleName, mod.file);
-    for (const conn of inst.connections) {
-      // `.name` shorthand names the parent net only in the port name.
-      const connected = conn.refs.some(matches) || (conn.shorthand && conn.portName === name);
-      if (!connected) {
-        continue;
-      }
-      const port = child?.ports.find((p) => p.name === conn.portName);
-      const dir = port?.direction;
-      if (!child || !port) {
-        // The child is missing or the port unknown: the direction that says
-        // which side of the connection the signal is on is not known, and
-        // guessing would send the trace the wrong way.
-        continue;
-      }
-      if (direction === 'up' && (dir === 'output' || dir === 'inout')) {
-        add({
-          file: child.file,
-          range: port.nameRange,
-          kind: 'from-child',
-          label: `${inst.name}.${port.name}`,
-          detail: `${inst.moduleName} ${dir}`,
-        });
-      }
-      if (direction === 'down' && (dir === 'input' || dir === 'ref' || dir === 'inout')) {
-        add({
-          file: child.file,
-          range: port.nameRange,
-          kind: 'into-child',
-          label: `${inst.name}.${port.name}`,
-          detail: `${inst.moduleName} ${dir}`,
-        });
-      }
-    }
-  }
-
-  if (decl.kind === 'port') {
-    const dir = decl.direction ?? ports.get(name)?.direction;
-    // A port continues into the instances that contain the module: fan-in
-    // arrives through the parent-side net of an input, fan-out leaves through
-    // the parent-side net of an output.
-    const wantUp = direction === 'up' && (dir === 'input' || dir === 'inout');
-    const wantDown = direction === 'down' && (dir === 'output' || dir === 'inout');
-    if (wantUp || wantDown) {
-      for (const { mod: parent, inst } of instancesOf(index, mod.name)) {
-        for (const conn of inst.connections) {
-          if (conn.portName !== name) {
-            continue;
-          }
-          for (const r of conn.refs) {
-            add({
-              file: parent.file,
-              range: r.range,
-              kind: wantUp ? 'from-parent' : 'to-parent',
-              label: r.fullPath,
-              detail: `parent ${parent.name}`,
-            });
-          }
+      if (owner) {
+        // A hierarchical reference such as `u_adder.sum`: the cursor is on the
+        // connection at the instance, not on a net of the current module.
+        const found = hierarchicalConnection(cursorMod, hit.word.fullPath);
+        if (found) {
+          return connectionTrace(index, cursorMod, found.inst, found.conn, direction);
         }
       }
     }
   }
 
-  return { name, module: mod.name, direction, file: decl.file, range: decl.nameRange, targets: steps };
+  const conn = connectionAt(cursorMod, line, character);
+  if (conn) {
+    return connectionTrace(index, cursorMod, conn.inst, conn.conn, direction);
+  }
+  return undefined;
+}
+
+function signalTrace(
+  index: HdlIndex,
+  mod: ModuleDef,
+  decl: ResolvedDecl,
+  onDecl: boolean,
+  direction: TraceDirection,
+): TraceResult {
+  const name = decl.name;
+  const targets: TraceStep[] = [];
+  if (direction === 'up') {
+    if (!onDecl) {
+      // ① a use of the signal goes to its declaration in this module.
+      add(targets, {
+        file: decl.file,
+        range: decl.nameRange,
+        kind: 'declaration',
+        label: name,
+        detail: `declared in ${mod.name}`,
+      });
+    } else if (decl.kind === 'port') {
+      // ② a port declaration goes to the parent instance's connection.
+      for (const { mod: parent, inst } of instancesOf(index, mod.name)) {
+        const portName = mod.ports.find((p) => p.name === name || p.declName === name)?.name ?? name;
+        const conn = inst.connections.find((c) => c.portName === portName);
+        if (conn && conn.refs.length) {
+          for (const r of conn.refs) {
+            add(targets, {
+              file: parent.file,
+              range: r.range,
+              kind: 'parent-net',
+              label: `${inst.name}.${conn.portName}`,
+              detail: parent.name,
+            });
+          }
+        } else {
+          add(targets, {
+            file: parent.file,
+            range: inst.nameRange,
+            kind: 'parent-net',
+            label: inst.name,
+            detail: parent.name,
+          });
+        }
+      }
+    }
+  } else {
+    // ① a signal goes to the child instance connections that touch it.
+    const scopes = generateScopes(mod);
+    const norm = (full: string) => generateScopedName(full, scopes) ?? full;
+    const matches = (ref: RefSite) => norm(ref.fullPath) === name;
+    for (const inst of mod.instances) {
+      for (const conn of inst.connections) {
+        const connected = conn.refs.some(matches) || (conn.shorthand && conn.portName === name);
+        if (!connected) {
+          continue;
+        }
+        add(targets, {
+          file: mod.file,
+          range: conn.nameRange,
+          kind: 'child-connection',
+          label: `${inst.name}.${conn.portName || '?'}`,
+          detail: inst.moduleName,
+        });
+      }
+    }
+    // ② the bottom of the hierarchy: nothing below connects the signal, so the
+    //    last hop is its use in this module's body. A leaf port is read or
+    //    driven here, and that is as deep as the trace goes.
+    if (targets.length === 0) {
+      addUsages(mod, name, norm, targets);
+    }
+  }
+  return { name, module: mod.name, direction, file: decl.file, range: decl.nameRange, targets };
+}
+
+/**
+ * The sites inside `mod` that mention `name`: the references of its continuous
+ * and procedural assignments (both sides), and the event/condition/generate
+ * references that belong to no assignment. Mirrors `signalUsage` in `nets.ts`,
+ * but keeps source ranges so a trace can land on the exact position.
+ */
+function addUsages(
+  mod: ModuleDef,
+  name: string,
+  norm: (full: string) => string,
+  targets: TraceStep[],
+): void {
+  for (const a of mod.assigns) {
+    // A name assigned inside a function/task body is an automatic variable of
+    // one call, not a signal of this module.
+    if (a.local) {
+      continue;
+    }
+    const how = a.inAlways ? 'always' : 'assign';
+    for (const ref of [...a.lhs, ...a.rhs]) {
+      if (norm(ref.fullPath) !== name) {
+        continue;
+      }
+      add(targets, {
+        file: mod.file,
+        range: ref.range,
+        kind: 'usage',
+        label: name,
+        detail: `${ref.isWrite ? 'driven' : 'read'} by ${how} · ${mod.name}`,
+      });
+    }
+  }
+  for (const ref of mod.refs) {
+    if (ref.isDecl || (ref.context !== 'event' && ref.context !== 'condition' && ref.context !== 'generate')) {
+      continue;
+    }
+    if (norm(ref.fullPath) !== name) {
+      continue;
+    }
+    const how = ref.context === 'generate' ? 'generate' : 'always';
+    add(targets, {
+      file: mod.file,
+      range: ref.range,
+      kind: 'usage',
+      label: name,
+      detail: `read by ${how} · ${mod.name}`,
+    });
+  }
+}
+
+function connectionTrace(
+  index: HdlIndex,
+  mod: ModuleDef,
+  inst: InstanceSite,
+  conn: PortConn,
+  direction: TraceDirection,
+): TraceResult {
+  const name = conn.portName;
+  const targets: TraceStep[] = [];
+  if (direction === 'down') {
+    // ② the connection goes into the child module's port declaration.
+    const child = index.resolveModule(inst.moduleName, mod.file);
+    const port = child ? child.ports.find((p) => p.name === name || p.declName === name) : undefined;
+    if (child && port) {
+      add(targets, {
+        file: child.file,
+        range: port.nameRange,
+        kind: 'child-port',
+        label: `${inst.name}.${port.name}`,
+        detail: child.name,
+      });
+    }
+  } else {
+    for (const r of conn.refs) {
+      add(targets, {
+        file: mod.file,
+        range: r.range,
+        kind: 'connection-net',
+        label: r.fullPath,
+        detail: mod.name,
+      });
+    }
+  }
+  return { name, module: mod.name, direction, file: mod.file, range: conn.nameRange, targets };
+}
+
+function add(targets: TraceStep[], step: TraceStep): void {
+  const key = (s: TraceStep) => `${s.file}:${s.range.start.line}:${s.range.start.character}`;
+  if (targets.some((t) => key(t) === key(step))) {
+    return;
+  }
+  targets.push(step);
+}
+
+function sameModule(a: ModuleDef | undefined, b: ModuleDef | undefined): boolean {
+  return !!a && !!b && a.file === b.file && a.name === b.name;
+}
+
+function samePos(a: Range, b: Range): boolean {
+  return (
+    a.start.line === b.start.line &&
+    a.start.character === b.start.character &&
+    a.end.line === b.end.line &&
+    a.end.character === b.end.character
+  );
+}
+
+function pointIn(range: Range, line: number, character: number): boolean {
+  const afterStart = line > range.start.line || (line === range.start.line && character >= range.start.character);
+  const beforeEnd = line < range.end.line || (line === range.end.line && character <= range.end.character);
+  return afterStart && beforeEnd;
+}
+
+/** The instance connection a point sits in, if any. */
+function connectionAt(
+  mod: ModuleDef | undefined,
+  line: number,
+  character: number,
+): { inst: InstanceSite; conn: PortConn } | undefined {
+  if (!mod) {
+    return undefined;
+  }
+  // The port name is the tightest target; the whole `.port(expr)` is the
+  // fallback for a cursor in the expression or on the punctuation.
+  for (const inst of mod.instances) {
+    const conn = inst.connections.find((c) => pointIn(c.nameRange, line, character));
+    if (conn) {
+      return { inst, conn };
+    }
+  }
+  for (const inst of mod.instances) {
+    const conn = inst.connections.find((c) => pointIn(c.range, line, character));
+    if (conn) {
+      return { inst, conn };
+    }
+  }
+  return undefined;
+}
+
+/** The connection named by a dotted reference such as `u_adder.sum`. */
+function hierarchicalConnection(
+  mod: ModuleDef | undefined,
+  fullPath: string,
+): { inst: InstanceSite; conn: PortConn } | undefined {
+  if (!mod || !fullPath.includes('.')) {
+    return undefined;
+  }
+  const parts = fullPath.split('.');
+  const lastName = parts[parts.length - 1];
+  const instanceName = parts[0].replace(/\[.*\]$/, '');
+  const inst = mod.instances.find((i) => i.name === instanceName || i.rawName === instanceName);
+  if (!inst) {
+    return undefined;
+  }
+  const conn = inst.connections.find((c) => c.portName === lastName);
+  return conn ? { inst, conn } : undefined;
 }
