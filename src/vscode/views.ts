@@ -3,7 +3,6 @@ import * as vscode from 'vscode';
 import type { IndexService } from './indexService';
 import type { HierarchyNode } from '../core/ast';
 import { findByPath, subtree } from '../core/hierarchy';
-import { describeUse, signalUsage, summariseUse } from '../core/nets';
 import { collectProblems, type ProblemKind, type ProblemSeverity } from '../core/problems';
 
 /**
@@ -23,11 +22,11 @@ export class CompositionTreeProvider implements vscode.TreeDataProvider<Composit
    */
   private readonly rendered = new Map<string, vscode.TreeItem>();
   /**
-   * Children shown per node before the list ends in a "load more" row. Keyed by
-   * node path so one wide module can be walked page by page without any other
-   * node (or the whole tree) paying for its size.
+   * What the tree was auto-rooted to: the configured top list, or the
+   * `module@file` in the active editor. Re-rooting only when this changes keeps
+   * a cursor move inside one module from rebuilding the tree.
    */
-  private readonly windows = new Map<string, number>();
+  private autoKey: string | undefined;
 
   constructor(private readonly svc: IndexService) {
     this.svc.onDidChange(() => this.refresh());
@@ -38,6 +37,46 @@ export class CompositionTreeProvider implements vscode.TreeDataProvider<Composit
     this.cached = undefined;
     this.rendered.clear();
     this.emitter.fire(undefined);
+  }
+
+  /**
+   * Point the view at the active editor. With `hdl.connectView.topModules` set
+   * the tree stays rooted at that top - the whole design, wherever the cursor
+   * is; without it the tree follows the module the cursor sits in, so the view
+   * always opens on the design you are reading. A missing editor is fine: a
+   * configured top still roots the tree, and without one the last root is kept.
+   */
+  setContext(file: string | undefined, line: number | undefined): void {
+    const tops = this.svc.config.topModules;
+    if (tops.length) {
+      const key = `top:${tops.join(',')}`;
+      if (key === this.autoKey) {
+        return;
+      }
+      const def = tops.map((name) => this.svc.index.resolveModule(name)).find((d) => d !== undefined);
+      if (!def) {
+        return;
+      }
+      this.autoKey = key;
+      this.setRoot(this.svc.hierarchy(def.name, def.file)?.root, def.name);
+      return;
+    }
+    if (!file) {
+      return;
+    }
+    // A cursor above the first `module` (a licence header, the line the editor
+    // opens on) belongs to no module; the file's first module is still the
+    // sensible root rather than an empty tree.
+    const mod = this.svc.moduleAt(file, line ?? 0) ?? this.svc.index.modulesInFile(file)[0];
+    if (!mod) {
+      return;
+    }
+    const key = `${mod.name}@${file}`;
+    if (key === this.autoKey) {
+      return;
+    }
+    this.autoKey = key;
+    this.setRoot(this.svc.hierarchy(mod.name, file)?.root, mod.name);
   }
 
   get root(): string | undefined {
@@ -58,33 +97,10 @@ export class CompositionTreeProvider implements vscode.TreeDataProvider<Composit
     this.cached = node;
     this.rootModule = moduleName ?? node?.moduleName;
     this.rendered.clear();
-    this.windows.clear();
-    this.emitter.fire(undefined);
-  }
-
-  /** Reveal the next page of children under `path`. */
-  moreChildren(path: string): void {
-    const page = this.svc.config.defaultChildLimit;
-    const current = this.windows.get(path) ?? page;
-    this.windows.set(path, current + page);
     this.emitter.fire(undefined);
   }
 
   getTreeItem(e: CompositionItem): vscode.TreeItem {
-    if (e.more) {
-      const item = new vscode.TreeItem(e.label, vscode.TreeItemCollapsibleState.None);
-      item.id = `hdl:more:${e.node.path}`;
-      item.description = 'click to show the next page of children';
-      item.tooltip = e.tooltip;
-      item.contextValue = 'hdl.more';
-      item.iconPath = new vscode.ThemeIcon('chevron-down');
-      item.command = {
-        command: 'hdl.connectView.showMoreChildren',
-        title: 'Show More Children',
-        arguments: [e.node.path],
-      };
-      return item;
-    }
     const cached = this.rendered.get(e.node.path);
     if (cached) {
       return cached;
@@ -95,9 +111,8 @@ export class CompositionTreeProvider implements vscode.TreeDataProvider<Composit
   }
 
   /**
-   * Expand every ancestor of `path` and return the matching row, so the caller
-   * can hand it to `TreeView.reveal`. A path that sits behind a "load more" row
-   * widens the ancestor's window instead of silently missing the row.
+   * Return the row for `path`, expanding its ancestors, so the caller can hand
+   * it to `TreeView.reveal`.
    */
   modelFor(path: string): CompositionItem | undefined {
     const root = this.cached;
@@ -108,36 +123,13 @@ export class CompositionTreeProvider implements vscode.TreeDataProvider<Composit
     if (!node) {
       return undefined;
     }
-    this.ensureRevealWindows(root, path);
     this.emitter.fire(undefined);
     return this.toItem(node, node.path === root.path);
   }
 
-  /**
-   * Raise the child window of every ancestor on the path to `path`, so a target
-   * beyond the first page of a wide module is actually handed to the tree.
-   */
-  private ensureRevealWindows(root: HierarchyNode, path: string): void {
-    const parts = path.split('.');
-    for (let i = 0; i + 1 < parts.length; i++) {
-      const ancPath = parts.slice(0, i + 1).join('.');
-      const anc = findByPath(root, ancPath);
-      const childPath = parts.slice(0, i + 2).join('.');
-      const idx = (anc?.children ?? []).findIndex((c) => c.path === childPath);
-      if (idx < 0) {
-        continue;
-      }
-      const page = this.svc.config.defaultChildLimit;
-      const window = this.windows.get(ancPath) ?? page;
-      if (idx >= window) {
-        this.windows.set(ancPath, idx + 1);
-      }
-    }
-  }
-
   private render(e: CompositionItem): vscode.TreeItem {
     const collapsible =
-      e.childCount > 0 ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.None;
+      e.childCount > 0 ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None;
     const item = new vscode.TreeItem(e.label, collapsible);
     item.id = `hdl:${e.node.path}`;
     // The counts are part of what makes a row worth reading, so they belong in
@@ -164,38 +156,13 @@ export class CompositionTreeProvider implements vscode.TreeDataProvider<Composit
       const node = this.ensureRoot();
       return node ? [this.toItem(node, true)] : [];
     }
-    if (e.more) {
-      return [];
-    }
-    const kids = e.node.children ?? [];
-    const page = this.svc.config.defaultChildLimit;
-    const window = this.windows.get(e.node.path) ?? page;
-    const shown = kids.slice(0, window);
-    const rows = shown.map((c) => this.toItem(c, false));
-    const hidden = kids.length - shown.length;
-    if (hidden > 0) {
-      rows.push(this.toMoreItem(e.node, hidden));
-    }
-    return rows;
-  }
-
-  private toMoreItem(parent: HierarchyNode, hidden: number): CompositionItem {
-    return {
-      node: parent,
-      label: `show ${hidden} more children`,
-      note: '',
-      badge: '',
-      icon: 'chevron-down',
-      file: undefined,
-      childCount: 0,
-      unresolved: false,
-      tooltip: `${hidden} more child${hidden === 1 ? '' : 'ren'} of ${parent.moduleName}. Click to reveal the next page; the page size is set by hdl.connectView.defaultChildLimit.`,
-      more: true,
-    };
+    // Every child is handed out: the tree's own expand/collapse is what pages
+    // through a wide module, so nothing sits behind a "load more" row.
+    return (e.node.children ?? []).map((c) => this.toItem(c, false));
   }
 
   getParent(e: CompositionItem): CompositionItem | undefined {
-    if (e.more || !e.node.parentPath) {
+    if (!e.node.parentPath) {
       return undefined;
     }
     const node = this.ensureRoot();
@@ -265,121 +232,6 @@ export interface CompositionItem {
   childCount: number;
   unresolved: boolean;
   tooltip: string;
-  /**
-   * Placeholder "load more" row: not backed by a child node of its own. `node`
-   * is the parent whose next page this row would reveal.
-   */
-  more?: boolean;
-}
-
-/** Nets of the module in the active editor: the signals worth looking at. */
-export class NetsTreeProvider implements vscode.TreeDataProvider<NetsItem> {
-  private readonly emitter = new vscode.EventEmitter<NetsItem | undefined>();
-  readonly onDidChangeTreeData = this.emitter.event;
-
-  private file: string | undefined;
-  private line: number | undefined;
-  private scope: string | undefined;
-  /** File the current rows were built for. */
-  private shownFile: string | undefined;
-
-  constructor(private readonly svc: IndexService) {
-    this.svc.onDidChange(() => this.refresh());
-  }
-
-  /** Point the view at the module around `line` of `file`. */
-  setContext(file: string | undefined, line: number | undefined): void {
-    this.file = file;
-    this.line = line;
-    // Moving the cursor inside the same module must not rebuild the tree, but
-    // another file with a same-named module must: the rows point at a file and
-    // a line, so keeping the old ones would send the user to the wrong place.
-    const scope = file === undefined ? undefined : this.svc.moduleAt(file, line ?? 0)?.name;
-    if (scope !== this.scope || file !== this.shownFile) {
-      this.scope = scope;
-      this.shownFile = file;
-      this.emitter.fire(undefined);
-    }
-  }
-
-  refresh(): void {
-    this.emitter.fire(undefined);
-  }
-
-  getTreeItem(e: NetsItem): vscode.TreeItem {
-    const item = new vscode.TreeItem(e.label ?? e.name, vscode.TreeItemCollapsibleState.None);
-    item.id = `hdlnet:${e.file}:${e.line}:${e.name}`;
-    item.description = e.description;
-    item.tooltip = e.tooltip;
-    item.contextValue = e.isPort ? 'hdl.port' : 'hdl.net';
-    item.iconPath = new vscode.ThemeIcon(e.icon);
-    item.command = { command: 'hdl.connectView.revealInstance', title: 'Open', arguments: [e] };
-    return item;
-  }
-
-  getChildren(e?: NetsItem): NetsItem[] {
-    if (e) {
-      return [];
-    }
-    if (!this.file) {
-      return [];
-    }
-    const mod = this.line === undefined ? undefined : this.svc.moduleAt(this.file, this.line);
-    if (!mod) {
-      return [];
-    }
-    const index = this.svc.index;
-    const usage = signalUsage(index, mod);
-    const items: NetsItem[] = [];
-    for (const p of mod.ports) {
-      const use = usage.get(p.name);
-      // A port is unused only when nothing in the module touches it: an output
-      // that an `assign` drives is used even though no instance reads it here.
-      const summary = summariseUse(use);
-      items.push(
-        new NetsItem(
-          this.file,
-          p.nameRange.start.line,
-          p.name,
-          `${p.direction} · ${summary}`,
-          `port ${p.name}\n${this.svc.relFile(this.file)}:${p.nameRange.start.line + 1}`,
-          'symbol-field',
-          true,
-        ),
-      );
-    }
-    for (const d of mod.decls) {
-      if (d.kind === 'typedef' || d.kind === 'genvar') {
-        continue;
-      }
-      items.push(
-        new NetsItem(
-          this.file,
-          d.nameRange.start.line,
-          d.name,
-          describeUse(d.kind, usage.get(d.name)),
-          `${d.name} (${d.kind})\n${this.svc.relFile(this.file)}:${d.nameRange.start.line + 1}`,
-          'symbol-variable',
-          false,
-        ),
-      );
-    }
-    return items;
-  }
-}
-
-export class NetsItem extends vscode.TreeItem {
-  constructor(
-    readonly file: string,
-    readonly line: number,
-    readonly name: string,
-    readonly description: string,
-    readonly tooltip: string,
-    readonly icon: string,
-    readonly isPort: boolean,
-  ) {
-    super(name);
-  }
 }
 
 /** Problems view: unresolved modules, undriven or multiply driven nets. */

@@ -116,7 +116,7 @@
             "type": "string"
           },
           "default": [],
-          "markdownDescription": "Explicit top module names. When empty, the extension infers top modules (modules never instantiated).",
+          "markdownDescription": "Explicit top module names. When set, the Composition view is rooted at the first name that exists, showing the whole design. When empty, the extension infers top modules (modules never instantiated) and the Composition view follows the module in the active editor.",
           "scope": "resource"
         },
         "hdl.connectView.maxDepth": {
@@ -154,7 +154,7 @@
           "type": "number",
           "default": 40,
           "minimum": 1,
-          "description": "Number of child modules revealed per page: the composition tree shows this many children before a load-more row, and the connectivity graph draws this many children per box (the first reveal included) before a 'more children' row that adds one more page."
+          "description": "Number of child modules drawn per page in the connectivity graph: each box draws this many children before a 'more children' row that adds one more page. The Composition tree is not paged; it relies on expand/collapse."
         },
         "hdl.connectView.followDefinition": {
           "type": "boolean",
@@ -189,7 +189,7 @@
         "title": "HDL: Refresh Index",
         "category": "HDL"
       },
-      {
+       {
         "command": "hdl.connectView.refreshDatabase",
         "title": "HDL: Refresh Signal/Module Database",
         "category": "HDL",
@@ -228,11 +228,6 @@
         "category": "HDL"
       },
       {
-        "command": "hdl.connectView.showMoreChildren",
-        "title": "HDL: Show More Children",
-        "category": "HDL"
-      },
-      {
         "command": "hdl.connectView.traceUp",
         "title": "HDL: Trace Signal Up (to parent)",
         "category": "HDL"
@@ -256,11 +251,13 @@
       "rtlens": [
         {
           "id": "hdl.composition",
-          "name": "Composition"
+          "name": "Composition",
+          "type": "webview"
         },
         {
           "id": "hdl.nets",
-          "name": "Nets"
+          "name": "Nets",
+          "type": "webview"
         },
         {
           "id": "hdl.problems",

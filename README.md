@@ -14,7 +14,7 @@
 - **跳转与导航**：定义跳转（Go to Definition）、引用（Find References）、重命名（Rename）、悬停（Hover）、文档符号（Document Symbols），基于**全工作区索引 + 层次化名字解析**，跨文件、跨 generate / 块作用域均可解析。
 - **信号追踪**：光标放在信号或端口上，`F3` 向顶层逐跳追踪（信号的使用处先到本模块的声明处，端口声明处再跨到上级模块里例化本模块的实例），`F4` 向叶子逐跳追踪，分两步：先在当前模块内落到连着该信号的子实例连接处，再进入子模块的端口声明；到最底层（叶子端口，或没有子实例连着的信号）时最后一跳落在该模块体里信号被使用的位置。每次只跨一跳，结果唯一时直接跳到对应位置，有多个目标时弹出列表选择，可从落点继续追踪，连按即可走到顶 / 到底。
 - **连接关系图**：SVG 交互式 webview。一个 module 一个容器框、信号是框内的行，边表示端口连接与网络。默认按层次分列布局（可切换力导向），支持缩放 / 平移 / 拖拽、按信号搜索（顶部全局搜索，以及**每个 module 框 header 内的搜索框**（居中放在实例名与 module 名之间；输入后按 Enter 才开始搜索，范围只限本框自己的信号（含未接到下级端口的内部信号）与它的直接子模块：原有画面保持不变，只把匹配到的框/信号行新增进来并高亮——不整组带出，搜一个模块名不会把它的全部信号行都拉进来，也不下钻孙辈，同时自动展开被分页或信号上限藏起来的匹配））、只看选中子树、折叠信号行与子树，以及沿实例层级上下钻取。
-- **组成树（Composition）**：侧边栏层次树，展示 module 之间的例化关系，带层次路径面包屑，可跳转到源码。
+- **组成树（Composition）**：侧边栏层次树，展示 module 之间的例化关系，带层次路径面包屑，可跳转到源码。打开时自动定根：设置了 `hdl.connectView.topModules` 就从该顶层 module 展开整个设计，未设置则从**当前所在 module** 开始（并随活动编辑器切换自动跟随；光标在第一行注释上时回退到该文件的首个 module）。每一级默认**折叠**、逐级展开/折叠，可一直展开到叶子 module；下级一次性全部列出，不分页。
 - **Net 视图与问题视图**：列出网络与解析过程中的告警（未声明信号、缺失 module、被丢弃的 typedef 等）。
 - **包装 module 生成**：从图中或光标处的实例生成 wrapper 源码，支持四种模式 —— `Auto`、`Flatten`（内联展开）、`Compose`（保留实例、重建接线）、`Stub`（例化并原样引出端口）。生成结果先预览，写盘需要显式 "Save As" 确认。
 - **信号 / module 关系数据库**：将信号读写关系与 module 间端口连接固化为 JSON 文件，保存到每个工作区 `.vscode/rtlens/relations.json`，支持增量（只重算变动文件及其依赖）与全量刷新，可通过底部状态栏按钮一键更新。
@@ -26,7 +26,7 @@
 | 视图 | 说明 |
 |------|------|
 | Composition | module 层次组成树 |
-| Nets | 网络列表 |
+| Nets | 网络列表（信号/端口）；支持在侧边栏内直接模糊搜索 |
 | Problems | 索引 / 解析告警 |
 
 ## 命令
@@ -34,6 +34,7 @@
 | 命令 | 说明 |
 |------|------|
 | `HDL: Refresh Index` | 重建工作区索引 |
+
 | `HDL: Refresh Signal/Module Database` | 刷新信号/module 关系数据库（.vscode/rtlens/relations.json），支持增量或全量 |
 | `HDL: Show Connectivity Graph` | 打开选中实例的连接关系图 |
 | `HDL: Show Connectivity Graph for Current Module` | 打开光标所在 module 的图（快捷键 `Ctrl+Alt+G` / macOS `Cmd+Alt+G`） |
@@ -51,13 +52,13 @@
 | `hdl.connectView.files` | `["**/*.{v,sv,svh,vh,vlt}"]` | 参与索引的文件 glob（相对各工作区文件夹） |
 | `hdl.connectView.includeDirs` | `["include","inc","../include","../inc"]` | 查找 `` `include `` 的额外目录 |
 | `hdl.connectView.exclude` | `["**/tb/**","**/testbench/**","**/*_tb.v","**/*_tb.sv","**/build/**","**/output/**"]` | 排除的 glob；默认排除 testbench，因为它们通常是层次树的叶子 |
-| `hdl.connectView.topModules` | `[]` | 显式顶层 module 名；为空时自动推断（从未被例化的 module） |
+| `hdl.connectView.topModules` | `[]` | 显式顶层 module 名；为空时自动推断（从未被例化的 module）。设置后组成树从该顶层展开整个设计；为空则从当前所在 module 开始 |
 | `hdl.connectView.maxDepth` | `32` | 层次展开的最大深度（防止递归 generate 死循环） |
 | `hdl.connectView.maxInstances` | `20000` | 单次展开实例化的层次节点上限 |
 | `hdl.connectView.graph.maxNodes` | `800` | 连接图渲染的节点上限，超出后退化为邻域视图 |
 | `hdl.connectView.graph.showContainment` | `false` | 在连接图中显示父子包含边 |
 | `hdl.connectView.graph.maxSignalsPerGroup` | `40` | 每框信号行上限；按顺序先留实例端口连线、再 `assign` 两端、最后端口声明，超出的收进 `...`（点击逐页放开，设 `0` 全部显示） |
-| `hdl.connectView.defaultChildLimit` | `40` | 单页带出的下级子框数：组合树首屏只画一页、尾部一行 `show N more children` 点击加载下一页；连接图里右缘 `+` 揭示下级时也只画一页，框内另有一行 `more children`，点击补一页下级并顺带放行一页节点预算（与信号 `...` 行各自独立） |
+| `hdl.connectView.defaultChildLimit` | `40` | 连接图里每个 module 框一页画出的下级子框数：超出后框内出现一行 `more children`，点击补一页下级并顺带放行一页节点预算（与信号 `...` 行各自独立）。组合树不分页，靠展开/折叠 |
 | `hdl.connectView.followDefinition` | `true` | 在实例名上按 F12 跳到其 module 定义；关闭则在组成树中定位 |
 | `hdl.connectView.enableSemanticHighlighting` | `true` | 启用语义高亮（实例名、端口名、声明信号等） |
 | `hdl.connectView.databasePaths` | `[]` | 额外参与索引与数据库的路径或文件；相对路径按各工作区文件夹解析，绝对路径原样使用。目录按 `files` 递归扫描，文件直接索引 |

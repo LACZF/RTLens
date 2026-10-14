@@ -139,3 +139,51 @@ export function summariseUse(use: SignalUse | undefined): string {
 export function describeUse(kind: string, use: SignalUse | undefined): string {
   return `${kind} · ${summariseUse(use)}`;
 }
+
+/** One row of the Nets view: a port or a net/variable of a module. */
+export interface NetRow {
+  name: string;
+  /** Zero-based line of the name, so a click can open it. */
+  line: number;
+  /** Right-hand summary, e.g. `input · read by assign`. */
+  description: string;
+  tooltip: string;
+  isPort: boolean;
+}
+
+/**
+ * The rows the Nets view shows for `mod`: ports first, then nets/variables.
+ *
+ * The order is fixed so the webview can re-sort for a fuzzy query without
+ * losing the ports-before-nets grouping as the ranking. `relFile` is only used
+ * in the tooltips.
+ */
+export function netsRows(index: HdlIndex, mod: ModuleDef, relFile: string): NetRow[] {
+  const usage = signalUsage(index, mod);
+  const rows: NetRow[] = [];
+  for (const p of mod.ports) {
+    // A port is unused only when nothing in the module touches it: an output
+    // that an `assign` drives is used even though no instance reads it here.
+    const summary = summariseUse(usage.get(p.name));
+    rows.push({
+      name: p.name,
+      line: p.nameRange.start.line,
+      description: `${p.direction} · ${summary}`,
+      tooltip: `port ${p.name}\n${relFile}:${p.nameRange.start.line + 1}`,
+      isPort: true,
+    });
+  }
+  for (const d of mod.decls) {
+    if (d.kind === 'typedef' || d.kind === 'genvar') {
+      continue;
+    }
+    rows.push({
+      name: d.name,
+      line: d.nameRange.start.line,
+      description: describeUse(d.kind, usage.get(d.name)),
+      tooltip: `${d.name} (${d.kind})\n${relFile}:${d.nameRange.start.line + 1}`,
+      isPort: false,
+    });
+  }
+  return rows;
+}

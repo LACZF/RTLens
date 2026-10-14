@@ -1,8 +1,9 @@
 /**
- * Child paging in the composition tree: a wide module's first page ends in a
- * "load more" row instead of silently truncating, reveal widens the window when
- * the target sits past the first page, and the graph's child page follows the
- * configured `hdl.connectView.defaultChildLimit`.
+ * Composition tree shape: every child is listed (no paging), each level starts
+ * collapsed and expands into its own children down to the leaves, reveal finds
+ * a node anywhere, the root follows the configured top or the active module, the
+ * nets list filters by signal name, and the graph's child page still follows
+ * `hdl.connectView.defaultChildLimit`.
  */
 import { test, after } from 'node:test';
 import * as assert from 'node:assert/strict';
@@ -49,7 +50,7 @@ function leafsSource(n: number): string {
   return src;
 }
 
-test('composition: a wide module pages its children behind a load-more row', async () => {
+test('composition: a wide module lists every child and starts collapsed', async () => {
   const svc = await svcWith();
   const { CompositionTreeProvider } = await import('../vscode/views');
   const { buildHierarchy } = await import('../core/hierarchy');
@@ -62,30 +63,22 @@ test('composition: a wide module pages its children behind a load-more row', asy
   const top = tree.getChildren()[0];
   assert.equal(top.node.path, root.path);
 
-  const first = tree.getChildren(top);
-  const firstReal = first.filter((r) => !r.more);
-  const more = first.find((r) => r.more);
-  assert.equal(firstReal.length, 40, 'the default page is hdl.connectView.defaultChildLimit');
-  assert.ok(more, 'a module wider than the page ends in a load-more row');
-  assert.match(more!.label, /210 more children/);
-  assert.equal(tree.getChildren(more!).length, 0, 'the load-more row is a leaf');
-  assert.equal(tree.getParent(more!), undefined, 'the load-more row has no parent of its own');
-
-  tree.moreChildren(root.path);
-  const second = tree.getChildren(top);
-  const secondReal = second.filter((r) => !r.more);
-  assert.equal(secondReal.length, 80, 'one load-more click reveals the next page');
-  assert.ok(second.find((r) => r.more), 'the rest of the module still sits behind another page');
-
-  for (let i = 0; i < 10 && tree.getChildren(top).some((r) => r.more); i++) {
-    tree.moreChildren(root.path);
-  }
-  const last = tree.getChildren(top);
-  assert.equal(last.length, 250, 'enough clicks page the whole module');
-  assert.ok(!last.some((r) => r.more), 'nothing is left behind once the module fits');
+  const kids = tree.getChildren(top);
+  assert.equal(kids.length, 250, 'every child is handed to the tree, with no load-more row');
+  assert.equal(
+    tree.getTreeItem(top).collapsibleState,
+    vscode.TreeItemCollapsibleState.Collapsed,
+    'a module with children starts collapsed',
+  );
+  assert.equal(
+    tree.getTreeItem(kids[0]).collapsibleState,
+    vscode.TreeItemCollapsibleState.None,
+    'a leaf offers no expander',
+  );
+  assert.equal(tree.getChildren(kids[0]).length, 0, 'expanding a leaf yields nothing');
 });
 
-test('composition: reveal widens the window onto a target past the first page', async () => {
+test('composition: reveal finds a child anywhere in a wide module', async () => {
   const svc = await svcWith();
   const { CompositionTreeProvider } = await import('../vscode/views');
   const { buildHierarchy } = await import('../core/hierarchy');
@@ -94,18 +87,46 @@ test('composition: reveal widens the window onto a target past the first page', 
   const root = buildHierarchy(svc.index, 'wide')!.root;
   const tree = new CompositionTreeProvider(svc);
   tree.setRoot(root, root.moduleName);
-  const top = tree.getChildren()[0];
-
-  assert.ok(!tree.getChildren(top).some((r) => r.node?.path === root.children![220].path));
 
   const row = tree.modelFor(root.children![220].path);
-  assert.ok(row, 'reveal finds a child that sits behind the first page');
+  assert.ok(row, 'reveal finds a child deep in a wide module');
   assert.equal(row!.node.path, root.children![220].path);
-  assert.ok(
-    tree.getChildren(top).some((r) => r.node?.path === root.children![220].path),
-    'the ancestor window widened far enough to include the target',
-  );
 });
+
+test('composition: roots at the configured top, else at the active module', async () => {
+  const src =
+    '// header comment, no module on this line\n' +
+    'module leaf (input wire a, output wire s); assign s = a; endmodule\n' +
+    'module top (input wire i, output wire o); leaf u (.a(i), .s(o)); endmodule\n';
+
+  const { CompositionTreeProvider } = await import('../vscode/views');
+
+  // A configured top wins: the tree shows the whole design no matter the cursor.
+  const withTop = await svcWith({ topModules: ['top'] });
+  withTop.index.addFile('/w/h.v', src);
+  const treeTop = new CompositionTreeProvider(withTop);
+  treeTop.setContext('/w/h.v', 0);
+  assert.equal(treeTop.root, 'top', 'the configured top roots the tree');
+  treeTop.setContext('/w/h.v', 2);
+  assert.equal(treeTop.root, 'top', 'the cursor does not move a top-rooted tree');
+
+  // Without a configured top the tree follows the module under the cursor.
+  const auto = await svcWith();
+  auto.index.addFile('/w/h.v', src);
+  const treeAuto = new CompositionTreeProvider(auto);
+  treeAuto.setContext('/w/h.v', 2);
+  assert.equal(treeAuto.root, 'top', 'the active module roots the tree');
+  treeAuto.setContext('/w/h.v', 1);
+  assert.equal(treeAuto.root, 'leaf', 'the tree follows the cursor to another module');
+
+  // A cursor above the first `module` (a header comment) still roots the tree:
+  // a fresh tree opens on the file's first module rather than staying empty.
+  const fresh = new CompositionTreeProvider(auto);
+  fresh.setContext('/w/h.v', 0);
+  assert.equal(fresh.root, 'leaf', 'a cursor above the first module falls back to that module');
+});
+
+
 
 test('composition: the graph child page follows defaultChildLimit', async () => {
   const svc = await svcWith({ defaultChildLimit: 13, 'graph.maxSignalsPerGroup': 10000 });

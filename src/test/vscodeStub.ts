@@ -244,6 +244,9 @@ const api: Record<string, any> = {
       (api.__webviews ??= []).push(panel);
       return panel;
     },
+    registerWebviewViewProvider(_id: string, _provider: unknown, _opts?: unknown) {
+      return noop;
+    },
     showErrorMessage: async () => undefined,
     showInformationMessage: async () => undefined,
     showWarningMessage: async () => undefined,

@@ -145,11 +145,13 @@ test('graphpanel: a per-box search reveals what paging and the signal cap hid', 
   svc.index.addFile('/w/many.v', many);
 
   const { buildHierarchy } = await import('../core/hierarchy');
-  const panels = (vscode as unknown as { __webviews: WebviewPanel[] }).__webviews;
   const flip = () => new Promise((r) => setTimeout(r, 0));
 
   const wideRoot = buildHierarchy(svc.index, 'wide')!.root;
   GraphPanel.show(svc, vscode.Uri.file('/wq'), wideRoot, wideRoot.path);
+  // `vscode.__webviews` is created lazily by the stub, so it only exists after
+  // the first panel is shown: read it here, not before `show`.
+  const panels = (vscode as unknown as { __webviews: WebviewPanel[] }).__webviews;
   const widePanel = panels[panels.length - 1];
   const widePaths = () =>
     (widePanel.__posted.filter((p) => p.type === 'graph').pop()!.graph as {

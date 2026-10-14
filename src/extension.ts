@@ -14,12 +14,12 @@ import {
 import { HdlSemanticTokensProvider } from './vscode/semantic';
 import {
   CompositionTreeProvider,
-  NetsTreeProvider,
   ProblemsTreeProvider,
   type CompositionItem,
-  type NetsItem,
   type ProblemsItem,
 } from './vscode/views';
+import { NetsViewProvider } from './vscode/netsView';
+import { CompositionViewProvider } from './vscode/compView';
 import { GraphPanel } from './vscode/graphPanel';
 import { runGenerateWrapper } from './vscode/generate';
 import { DatabaseService, pickRefreshMode } from './vscode/database';
@@ -43,27 +43,25 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(database);
 
   // --- views -------------------------------------------------------------
-  const composition = new CompositionTreeProvider(svc);
-  const nets = new NetsTreeProvider(svc);
+  const compositionTree = new CompositionTreeProvider(svc);
+  const composition = new CompositionViewProvider(svc);
+  const nets = new NetsViewProvider(svc);
   const problems = new ProblemsTreeProvider(svc);
 
-  const compositionView = vscode.window.createTreeView('hdl.composition', {
-    treeDataProvider: composition,
-    showCollapseAll: true,
-  });
-  const netsView = vscode.window.createTreeView('hdl.nets', { treeDataProvider: nets });
   const problemsView = vscode.window.createTreeView('hdl.problems', { treeDataProvider: problems });
-  context.subscriptions.push(compositionView, netsView, problemsView);
-
-  // Nodes selected (multi-select) in the composition view, in tree order.
-  let selected: HierarchyNode[] = [];
   context.subscriptions.push(
-    compositionView.onDidChangeSelection((e) => {
-      selected = e.selection
-        .map((item) => (item instanceof Object && 'node' in item ? item.node : undefined))
-        .filter((n): n is HierarchyNode => n !== undefined);
+    problemsView,
+    vscode.window.registerWebviewViewProvider('hdl.composition', composition, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
+    vscode.window.registerWebviewViewProvider('hdl.nets', nets, {
+      webviewOptions: { retainContextWhenHidden: true },
     }),
   );
+
+  // Nodes selected in the composition (webview view) - kept empty for generate wrapper usage.
+  let selected: HierarchyNode[] = [];
+
 
   // --- language features -------------------------------------------------
   const selector: vscode.DocumentSelector = LANGUAGES.map((language) => ({ language, scheme: 'file' }));
@@ -81,11 +79,16 @@ export function activate(context: vscode.ExtensionContext): void {
   const syncEditor = (editor: vscode.TextEditor | undefined) => {
     if (!editor || !LANGUAGES.includes(editor.document.languageId)) {
       nets.setContext(undefined, undefined);
+      // Without a configured top this is a no-op; with one it still roots the
+      // composition tree even when the active editor is not HDL.
+      composition.setContext(undefined, undefined);
       return;
     }
     // The nets view resolves the module around the line itself, so it does not
     // need the cursor to be on an instance.
     nets.setContext(editor.document.fileName, editor.selection.active.line);
+    // The composition tree follows the active module unless a top is configured.
+    composition.setContext(editor.document.fileName, editor.selection.active.line);
   };
   context.subscriptions.push(
     vscode.window.onDidChangeActiveTextEditor(syncEditor),
@@ -191,9 +194,10 @@ export function activate(context: vscode.ExtensionContext): void {
     if (!target) {
       return;
     }
-    const item = expandTo(target.fsPath, svc, composition);
+    const item = expandTo(target.fsPath, svc, compositionTree);
     if (item) {
-      await compositionView.reveal(item, { select: true, focus: true, expand: true });
+      // Webview view cannot be revealed via TreeView.reveal; set context instead.
+      composition.setRoot(compositionTree.hierarchyRoot, compositionTree.root);
     }
   });
 
@@ -204,12 +208,6 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     await vscode.env.clipboard.writeText(node.path);
     void vscode.window.setStatusBarMessage(`HDL: copied ${node.path}`, 3000);
-  });
-
-  reg('hdl.connectView.showMoreChildren', (path?: string) => {
-    if (typeof path === 'string') {
-      composition.moreChildren(path);
-    }
   });
 
   // Hierarchy tracing: up walks a signal to its declaration and a port to the
@@ -250,26 +248,27 @@ export function activate(context: vscode.ExtensionContext): void {
   reg('hdl.connectView.traceUp', () => trace('up'));
   reg('hdl.connectView.traceDown', () => trace('down'));
 
-  // `revealInstance` is the click target of the composition and nets rows. The
-  // two row types do not carry the same data - a composition row knows the
-  // hierarchy node it came from, a nets row only knows a line - so both shapes
-  // are handled instead of assuming the node is there.
-  reg('hdl.connectView.revealInstance', async (item: CompositionItem | NetsItem) => {
-    if (!item?.file) {
-      return;
-    }
-    const node = 'node' in item ? item.node : undefined;
-    const target = node ? node.moduleNameRange ?? node.nameRange : undefined;
-    const line = target?.start.line ?? ('line' in item ? item.line : 0);
-    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(item.file));
-    const editor = await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One, preview: true });
-    const position = new vscode.Position(line, 0);
-    editor.selection = new vscode.Selection(position, position);
-    editor.revealRange(
-      target ? range(target) : new vscode.Range(position, position),
-      vscode.TextEditorRevealType.InCenter,
-    );
-  });
+  // `revealInstance` is the click target of the composition rows and (via webview)
+  // the nets rows. Both shapes are handled instead of assuming the node is there.
+  reg(
+    'hdl.connectView.revealInstance',
+    async (item: CompositionItem | { file?: string; line?: number }) => {
+      if (!item?.file) {
+        return;
+      }
+      const node = 'node' in item ? item.node : undefined;
+      const target = node ? node.moduleNameRange ?? node.nameRange : undefined;
+      const line = target?.start.line ?? ('line' in item ? item.line : 0) ?? 0;
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(item.file));
+      const editor = await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One, preview: true });
+      const position = new vscode.Position(line, 0);
+      editor.selection = new vscode.Selection(position, position);
+      editor.revealRange(
+        target ? range(target) : new vscode.Range(position, position),
+        vscode.TextEditorRevealType.InCenter,
+      );
+    },
+  );
 
   // Problems rows open the offending name.
   reg('hdl.connectView.openProblem', async (item: ProblemsItem) => {
