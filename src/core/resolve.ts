@@ -183,9 +183,13 @@ function expandChain(toks: Token[], idx: number): { toks: Token[]; parts: string
     if (prev?.text === ']') {
       // Walked left out of a chain: `...u.g_reg[0].regs` starts at the `u`.
       // Stepping over the index group alone would leave the path at
-      // `g_reg[0].regs`, which no longer names a signal of the module.
+      // `g_reg[0].regs`, which no longer names a signal of the module. Only a
+      // real chain step is walked: a packed dimension in a declaration
+      // (`wire [7:0] name`) is preceded by a type keyword or nothing, and
+      // glomming it would turn the name into `wire.name` and lose the signal.
       const open = findOpen(toks, start - 1);
-      if (open > 0) {
+      const step = open > 0 ? toks[open - 1] : undefined;
+      if (step && (step.kind === 'ident' || step.kind === 'macroRef')) {
         start = open - 1;
         continue;
       }

@@ -345,6 +345,21 @@ test('wordAtPosition: a package-qualified name resolves to the leaf', () => {
   assert.equal(l.slice(w.fullRange.start.character, w.fullRange.end.character), 'cfg::WIDTH');
 });
 
+test('wordAtPosition: a packed dimension in a declaration is not part of the name', () => {
+  // `wire [7:0] name` is one atom: walking left over the packed dimension used
+  // to glom the type keyword on, turning the name into `wire.name` so it no
+  // longer resolved to the signal and definition/tracing on a bus port failed.
+  const src = [
+    'module top (input wire [7:0] a, output wire [WIDTH-1:0] result);',
+    '  wire [7:0] bus;',
+    'endmodule',
+  ].join('\n');
+  const on = (line: number, word: string) => wordAtPosition(src, line, src.split('\n')[line].indexOf(word) + 1)!;
+  assert.equal(on(0, 'a')!.fullPath, 'a');
+  assert.equal(on(0, 'result')!.fullPath, 'result');
+  assert.equal(on(1, 'bus')!.fullPath, 'bus');
+});
+
 test('leafRangeIn: narrows a qualified reference to the renamed leaf', () => {
   // The reference is one range covering `cfg::WIDTH`; the rename must replace
   // only `WIDTH` or the qualifier is lost.
