@@ -207,9 +207,9 @@ header { position:sticky; top:0; padding:6px 8px; background:var(--vscode-sideBa
 .list { padding:2px 0; }
 .row { display:flex; align-items:baseline; gap:8px; padding:2px 8px 2px 4px; cursor:pointer; white-space:nowrap; }
 .row:hover { background:var(--vscode-list-hoverBackground); }
-.nm { flex:0 1 auto; overflow:hidden; text-overflow:ellipsis; }
+.nm { flex:0 1 70%; overflow:hidden; text-overflow:ellipsis; }
 .nm b { color:var(--vscode-list-highlightForeground,var(--vscode-focusBorder)); font-weight:700; }
-.badge { flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; color:var(--vscode-descriptionForeground); font-size:.9em; text-align:right; }
+.badge { flex:1 1 30%; overflow:hidden; text-overflow:ellipsis; color:var(--vscode-descriptionForeground); font-size:.9em; text-align:right; }
 `;
 
 export const SCRIPT = String.raw`

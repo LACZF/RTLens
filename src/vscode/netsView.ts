@@ -156,9 +156,8 @@ header {
 }
 .row:hover { background: var(--vscode-list-hoverBackground); }
 .row.port .nm { color: var(--vscode-symbolIcon-fieldForeground, var(--vscode-foreground)); }
-.nm { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
-.nm b { color: var(--vscode-list-highlightForeground, var(--vscode-focusBorder)); font-weight: 700; }
-.desc { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; color: var(--vscode-descriptionForeground); font-size: 0.9em; }
+.nm { flex: 0 1 70%; overflow: hidden; text-overflow: ellipsis; }
+.desc { flex: 1 1 30%; overflow: hidden; text-overflow: ellipsis; color: var(--vscode-descriptionForeground); font-size: 0.9em; }
 `;
 
 /**
