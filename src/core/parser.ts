@@ -1505,14 +1505,25 @@ export class Parser {
         if (toks[bodyStart]?.text === 'begin' && toks[bodyStart + 1]?.text === ':' &&
             toks[bodyStart + 2] !== undefined) {
           label = toks[bodyStart + 2].text;
+          // Match the block's `end` from the `begin` itself. `matchBlock` reads
+          // the first closer when it starts on a non-opener, so starting after
+          // the label (once `bodyStart` has been stepped past it) locked onto
+          // the `end` of the first inner `always ... begin ... end` and cut the
+          // rest of the loop body - the `assign` that followed a clocked block
+          // was dropped whole.
+          const innerClose = matchBlock(toks, bodyStart, bodyEnd);
+          if (innerClose > bodyStart) {
+            bodyEnd = innerClose;
+          }
           // The label is consumed here: it names the iteration, and the block
           // itself would otherwise be read again as a nested block and name it
           // a second time, leaving the path as `g[0].g`.
           bodyStart += 3;
-        }
-        const innerClose = matchBlock(toks, bodyStart, bodyEnd);
-        if (innerClose > bodyStart) {
-          bodyEnd = innerClose;
+        } else if (toks[bodyStart]?.text === 'begin') {
+          const innerClose = matchBlock(toks, bodyStart, bodyEnd);
+          if (innerClose > bodyStart) {
+            bodyEnd = innerClose;
+          }
         }
       }
     }

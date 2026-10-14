@@ -833,6 +833,36 @@ endmodule`,
   );
 });
 
+test('parser: a statement after an always block inside a generate loop is kept', () => {
+  // `matchBlock` was started after the `begin : label`, so it read the first
+  // closer - the `end` of the first inner `always ... begin ... end` - and cut
+  // the rest of the loop body. An `assign` that followed a clocked block was
+  // dropped whole, so the signal it drives looked undriven in the net list and
+  // the connectivity graph. Only a loop body starting with `begin` was hit.
+  const r = parseSource(
+    '/w/t.sv',
+    `module dut (input wire clk, output wire rdata);
+  genvar i;
+  generate
+    for (i = 0; i < 2; i = i + 1) begin : g
+      wire hit = i == 0;
+      always @(posedge clk) begin
+        rdata <= hit;
+      end
+      assign rdata = hit;
+    end
+  endgenerate
+endmodule`,
+  );
+  const dut = r.modules[0];
+  assert.deepEqual(
+    dut.assigns
+      .filter((a) => a.lhs.some((x) => x.name === 'rdata'))
+      .map((a) => `${a.generate}:${a.inAlways ? 'always' : 'cont'}`),
+    ['g[0]:always', 'g[0]:cont', 'g[1]:always', 'g[1]:cont'],
+  );
+});
+
 test('parser: a generate if and a generate case keep their branch contents', () => {
   const r = parseSource(
     '/w/t.sv',
