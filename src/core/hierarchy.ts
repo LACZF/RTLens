@@ -89,54 +89,99 @@ class Builder {
     return node;
   }
 
+  /**
+   * Expand `node`'s subtree.
+   *
+   * Iterative on purpose: the Composition tree lifts the depth cap, so a design
+   * with a deep chain of distinct modules must not overflow the JS call stack.
+   * An explicit frame stack reproduces the old depth-first order exactly (the
+   * child frame sits on top and is finished before the parent moves on), so the
+   * truncation points of a budget cut are unchanged. The set of module names
+   * along the active path gives cycle detection in O(1) and, unlike the array it
+   * replaces, is not copied once per level - a deep chain stays linear instead
+   * of quadratic.
+   */
   private expand(node: HierarchyNode, def: ModuleDef, pathModules: string[], scope: MapScope): void {
-    const children: HierarchyNode[] = [];
-    node.children = children;
-    if (node.depth >= this.maxDepth) {
-      // The depth limit cut this subtree off; say so on the node and on the
-      // result, so callers can tell a leaf from an unexpanded instance.
-      if (def.instances.length > 0) {
-        node.truncated = true;
-        this.truncated = true;
-      }
-      return;
+    interface Frame {
+      node: HierarchyNode;
+      def: ModuleDef;
+      scope: MapScope;
+      /** Next instance of `def` to visit. */
+      i: number;
+      /** Whether the frame's `children` array and depth cap were handled. */
+      entered: boolean;
+      /** Name the frame put on `onPath`, to take off again when it is done. */
+      key?: string;
     }
-    for (const inst of def.instances) {
+    const onPath = new Set(pathModules);
+    const stack: Frame[] = [{ node, def, scope, i: 0, entered: false }];
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1];
+      if (!frame.entered) {
+        frame.entered = true;
+        frame.node.children = [];
+        if (frame.node.depth >= this.maxDepth) {
+          // The depth limit cut this subtree off; say so on the node and on the
+          // result, so callers can tell a leaf from an unexpanded instance.
+          if (frame.def.instances.length > 0) {
+            frame.node.truncated = true;
+            this.truncated = true;
+          }
+          stack.pop();
+          if (frame.key !== undefined) {
+            onPath.delete(frame.key);
+          }
+          continue;
+        }
+      }
+      if (frame.i >= frame.def.instances.length) {
+        stack.pop();
+        if (frame.key !== undefined) {
+          onPath.delete(frame.key);
+        }
+        continue;
+      }
       if (this.nodeCount >= this.budget) {
         this.truncated = true;
-        node.truncated = true;
-        return;
+        frame.node.truncated = true;
+        stack.pop();
+        if (frame.key !== undefined) {
+          onPath.delete(frame.key);
+        }
+        continue;
       }
+      const inst = frame.def.instances[frame.i++];
       this.nodeCount++;
       const instPath = inst.genPrefix ? `${inst.genPrefix}.${inst.name}` : inst.name;
-      const childPath = node.path ? `${node.path}.${instPath}` : instPath;
-      const childDef = this.index.resolveModule(inst.moduleName, def.file);
-      const onPath = pathModules.includes(inst.moduleName);
+      const childPath = frame.node.path ? `${frame.node.path}.${instPath}` : instPath;
+      const childDef = this.index.resolveModule(inst.moduleName, frame.def.file);
+      const onCycle = onPath.has(inst.moduleName);
       const child: HierarchyNode = {
         path: childPath,
         instName: instPath,
         moduleName: inst.moduleName,
-        depth: node.depth + 1,
-        parentPath: node.path,
-        file: def.file,
+        depth: frame.node.depth + 1,
+        parentPath: frame.node.path,
+        file: frame.def.file,
         nameRange: inst.nameRange,
         moduleNameRange: inst.moduleNameRange,
         range: inst.range,
         children: [],
         unresolved: !childDef,
-        cycle: onPath,
+        cycle: onCycle,
         generate: inst.genPrefix,
       };
-      if (onPath) {
+      frame.node.children!.push(child);
+      if (onCycle) {
         child.truncated = true;
       } else {
         this.unresolved += childDef ? 0 : 1;
         if (childDef) {
-          const childScope = this.childScope(scope, def, childDef, inst.paramOverrides);
-          this.expand(child, childDef, [...pathModules, inst.moduleName], childScope);
+          const childScope = this.childScope(frame.scope, frame.def, childDef, inst.paramOverrides);
+          onPath.add(inst.moduleName);
+          stack.push({ node: child, def: childDef, scope: childScope, i: 0, entered: false, key: inst.moduleName });
         }
       }
-      children.push(child);
     }
   }
 
@@ -444,18 +489,54 @@ export function findByPath(root: HierarchyNode, path: string): HierarchyNode | u
   return withoutIndices === path ? undefined : findNodeByPath(root, withoutIndices);
 }
 
-function findNodeByPath(root: HierarchyNode, path: string): HierarchyNode | undefined {
-  if (root.path === path) {
-    return root;
+/**
+ * The one child of `node` whose own segment is the next step of `path`.
+ *
+ * `path` must sit below `node.path`. A child is matched on just its segment -
+ * the text after `node.path + '.'` - not with a `startsWith` of its full path,
+ * which would rescan the entire prefix once per level and make a deep chain
+ * quadratic. Comparing the segment in place keeps navigation O(path length).
+ */
+function childOnPath(node: HierarchyNode, path: string): HierarchyNode | undefined {
+  // Below `node.path` the path must continue with a `.`; anything else is not a
+  // descendant.
+  if (path.length <= node.path.length || path.charCodeAt(node.path.length) !== 46 /* '.' */) {
+    return undefined;
   }
-  const prefix = root.path + '.';
-  for (const c of root.children ?? []) {
-    if (c.path === path || c.path.startsWith(prefix)) {
-      const hit = findNodeByPath(c, path);
-      if (hit) {
-        return hit;
+  const start = node.path.length + 1;
+  for (const c of node.children ?? []) {
+    const end = c.path.length;
+    if (end <= start) {
+      continue;
+    }
+    // The child's segment must be exactly path[start, end) and end on a
+    // segment boundary, so `g[0]` never swallows the `g[0].u` route.
+    if (path.length !== end && path.charCodeAt(end) !== 46 /* '.' */) {
+      continue;
+    }
+    let match = true;
+    for (let k = start; k < end; k++) {
+      if (path.charCodeAt(k) !== c.path.charCodeAt(k)) {
+        match = false;
+        break;
       }
     }
+    if (match) {
+      return c;
+    }
+  }
+  return undefined;
+}
+
+function findNodeByPath(root: HierarchyNode, path: string): HierarchyNode | undefined {
+  // Iterative and segment-wise so an unlimited-depth tree neither overflows the
+  // call stack nor rescans the prefix at every level.
+  let node: HierarchyNode | undefined = root;
+  while (node) {
+    if (node.path === path) {
+      return node;
+    }
+    node = childOnPath(node, path);
   }
   return undefined;
 }
@@ -501,16 +582,16 @@ export function subtreeDepth(node: HierarchyNode): number {
 
 /** The chain of nodes from the root down to `path`, inclusive. */
 export function pathChain(root: HierarchyNode, path: string): HierarchyNode[] {
-  if (root.path === path) {
-    return [root];
-  }
-  for (const c of root.children ?? []) {
-    if (path === c.path || path.startsWith(c.path + '.')) {
-      const head = pathChain(c, path);
-      if (head.length) {
-        return [root, ...head];
-      }
+  // Iterative and segment-wise, like `findNodeByPath`: the chain is a single
+  // line, so following one child per level reaches `path` (or proves it absent).
+  const chain: HierarchyNode[] = [];
+  let node: HierarchyNode | undefined = root;
+  while (node) {
+    chain.push(node);
+    if (node.path === path) {
+      return chain;
     }
+    node = childOnPath(node, path);
   }
   return [];
 }

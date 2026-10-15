@@ -58,7 +58,7 @@ export class CompositionTreeProvider implements vscode.TreeDataProvider<Composit
         return;
       }
       this.autoKey = key;
-      this.setRoot(this.svc.hierarchy(def.name, def.file)?.root, def.name);
+      this.setRoot(this.svc.compositionHierarchy(def.name, def.file)?.root, def.name);
       return;
     }
     if (!file) {
@@ -76,7 +76,7 @@ export class CompositionTreeProvider implements vscode.TreeDataProvider<Composit
       return;
     }
     this.autoKey = key;
-    this.setRoot(this.svc.hierarchy(mod.name, file)?.root, mod.name);
+    this.setRoot(this.svc.compositionHierarchy(mod.name, file)?.root, mod.name);
   }
 
   get root(): string | undefined {
@@ -180,7 +180,7 @@ export class CompositionTreeProvider implements vscode.TreeDataProvider<Composit
     if (!this.rootModule) {
       return undefined;
     }
-    const res = this.svc.hierarchy(this.rootModule);
+    const res = this.svc.compositionHierarchy(this.rootModule);
     this.cached = res?.root;
     return this.cached;
   }

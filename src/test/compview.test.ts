@@ -277,3 +277,44 @@ test('composition webview: a highlight marks only the current module row and scr
   ui.message({ type: 'highlightPath', path: '' });
   assert.equal(drawn(ui.list).filter((r) => r.classList.contains('sel')).length, 0);
 });
+
+test('composition webview: collapsing an ancestor hides its whole subtree, grandchildren included', () => {
+  // Hidden rows still join the ancestor stack: if they did not, a grandchild
+  // seen after a hidden sibling would lose its collapsed ancestor and be drawn.
+  const rows = [
+    row('top', '', '', 'top', 0, 1),
+    row('top.a', 'top', 'a', 'mid', 1, 2),
+    row('top.a.b', 'top.a', 'b', 'mid', 2, 1),
+    row('top.a.b.d', 'top.a.b', 'd', 'leaf', 3, 0),
+    row('top.a.c', 'top.a', 'c', 'leaf', 2, 0),
+  ];
+  const ui = start(rows);
+  fire(chevron(drawn(ui.list)[0]), 'click'); // expand top
+  fire(chevron(drawn(ui.list)[1]), 'click'); // expand top.a
+  fire(chevron(drawn(ui.list)[2]), 'click'); // expand top.a.b
+  assert.deepEqual(
+    drawn(ui.list).map(rowText),
+    ['top', 'a : mid', 'b : mid', 'd : leaf', 'c : leaf'],
+    'both levels are open',
+  );
+
+  fire(chevron(drawn(ui.list)[1]), 'click'); // collapse top.a
+  assert.deepEqual(
+    drawn(ui.list).map(rowText),
+    ['top', 'a : mid'],
+    'a collapsed row hides every descendant, not just its direct children',
+  );
+});
+
+test('composition webview: thousands of siblings expand and collapse in one click', () => {
+  const wide = [row('top', '', '', 'top', 0, 4000)];
+  for (let i = 0; i < 4000; i++) wide.push(row(`top.u${i}`, 'top', `u${i}`, 'leaf', 1, 0));
+  const ui = start(wide);
+  assert.equal(drawn(ui.list).length, 1, 'the wide level starts collapsed');
+
+  fire(chevron(drawn(ui.list)[0]), 'click');
+  assert.equal(drawn(ui.list).length, 4001, 'one click lists every instance, with no paging');
+
+  fire(chevron(drawn(ui.list)[0]), 'click');
+  assert.equal(drawn(ui.list).length, 1, 'and one click folds them all away again');
+});

@@ -292,6 +292,42 @@ test("composition: its depth and instance budget are its own settings, unlimited
   );
 });
 
+test('composition: the provider roots at the composition limits, ignoring the global depth cap', async () => {
+  // The reveal command builds its root through this provider, so it has to use
+  // the same (unlimited) budget as the view - a global cap here would hand the
+  // webview a truncated tree on reveal.
+  const { findByPath } = await import('../core/hierarchy');
+  const src = [
+    'module m0 (); m1 u (); endmodule',
+    'module m1 (); m2 u (); endmodule',
+    'module m2 (); m3 u (); endmodule',
+    'module m3 (); endmodule',
+  ].join('\n');
+  const svc = await svcWith({ maxDepth: 1 });
+  svc.index.addFile('/w/chain.v', src);
+  const { CompositionTreeProvider } = await import('../vscode/views');
+  const tree = new CompositionTreeProvider(svc);
+  tree.setContext('/w/chain.v', 0);
+  assert.equal(tree.root, 'm0', 'the tree roots at the active module');
+  assert.ok(
+    findByPath(tree.hierarchyRoot!, 'm0.u.u.u'),
+    'the provider expands past the global depth cap',
+  );
+});
+
+test('composition: a cut subtree is marked, not shown as a leaf', async () => {
+  const svc = await svcWith();
+  const { CompositionViewProvider } = await import('../vscode/compView');
+  const { buildHierarchy } = await import('../core/hierarchy');
+  svc.index.addFile('/w/cyc.v', 'module a (); a u (); endmodule\n');
+  const root = buildHierarchy(svc.index, 'a', { maxDepth: 0, maxInstances: 0 })!.root;
+  const provider = new CompositionViewProvider(svc);
+  provider.setRoot(root, 'a');
+  const row = provider.modelFor('a.u')!;
+  assert.equal(row.truncated, true, 'the recursive instance is flagged');
+  assert.match(row.badge, /cycle/, 'and its badge says why it has no children');
+});
+
 test('composition: the graph child page follows defaultChildLimit', async () => {
   const svc = await svcWith({ defaultChildLimit: 13, 'graph.maxSignalsPerGroup': 10000 });
   const { GraphPanel } = await import('../vscode/graphPanel');

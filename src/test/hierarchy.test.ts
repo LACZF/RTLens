@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 
 import { HdlIndex } from '../core/index';
-import { containingDesign, signalWidth, findByPath } from '../core/hierarchy';
+import { buildHierarchy, containingDesign, signalWidth, findByPath, pathChain } from '../core/hierarchy';
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const FIXTURES = path.join(ROOT, 'test', 'fixtures');
@@ -81,6 +81,87 @@ test('containingDesign forwards its depth/budget options into the built tree', (
   assert.equal(full!.node.path, 'm0.u.u.u', 'so the containing node is found');
   const shallow = containingDesign(index, 'm3', undefined, [], { maxDepth: 1 });
   assert.equal(shallow, undefined, 'a shallow limit cannot reach the module, so there is no chain to return');
+});
+
+test('hierarchy: a wide module lists every instance when the budget is unlimited', () => {
+  // The Composition tree lifts both caps, so a module with tens of thousands of
+  // instances must expand in full, not stop at the historic 20000 budget.
+  const n = 30000;
+  let src = 'module leaf (); endmodule\nmodule wide ();\n';
+  for (let i = 0; i < n; i++) {
+    src += `  leaf u${i} ();\n`;
+  }
+  src += 'endmodule\n';
+  const index = new HdlIndex();
+  index.addFile('/w/wide.v', src);
+  const res = buildHierarchy(index, 'wide', { maxDepth: 0, maxInstances: 0 })!;
+  assert.equal(res.totalNodes, n, 'every instance is a node');
+  assert.equal(res.truncated, false, 'nothing is cut off');
+  assert.equal(res.root.children!.length, n, 'and they all hang off the root');
+  assert.equal(findByPath(res.root, `wide.u${n - 1}`)?.moduleName, 'leaf', 'the last one is reachable');
+});
+
+test('hierarchy: a deep chain builds and navigates without exhausting the stack', () => {
+  // Depth 0 means no limit; the builder walks this iteratively so a chain of
+  // distinct modules far past the call-stack size still comes out whole.
+  const n = 20000;
+  let src = '';
+  for (let i = 0; i < n; i++) {
+    src += i < n - 1 ? `module m${i} (); m${i + 1} u (); endmodule\n` : `module m${i} (); endmodule\n`;
+  }
+  const index = new HdlIndex();
+  index.addFile('/w/chain.v', src);
+  const res = buildHierarchy(index, 'm0', { maxDepth: 0, maxInstances: 0 })!;
+  assert.equal(res.totalNodes, n - 1, 'every link is a node');
+  assert.equal(res.truncated, false, 'the depth cap is lifted');
+
+  // Both navigation helpers descend the whole chain (segment-wise, so they stay
+  // linear instead of rescanning the path at every level).
+  const deepest = 'm0' + '.u'.repeat(n - 1);
+  assert.equal(findByPath(res.root, deepest)?.moduleName, `m${n - 1}`, 'findByPath reaches the bottom');
+  assert.equal(pathChain(res.root, deepest).length, n, 'pathChain walks the whole chain');
+  assert.equal(findByPath(res.root, 'm0.u.nope'), undefined, 'a path that veers off is not found');
+});
+
+test('hierarchy: a depth cap does not mistake a later same-named sibling for a cycle', () => {
+  // The iterative builder must drop a frame's name from the active-path set on
+  // every exit, including the depth-cap exit - otherwise the second `mid` here
+  // would be read as a recursive instantiation.
+  const index = new HdlIndex();
+  index.addFile(
+    '/w/s.v',
+    [
+      'module leaf (); endmodule',
+      'module mid (); leaf x (); endmodule',
+      'module top (); mid a (); mid b (); endmodule',
+    ].join('\n'),
+  );
+  const res = buildHierarchy(index, 'top', { maxDepth: 1 })!;
+  assert.equal(res.totalNodes, 2, 'both mid instances are created');
+  const a = findByPath(res.root, 'top.a')!;
+  const b = findByPath(res.root, 'top.b')!;
+  assert.equal(a.cycle, false, 'the first mid is not a cycle');
+  assert.equal(b.cycle, false, 'nor is the second');
+  assert.equal(a.truncated, true, 'the depth cap cut both subtrees');
+  assert.equal(b.truncated, true);
+});
+
+test('findByPath: a sibling whose name merely prefixes the target is not mistaken for it', () => {
+  // The descent matches one whole instance segment at a time; a naive prefix
+  // match would stop at `top.u` for `top.u_extra`.
+  const index = new HdlIndex();
+  index.addFile(
+    '/w/p.v',
+    'module leaf (); endmodule\nmodule top (); leaf u (); leaf u_extra (); endmodule\n',
+  );
+  const root = buildHierarchy(index, 'top')!.root;
+  assert.equal(findByPath(root, 'top.u_extra')?.path, 'top.u_extra', 'the longer sibling wins');
+  assert.equal(findByPath(root, 'top.u')?.path, 'top.u', 'and the short one still resolves');
+  assert.deepEqual(
+    pathChain(root, 'top.u_extra').map((n) => n.path),
+    ['top', 'top.u_extra'],
+    'the chain follows the exact segment',
+  );
 });
 
 test('hierarchy: the width of a signal is every dimension it was declared with', () => {

@@ -381,7 +381,7 @@ function expandTo(
   if (!def) {
     return;
   }
-  const result = svc.hierarchy(def.name, def.file);
+  const result = svc.compositionHierarchy(def.name, def.file);
   if (!result) {
     return;
   }

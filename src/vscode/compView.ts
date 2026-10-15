@@ -19,6 +19,8 @@ export interface CompRow {
   depth: number;
   file?: string;
   unresolved: boolean;
+  /** The subtree was cut off by a limit or a cycle, not a true leaf. */
+  truncated: boolean;
 }
 
 /** Flattened tree rows with depth, drawn and filtered client-side. */
@@ -104,9 +106,11 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
   /** Path of the first (nearest) row whose module is `name`, root included. */
   private locate(root: HierarchyNode, name: string): string | undefined {
     if (root.moduleName === name) return root.path;
+    // Index-pointer BFS: `queue.shift()` is O(n) and this runs on every cursor
+    // move, so a design with thousands of instances turned into O(n^2).
     const queue: HierarchyNode[] = [root];
-    while (queue.length) {
-      const node = queue.shift()!;
+    for (let head = 0; head < queue.length; head++) {
+      const node = queue[head];
       for (const child of node.children ?? []) {
         if (child.moduleName === name) return child.path;
         queue.push(child);
@@ -184,13 +188,21 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     }
     this.cachedRoot = root;
     const rows: CompRow[] = [];
-    const walk = (node: HierarchyNode, depth: number, parentPath: string) => {
+    // Iterative pre-order walk: the Composition tree lifts the depth cap, so a
+    // deep chain must not overflow the call stack. Children are pushed in
+    // reverse so the flat rows keep their parent-before-child order.
+    const stack: { node: HierarchyNode; depth: number; parentPath: string }[] = [
+      { node: root, depth: 0, parentPath: '' },
+    ];
+    while (stack.length > 0) {
+      const { node, depth, parentPath } = stack.pop()!;
       const def = this.svc.index.resolveModule(node.moduleName, node.file);
       const childCount = node.children?.length ?? 0;
       const paramCount = node.params ? Object.keys(node.params).length : 0;
       const parts: string[] = [];
       if (childCount) parts.push(`${childCount} child${childCount === 1 ? '' : 'ren'}`);
       if (paramCount) parts.push(`${paramCount} param${paramCount === 1 ? '' : 's'}`);
+      if (node.truncated) parts.push(node.cycle ? 'cycle' : 'truncated');
       if (!def) parts.push('module not found');
       const isRoot = depth === 0;
       rows.push({
@@ -206,12 +218,13 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
         depth,
         file: node.file,
         unresolved: !def,
+        truncated: !!node.truncated,
       });
-      for (const c of node.children ?? []) {
-        walk(c, depth + 1, node.path);
+      const children = node.children ?? [];
+      for (let i = children.length - 1; i >= 0; i--) {
+        stack.push({ node: children[i], depth: depth + 1, parentPath: node.path });
       }
-    };
-    walk(root, 0, '');
+    }
     this.payload = {
       rootModule: root.moduleName,
       rootPath: root.path,
@@ -358,16 +371,6 @@ export const SCRIPT = String.raw`
     for (var i = 0; i < rows.length; i++) byPath[rows[i].path] = rows[i];
   }
 
-  function ancestorsCollapsed(row) {
-    var p = row.parentPath;
-    while (p) {
-      if (collapsed[p]) return true;
-      var pr = byPath[p];
-      p = pr ? pr.parentPath : '';
-    }
-    return false;
-  }
-
   function expandAncestors(path) {
     var r = byPath[path];
     var p = r ? r.parentPath : '';
@@ -416,65 +419,87 @@ export const SCRIPT = String.raw`
     var query = (input.value || '').trim();
     var found = query ? search(query) : null;
     var shown = 0;
+    // Ancestor stack for the collapse test. Rows arrive parent-before-child, so
+    // a stack walking down the flat list decides visibility in O(1) per row
+    // instead of climbing every row's parent chain - which matters once a wide
+    // module puts thousands of rows in the list. hidden is the number of
+    // collapsed ancestors currently open, and a row is skipped while it is > 0.
+    var stack = [];
+    var hidden = 0;
 
     for (var i = 0; i < rows.length; i++) {
       var r = rows[i];
       var m = null;
+      var hide = false;
       if (found) {
         if (!found.keep[r.path]) continue;
         m = found.matched[r.path] || null;
-      } else if (ancestorsCollapsed(r)) {
-        continue;
+      } else {
+        while (stack.length && stack[stack.length - 1].p !== r.parentPath) {
+          if (stack.pop().c) hidden -= 1;
+        }
+        hide = hidden > 0;
       }
-      shown += 1;
 
-      var el = document.createElement('div');
-      el.setAttribute('class', r.path === selected ? 'row sel' : 'row');
-      el.setAttribute('title', r.badge);
+      if (!hide) {
+        shown += 1;
 
-      var indent = document.createElement('span');
-      indent.setAttribute('class', 'indent');
-      indent.style.width = (r.depth * 14) + 'px';
-      el.appendChild(indent);
+        var el = document.createElement('div');
+        el.setAttribute('class', r.path === selected ? 'row sel' : 'row');
+        el.setAttribute('title', r.badge);
 
-      var tw = document.createElement('span');
-      tw.setAttribute('class', r.childCount > 0 ? 'tw' : 'tw leaf');
-      if (r.childCount > 0) {
-        // While searching the tree is forced open so every match is visible.
-        tw.textContent = found ? '\u25BC' : (collapsed[r.path] ? '\u25B6' : '\u25BC');
+        var indent = document.createElement('span');
+        indent.setAttribute('class', 'indent');
+        indent.style.width = (r.depth * 14) + 'px';
+        el.appendChild(indent);
+
+        var tw = document.createElement('span');
+        tw.setAttribute('class', r.childCount > 0 ? 'tw' : 'tw leaf');
+        if (r.childCount > 0) {
+          // While searching the tree is forced open so every match is visible.
+          tw.textContent = found ? '\u25BC' : (collapsed[r.path] ? '\u25B6' : '\u25BC');
+          (function (path) {
+            tw.addEventListener('click', function (ev) {
+              ev.stopPropagation();
+              toggle(path);
+            });
+          })(r.path);
+        }
+        el.appendChild(tw);
+
+        var nm = document.createElement('span');
+        nm.setAttribute('class', 'nm');
+        if (r.depth === 0) {
+          appendName(nm, r.moduleName, m ? m.mod : null);
+        } else {
+          appendName(nm, r.instName, m ? m.inst : null);
+          nm.appendChild(document.createTextNode(' : '));
+          appendName(nm, r.moduleName, m ? m.mod : null);
+        }
+        el.appendChild(nm);
+
+        var badge = document.createElement('span');
+        badge.setAttribute('class', 'badge');
+        badge.textContent = r.badge;
+        el.appendChild(badge);
+
         (function (path) {
-          tw.addEventListener('click', function (ev) {
-            ev.stopPropagation();
-            toggle(path);
+          el.addEventListener('click', function () {
+            vscode.postMessage({ type: 'open', path: path });
           });
         })(r.path);
+
+        els[r.path] = el;
+        list.appendChild(el);
       }
-      el.appendChild(tw);
 
-      var nm = document.createElement('span');
-      nm.setAttribute('class', 'nm');
-      if (r.depth === 0) {
-        appendName(nm, r.moduleName, m ? m.mod : null);
-      } else {
-        appendName(nm, r.instName, m ? m.inst : null);
-        nm.appendChild(document.createTextNode(' : '));
-        appendName(nm, r.moduleName, m ? m.mod : null);
+      // Every row joins the stack, hidden or not, so a later sibling still sees
+      // its ancestors; a hidden row's own collapse just keeps hidden positive.
+      if (!found) {
+        var c = collapsed[r.path] ? 1 : 0;
+        hidden += c;
+        stack.push({ p: r.path, c: c });
       }
-      el.appendChild(nm);
-
-      var badge = document.createElement('span');
-      badge.setAttribute('class', 'badge');
-      badge.textContent = r.badge;
-      el.appendChild(badge);
-
-      (function (path) {
-        el.addEventListener('click', function () {
-          vscode.postMessage({ type: 'open', path: path });
-        });
-      })(r.path);
-
-      els[r.path] = el;
-      list.appendChild(el);
     }
 
     if (!shown) {
@@ -502,7 +527,15 @@ export const SCRIPT = String.raw`
     }
     if (m.type === 'highlightPath') {
       // The current module's row: mark it, open the path down to it and scroll.
-      selected = m.path || '';
+      var next = m.path || '';
+      // Cursor moves inside one module fire this repeatedly; if the row is
+      // already drawn and marked, redrawing a wide expanded level every time
+      // would stutter, so only the scroll is repeated.
+      if (next === selected && els[next]) {
+        els[next].scrollIntoView({ block: 'center' });
+        return;
+      }
+      selected = next;
       if (selected) {
         expandAncestors(selected);
         delete collapsed[selected];
