@@ -251,7 +251,8 @@
       "rtlens": [
         {
           "id": "hdl.composition",
-          "name": "Composition"
+          "name": "Composition",
+          "type": "webview"
         },
         {
           "id": "hdl.nets",

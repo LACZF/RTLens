@@ -128,6 +128,59 @@ test('composition: roots at the configured top, else at the active module', asyn
 
 
 
+test('composition webview: a row click jumps to its instance, not line 0', async () => {
+  const svc = await svcWith({ topModules: ['top'] });
+  const { CompositionViewProvider } = await import('../vscode/compView');
+  const { buildHierarchy } = await import('../core/hierarchy');
+
+  const src =
+    'module leaf (input wire a, output wire s); assign s = a; endmodule\n' +
+    'module top (input wire i, output wire o);\n' +
+    '  leaf u (.a(i), .s(o));\n' +
+    'endmodule\n';
+  svc.index.addFile('/w/top.v', src);
+  const root = buildHierarchy(svc.index, 'top')!.root;
+
+  const provider = new CompositionViewProvider(svc);
+  provider.setRoot(root, 'top');
+
+  let onMsg: ((m: unknown) => void) | undefined;
+  provider.resolveWebviewView({
+    webview: {
+      options: {},
+      html: '',
+      onDidReceiveMessage: (cb: (m: unknown) => void) => {
+        onMsg = cb;
+        return { dispose() {} };
+      },
+      postMessage: async () => undefined,
+    },
+  } as unknown as import('vscode').WebviewView);
+
+  const cmds = vscode.commands as unknown as { executeCommand: (id: string, ...a: unknown[]) => unknown };
+  const original = cmds.executeCommand;
+  const calls: { id: string; args: unknown[] }[] = [];
+  cmds.executeCommand = (id: string, ...args: unknown[]) => {
+    calls.push({ id, args });
+    return undefined;
+  };
+  try {
+    onMsg!({ type: 'open', path: 'top.u' });
+  } finally {
+    cmds.executeCommand = original;
+  }
+
+  assert.equal(calls.length, 1, 'clicking a row asks the host to open it');
+  assert.equal(calls[0].id, 'hdl.connectView.revealInstance');
+  const arg = calls[0].args[0] as { file?: string; node?: { nameRange?: unknown; moduleNameRange?: unknown } };
+  assert.equal(arg.file, '/w/top.v', 'the jump uses the parent file that holds the instantiation');
+  assert.ok(arg.node, 'the full instance node travels so the command can find its name range');
+  assert.ok(
+    arg.node!.nameRange || arg.node!.moduleNameRange,
+    'the node carries a range, so the jump lands on the instance and not line 0',
+  );
+});
+
 test('composition: the graph child page follows defaultChildLimit', async () => {
   const svc = await svcWith({ defaultChildLimit: 13, 'graph.maxSignalsPerGroup': 10000 });
   const { GraphPanel } = await import('../vscode/graphPanel');

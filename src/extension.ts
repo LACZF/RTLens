@@ -19,6 +19,7 @@ import {
   type ProblemsItem,
 } from './vscode/views';
 import { NetsViewProvider } from './vscode/netsView';
+import { CompositionViewProvider } from './vscode/compView';
 import { GraphPanel } from './vscode/graphPanel';
 import { runGenerateWrapper } from './vscode/generate';
 import { DatabaseService, pickRefreshMode } from './vscode/database';
@@ -43,31 +44,23 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // --- views -------------------------------------------------------------
   const compositionTree = new CompositionTreeProvider(svc);
+  const composition = new CompositionViewProvider(svc);
   const nets = new NetsViewProvider(svc);
   const problems = new ProblemsTreeProvider(svc);
 
-  const compositionView = vscode.window.createTreeView('hdl.composition', {
-    treeDataProvider: compositionTree,
-    showCollapseAll: true,
-  });
   const problemsView = vscode.window.createTreeView('hdl.problems', { treeDataProvider: problems });
   context.subscriptions.push(
-    compositionView,
     problemsView,
+    vscode.window.registerWebviewViewProvider('hdl.composition', composition, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
     vscode.window.registerWebviewViewProvider('hdl.nets', nets, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
   );
 
-  // Nodes selected (multi-select) in the composition tree, in tree order.
+  // Nodes selected in the composition (webview view) - kept empty for generate wrapper usage.
   let selected: HierarchyNode[] = [];
-  context.subscriptions.push(
-    compositionView.onDidChangeSelection((e) => {
-      selected = e.selection
-        .map((item) => (item instanceof Object && 'node' in item ? item.node : undefined))
-        .filter((n): n is HierarchyNode => n !== undefined);
-    }),
-  );
 
 
   // --- language features -------------------------------------------------
@@ -88,14 +81,14 @@ export function activate(context: vscode.ExtensionContext): void {
       nets.setContext(undefined, undefined);
       // Without a configured top this is a no-op; with one it still roots the
       // composition tree even when the active editor is not HDL.
-      compositionTree.setContext(undefined, undefined);
+      composition.setContext(undefined, undefined);
       return;
     }
     // The nets view resolves the module around the line itself, so it does not
     // need the cursor to be on an instance.
     nets.setContext(editor.document.fileName, editor.selection.active.line);
     // The composition tree follows the active module unless a top is configured.
-    compositionTree.setContext(editor.document.fileName, editor.selection.active.line);
+    composition.setContext(editor.document.fileName, editor.selection.active.line);
   };
   context.subscriptions.push(
     vscode.window.onDidChangeActiveTextEditor(syncEditor),
@@ -139,7 +132,7 @@ export function activate(context: vscode.ExtensionContext): void {
       { location: vscode.ProgressLocation.Window, title: 'HDL: reindexing workspace' },
       () => svc.refresh(),
     );
-    compositionTree.refresh();
+    composition.refresh();
     problems.refresh();
     syncEditor(vscode.window.activeTextEditor);
   });
@@ -167,7 +160,7 @@ export function activate(context: vscode.ExtensionContext): void {
         context.extensionUri,
         node,
         node.path,
-        item ? compositionTree.hierarchyRoot ?? node : node,
+        item ? composition.hierarchyRoot ?? node : node,
       );
     }
   });
@@ -186,14 +179,14 @@ export function activate(context: vscode.ExtensionContext): void {
       svc,
       context.extensionUri,
       item.node,
-      compositionTree.root ?? item.node.path,
-      compositionTree.hierarchyRoot ?? item.node,
+      composition.root ?? item.node.path,
+      composition.hierarchyRoot ?? item.node,
     );
   });
 
   reg('hdl.connectView.generateWrapper', async (item?: CompositionItem) => {
     const selection = item ? [item.node] : selected;
-    await runGenerateWrapper(svc, selection.length ? selection : editorNodes(svc), compositionTree.hierarchyRoot);
+    await runGenerateWrapper(svc, selection.length ? selection : editorNodes(svc), composition.hierarchyRoot);
   });
 
   reg('hdl.connectView.revealInComposition', async (uri?: vscode.Uri) => {
@@ -203,7 +196,10 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     const item = expandTo(target.fsPath, svc, compositionTree);
     if (item) {
-      await compositionView.reveal(item, { select: true, focus: true, expand: true });
+      // Webview view cannot be revealed via TreeView.reveal; re-root it at the
+      // module and scroll to the row.
+      composition.setRoot(compositionTree.hierarchyRoot, compositionTree.root);
+      composition.reveal(item.node.path);
     }
   });
 
@@ -258,7 +254,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // the nets rows. Both shapes are handled instead of assuming the node is there.
   reg(
     'hdl.connectView.revealInstance',
-    async (item: CompositionItem | { file?: string; line?: number }) => {
+    async (item: CompositionItem | { file?: string; line?: number; node?: HierarchyNode }) => {
       if (!item?.file) {
         return;
       }
