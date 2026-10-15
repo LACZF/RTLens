@@ -255,17 +255,24 @@ test('composition webview: follows the editor by highlighting the current module
   assert.equal(pinnedPosted[pinnedPosted.length - 1].path, 'top', 'the root module highlights itself');
 });
 
-test('composition webview: points at an instantiation by highlighting the instance row', async () => {
+test('composition webview: points at an instantiation or its connections to highlight the instance row', async () => {
   // Mirrors the real chip_top fixture: `datapath #(...)` puts the instantiated
-  // module name and the instance name on different lines.
+  // module name and the instance name on different lines, and the port
+  // connections `.port(expr)` span further lines still.
   const src =
-    'module control (input wire clk); endmodule\n' +
-    'module datapath (input wire clk); endmodule\n' +
+    'module control (input wire clk, input wire busy); endmodule\n' +
+    'module datapath (input wire clk, input wire a); endmodule\n' +
     'module chip_top (input wire clk);\n' +
-    '  control u_ctrl (.clk(clk));\n' +
+    '  control u_ctrl (\n' +
+    '    .clk(clk),\n' +
+    '    .busy(busy)\n' +
+    '  );\n' +
     '  datapath #(\n' +
     '    .WIDTH(8)\n' +
-    '  ) u_dpath (.clk(clk));\n' +
+    '  ) u_dpath (\n' +
+    '    .clk(clk),\n' +
+    '    .a(operand_a)\n' +
+    '  );\n' +
     'endmodule\n';
   const svc = await svcWith();
   svc.index.addFile('/w/chip_top.v', src);
@@ -288,21 +295,29 @@ test('composition webview: points at an instantiation by highlighting the instan
   const mod = svc.index.resolveModule('chip_top')!;
   const ctrl = mod.instances.find((i) => i.name === 'u_ctrl')!;
   const dpath = mod.instances.find((i) => i.name === 'u_dpath')!;
+  const busy = ctrl.connections.find((c) => c.portName === 'busy')!;
+  const a = dpath.connections.find((c) => c.portName === 'a')!;
   const at = (r: { start: { line: number; character: number } }) => [r.start.line, r.start.character] as const;
 
-  // Cursor on the instance name: that instance row, not the module.
+  // Cursor on the instance name / module name: that instance row.
   provider.setContext('/w/chip_top.v', ...at(ctrl.nameRange));
   assert.equal(lastPath(), 'chip_top.u_ctrl', 'pointing at u_ctrl highlights its row');
-
-  // Cursor on the instantiated module name: same instance row.
   provider.setContext('/w/chip_top.v', ...at(ctrl.moduleNameRange));
   assert.equal(lastPath(), 'chip_top.u_ctrl', 'pointing at the module name of the instantiation too');
 
-  // The parameterized instantiation tracks from both of its lines.
+  // Cursor on a port connection: still the same instance row, even though the
+  // connection sits several lines below the instance name.
+  provider.setContext('/w/chip_top.v', ...at(busy.range));
+  assert.equal(lastPath(), 'chip_top.u_ctrl', 'the .busy(busy) connection tracks to u_ctrl');
+
+  // The parameterized instantiation follows from its module name, its instance
+  // name, and its connections alike.
+  provider.setContext('/w/chip_top.v', ...at(dpath.moduleNameRange));
+  assert.equal(lastPath(), 'chip_top.u_dpath', 'pointing at the module name a few lines above the name');
   provider.setContext('/w/chip_top.v', ...at(dpath.nameRange));
   assert.equal(lastPath(), 'chip_top.u_dpath', 'pointing at u_dpath highlights its row');
-  provider.setContext('/w/chip_top.v', ...at(dpath.moduleNameRange));
-  assert.equal(lastPath(), 'chip_top.u_dpath', 'even with the module name a few lines above the name');
+  provider.setContext('/w/chip_top.v', ...at(a.range));
+  assert.equal(lastPath(), 'chip_top.u_dpath', 'the .a(operand_a) connection tracks to u_dpath');
 
   // Cursor in the module but off any instantiation: the module row.
   provider.setContext('/w/chip_top.v', mod.nameRange.start.line, 0);

@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 
 import type { IndexService } from './indexService';
-import type { HierarchyNode, InstanceSite, ModuleDef } from '../core/ast';
+import type { HierarchyNode, ModuleDef } from '../core/ast';
 import type { Range } from '../core/lexer';
 import { findByPath } from '../core/hierarchy';
 
@@ -17,17 +17,17 @@ function inRange(range: Range, line: number, character: number): boolean {
  * The instance of `mod` the cursor is on, as its hierarchy-path segment
  * (`genPrefix.name`), or `undefined` when the cursor is not on an instantiation.
  *
- * Precision matters here: with a character the cursor has to be within the
- * instance name or the instantiated module's name, so making a selection
- * elsewhere in the module (including the module's own declaration) leaves the
- * plain module row highlighted. Without a character (line-only callers) no
- * instance is claimed, which keeps those callers on the module row.
+ * The whole instantiation statement counts, not just its name: the instance
+ * name, the instantiated module name, and every port connection
+ * (`.busy(busy)`, `.a(operand_a)`) all keep the instance row highlighted.
+ * Character precision matters here, so making a selection elsewhere in the
+ * module (its declaration, an unrelated wire, an `assign`) leaves the plain
+ * module row highlighted. Without a character (line-only callers) no instance
+ * is claimed, which keeps those callers on the module row.
  */
 function instanceLocalAt(mod: ModuleDef, line: number, character: number | undefined): string | undefined {
   if (character === undefined) return undefined;
-  const inst: InstanceSite | undefined = mod.instances.find(
-    (i) => inRange(i.nameRange, line, character) || inRange(i.moduleNameRange, line, character),
-  );
+  const inst = mod.instances.find((i) => inRange(i.range, line, character));
   if (!inst) return undefined;
   return inst.genPrefix ? `${inst.genPrefix}.${inst.name}` : inst.name;
 }
@@ -86,9 +86,10 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
    * that root while moving around inside it, revealing and highlighting the row
    * under the cursor.
    *
-   * When the cursor sits on an instantiation (its instance name or the module
-   * name being instantiated) the row for that *instance* - `u_ctrl`, `u_dpath` -
-   * is highlighted; anywhere else in the module the module's own row is.
+   * When the cursor sits anywhere on an instantiation - its instance name, the
+   * module name being instantiated, or one of the port connections wired to it
+   * (`.busy(busy)`) - the row for that *instance* (`u_ctrl`, `u_dpath`) is
+   * highlighted; anywhere else in the module the module's own row is.
    */
   setContext(file: string | undefined, line: number | undefined, character?: number): void {
     const mod = file
