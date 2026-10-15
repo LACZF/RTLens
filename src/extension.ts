@@ -26,7 +26,7 @@ import { DatabaseService, pickRefreshMode } from './vscode/database';
 import type { HierarchyNode, Range } from './core/ast';
 import { findByPath } from './core/hierarchy';
 import { basename } from './core/index';
-import { traceSignal, type TraceDirection, type TraceStep } from './core/trace';
+import { traceAt, type TraceDirection, type TraceStep } from './core/trace';
 
 const LANGUAGES = ['verilog', 'systemverilog'];
 
@@ -225,7 +225,7 @@ export function activate(context: vscode.ExtensionContext): void {
     await svc.ensureReady();
     svc.syncOpenDocuments();
     const pos = editor.selection.active;
-    const res = traceSignal(
+    const res = traceAt(
       svc.index,
       editor.document.fileName,
       editor.document.getText(),
@@ -234,7 +234,7 @@ export function activate(context: vscode.ExtensionContext): void {
       direction,
     );
     if (!res) {
-      void vscode.window.showInformationMessage('HDL: put the cursor on a signal to trace it.');
+      void vscode.window.showInformationMessage('HDL: put the cursor on a signal, port, module, or instance to trace it.');
       return;
     }
     if (!res.targets.length) {
@@ -399,7 +399,7 @@ async function pickTraceTarget(
       step,
     })),
     {
-      title: `HDL: where ${name} ${direction === 'up' ? 'comes from' : 'goes'}`,
+      title: `HDL: ${direction === 'up' ? 'up from' : 'down from'} ${name}`,
       placeHolder: 'Choose where to trace',
     },
   );

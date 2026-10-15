@@ -229,12 +229,12 @@
       },
       {
         "command": "hdl.connectView.traceUp",
-        "title": "HDL: Trace Signal Up (to parent)",
+        "title": "HDL: Trace Up (signal or module)",
         "category": "HDL"
       },
       {
         "command": "hdl.connectView.traceDown",
-        "title": "HDL: Trace Signal Down (toward leaves)",
+        "title": "HDL: Trace Down (signal or module)",
         "category": "HDL"
       }
     ],

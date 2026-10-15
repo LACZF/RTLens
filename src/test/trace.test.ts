@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 
 import { HdlIndex } from '../core/index';
-import { traceSignal } from '../core/trace';
+import { traceAt, traceModule, traceSignal } from '../core/trace';
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const FIXTURES = path.join(ROOT, 'test', 'fixtures', 'lib');
@@ -323,3 +323,105 @@ test('trace: a fixture output port crosses up to the parent instance', () => {
   assert.equal(net.label, 'u_dpath.carry');
   assert.equal(path.basename(net.file), 'chip_top.v');
 });
+
+// ---------------------------------------------------------------------------
+// module tracing: up to the parent instance, down to the child implementation
+// ---------------------------------------------------------------------------
+
+test('trace module up: a module jumps to the instance that instantiates it', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'datapath.v');
+  const src = fs.readFileSync(file, 'utf8');
+  // Cursor on the module definition name at the top of the file.
+  const p = at(src, 'module datapath', 'module '.length);
+
+  const up = traceModule(index, file, src, p.line, p.character, 'up')!;
+  assert.equal(up.name, 'datapath');
+  assert.equal(up.targets.length, 1);
+  const step = up.targets[0];
+  assert.equal(step.kind, 'parent-instance');
+  assert.equal(step.label, 'u_dpath : datapath');
+  assert.equal(path.basename(step.file), 'chip_top.v');
+  assert.equal(srcFileLine(step.file, step.range.start.line), '  ) u_dpath (');
+});
+
+test('trace module up: an instance name ascends from the module it sits in', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'datapath.v');
+  const src = fs.readFileSync(file, 'utf8');
+  // Cursor on `u_adder`; the containing module is datapath, so up is its parent.
+  const p = at(src, 'u_adder (');
+
+  const up = traceModule(index, file, src, p.line, p.character, 'up')!;
+  assert.equal(up.name, 'datapath');
+  assert.equal(up.targets[0].label, 'u_dpath : datapath');
+});
+
+test('trace module down: a module jumps to its children implementations', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'datapath.v');
+  const src = fs.readFileSync(file, 'utf8');
+  const p = at(src, 'module datapath', 'module '.length);
+
+  const down = traceModule(index, file, src, p.line, p.character, 'down')!;
+  assert.equal(down.name, 'datapath');
+  const byLabel = Object.fromEntries(down.targets.map((t) => [t.label, t]));
+  assert.ok(byLabel['u_adder : adder'], 'adder is a child');
+  assert.ok(byLabel['u_regfile : regfile'], 'regfile is a child');
+  assert.equal(path.basename(byLabel['u_adder : adder'].file), 'adder.v');
+  assert.equal(path.basename(byLabel['u_regfile : regfile'].file), 'regfile.v');
+  assert.ok(down.targets.every((t) => t.kind === 'child-module'));
+});
+
+test('trace module up: a top-level module has no parent', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'chip_top.v');
+  const src = fs.readFileSync(file, 'utf8');
+  const p = at(src, 'module chip_top', 'module '.length);
+
+  const up = traceModule(index, file, src, p.line, p.character, 'up')!;
+  assert.equal(up.name, 'chip_top');
+  assert.deepEqual(up.targets, [], 'the top is never instantiated');
+});
+
+test('trace module down: the top fans out to every child implementation', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'chip_top.v');
+  const src = fs.readFileSync(file, 'utf8');
+  const p = at(src, 'module chip_top', 'module '.length);
+
+  const down = traceModule(index, file, src, p.line, p.character, 'down')!;
+  const files = down.targets.map((t) => path.basename(t.file)).sort();
+  assert.deepEqual(files, ['control.v', 'datapath.v']);
+});
+
+test('trace at: dispatches a module cursor to the module trace and a signal cursor to the signal trace', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'datapath.v');
+  const src = fs.readFileSync(file, 'utf8');
+
+  // On the module name: the hierarchy, so a child implementation comes back.
+  const mod = at(src, 'module datapath', 'module '.length);
+  const down = traceAt(index, file, src, mod.line, mod.character, 'down')!;
+  assert.ok(down.targets.some((t) => t.kind === 'child-module'), 'module cursor traces the module');
+
+  // On a net: the signal web, so the child connection comes back.
+  const net = at(src, 'wire [WIDTH-1:0] alu_sum', 'wire [WIDTH-1:0] '.length);
+  const sig = traceAt(index, file, src, net.line, net.character, 'down')!;
+  assert.equal(sig.name, 'alu_sum');
+  assert.ok(sig.targets.some((t) => t.kind === 'child-connection'), 'signal cursor traces the signal');
+});
+
+test('trace module: a cursor on a signal is not a module trace', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'datapath.v');
+  const src = fs.readFileSync(file, 'utf8');
+  const p = at(src, 'wire [WIDTH-1:0] alu_sum', 'wire [WIDTH-1:0] '.length);
+  assert.equal(traceModule(index, file, src, p.line, p.character, 'up'), undefined);
+  assert.equal(traceModule(index, file, src, p.line, p.character, 'down'), undefined);
+});
+
+/** The text of a 0-based line in a file under the fixture directory. */
+function srcFileLine(file: string, line: number): string {
+  return fs.readFileSync(file, 'utf8').split('\n')[line];
+}

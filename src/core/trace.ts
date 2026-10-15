@@ -34,7 +34,11 @@ export type TraceStepKind =
   /** A connection jumps into the child module's port declaration. */
   | 'child-port'
   /** At the bottom, a signal jumps to where the module body uses it. */
-  | 'usage';
+  | 'usage'
+  /** A module traces up to the instance that instantiates its parent context? */
+  | 'parent-instance'
+  /** A module traces down to a child module's definition. */
+  | 'child-module';
 
 export interface TraceStep {
   file: string;
@@ -58,6 +62,30 @@ export interface TraceResult {
   targets: TraceStep[];
 }
 
+/**
+ * Trace whatever sits under the cursor: a module/instance name follows the
+ * module hierarchy, anything else follows the signal web. Resolves the cursor
+ * once so a trace costs a single tokenization.
+ */
+export function traceAt(
+  index: HdlIndex,
+  file: string,
+  source: string,
+  line: number,
+  character: number,
+  direction: TraceDirection,
+): TraceResult | undefined {
+  const hit = resolveAt(index, file, source, line, character);
+  if (!hit || !hit.mod) {
+    return undefined;
+  }
+  const kind = hit.resolution.ok ? hit.resolution.decl.kind : undefined;
+  if (kind === 'instance' || kind === 'module') {
+    return moduleTrace(index, hit.mod, direction);
+  }
+  return signalFromHit(index, hit, line, character, direction);
+}
+
 export function traceSignal(
   index: HdlIndex,
   file: string,
@@ -67,6 +95,19 @@ export function traceSignal(
   direction: TraceDirection,
 ): TraceResult | undefined {
   const hit = resolveAt(index, file, source, line, character);
+  if (!hit) {
+    return undefined;
+  }
+  return signalFromHit(index, hit, line, character, direction);
+}
+
+function signalFromHit(
+  index: HdlIndex,
+  hit: ReturnType<typeof resolveAt>,
+  line: number,
+  character: number,
+  direction: TraceDirection,
+): TraceResult | undefined {
   if (!hit) {
     return undefined;
   }
@@ -332,4 +373,63 @@ function hierarchicalConnection(
   }
   const conn = inst.connections.find((c) => c.portName === lastName);
   return conn ? { inst, conn } : undefined;
+}
+
+/** Trace module hierarchy: up = parent instances that instantiate the module; down = children implementations. */
+export function traceModule(
+  index: HdlIndex,
+  file: string,
+  source: string,
+  line: number,
+  character: number,
+  direction: TraceDirection,
+): TraceResult | undefined {
+  const hit = resolveAt(index, file, source, line, character);
+  if (!hit || !hit.mod) {
+    return undefined;
+  }
+  const kind = hit.resolution.ok ? hit.resolution.decl.kind : undefined;
+  if (kind !== 'instance' && kind !== 'module') {
+    return undefined;
+  }
+  return moduleTrace(index, hit.mod, direction);
+}
+
+/** Up = the instances that instantiate `mod`; down = the modules `mod` instantiates. */
+function moduleTrace(index: HdlIndex, mod: ModuleDef, direction: TraceDirection): TraceResult {
+  const name = mod.name;
+  const targets: TraceStep[] = [];
+  if (direction === 'up') {
+    for (const { mod: parent, inst } of instancesOf(index, name)) {
+      add(targets, {
+        file: parent.file,
+        range: inst.nameRange,
+        kind: 'parent-instance',
+        label: `${inst.name} : ${name}`,
+        detail: `instantiated in ${parent.name}`,
+      });
+    }
+  } else {
+    for (const inst of mod.instances) {
+      const child = index.resolveModule(inst.moduleName, mod.file);
+      if (!child) {
+        continue;
+      }
+      add(targets, {
+        file: child.file,
+        range: child.nameRange,
+        kind: 'child-module',
+        label: `${inst.name} : ${child.name}`,
+        detail: `${child.name} defined in ${child.file.split('/').pop() ?? child.file}`,
+      });
+    }
+  }
+  return {
+    name,
+    module: name,
+    direction,
+    file: mod.file,
+    range: mod.nameRange,
+    targets,
+  };
 }
