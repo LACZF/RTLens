@@ -1,8 +1,36 @@
 import * as vscode from 'vscode';
 
 import type { IndexService } from './indexService';
-import type { HierarchyNode } from '../core/ast';
+import type { HierarchyNode, InstanceSite, ModuleDef } from '../core/ast';
+import type { Range } from '../core/lexer';
 import { findByPath } from '../core/hierarchy';
+
+/** Whether `(line, character)` sits inside `range`. */
+function inRange(range: Range, line: number, character: number): boolean {
+  if (line < range.start.line || line > range.end.line) return false;
+  if (line === range.start.line && character < range.start.character) return false;
+  if (line === range.end.line && character > range.end.character) return false;
+  return true;
+}
+
+/**
+ * The instance of `mod` the cursor is on, as its hierarchy-path segment
+ * (`genPrefix.name`), or `undefined` when the cursor is not on an instantiation.
+ *
+ * Precision matters here: with a character the cursor has to be within the
+ * instance name or the instantiated module's name, so making a selection
+ * elsewhere in the module (including the module's own declaration) leaves the
+ * plain module row highlighted. Without a character (line-only callers) no
+ * instance is claimed, which keeps those callers on the module row.
+ */
+function instanceLocalAt(mod: ModuleDef, line: number, character: number | undefined): string | undefined {
+  if (character === undefined) return undefined;
+  const inst: InstanceSite | undefined = mod.instances.find(
+    (i) => inRange(i.nameRange, line, character) || inRange(i.moduleNameRange, line, character),
+  );
+  if (!inst) return undefined;
+  return inst.genPrefix ? `${inst.genPrefix}.${inst.name}` : inst.name;
+}
 
 /** Row payload sent to the webview. */
 export interface CompRow {
@@ -56,25 +84,30 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
    * Follow the active editor without moving the tree: root at the design top
    * (a configured top, else the top that contains the current module) and keep
    * that root while moving around inside it, revealing and highlighting the row
-   * for the module under the cursor.
+   * under the cursor.
+   *
+   * When the cursor sits on an instantiation (its instance name or the module
+   * name being instantiated) the row for that *instance* - `u_ctrl`, `u_dpath` -
+   * is highlighted; anywhere else in the module the module's own row is.
    */
-  setContext(file: string | undefined, line: number | undefined): void {
+  setContext(file: string | undefined, line: number | undefined, character?: number): void {
     const mod = file
       ? this.svc.moduleAt(file, line ?? 0) ?? this.svc.index.modulesInFile(file)[0]
       : undefined;
+    const local = mod && line !== undefined ? instanceLocalAt(mod, line, character) : undefined;
     const tops = this.svc.config.topModules;
     if (tops.length) {
       const def = tops.map((name) => this.svc.index.resolveModule(name)).find((d) => d !== undefined);
       if (!def) return;
       const root = this.svc.compositionHierarchy(def.name, def.file)?.root;
       if (!root) return;
-      this.show(root, mod ? this.locate(root, mod.name) : undefined);
+      this.show(root, mod ? this.focusPath(root, mod.name, local) : undefined);
       return;
     }
     if (!file || !mod) return;
     // Already inside the shown design: just move the highlight, no rebuild.
     if (this.cachedRoot) {
-      const here = this.locate(this.cachedRoot, mod.name);
+      const here = this.focusPath(this.cachedRoot, mod.name, local);
       if (here) {
         this.show(this.cachedRoot, here);
         return;
@@ -82,12 +115,25 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     }
     const design = this.svc.containingDesign(mod.name, file);
     if (design) {
-      this.show(design.root, design.node.path);
+      const node = local ? findByPath(design.root, `${design.node.path}.${local}`) : undefined;
+      this.show(design.root, node ? node.path : design.node.path);
       return;
     }
     const root = this.svc.compositionHierarchy(mod.name, file)?.root;
     if (!root) return;
-    this.show(root, root.path);
+    this.show(root, this.focusPath(root, mod.name, local) ?? root.path);
+  }
+
+  /**
+   * The row to highlight for a cursor in `moduleName`: the instance row
+   * `local` under the module's row when that instance is drawn, else the
+   * module's own row.
+   */
+  private focusPath(root: HierarchyNode, moduleName: string, local: string | undefined): string | undefined {
+    const base = this.locate(root, moduleName);
+    if (!base || !local) return base;
+    const full = `${base}.${local}`;
+    return findByPath(root, full) ? full : base;
   }
 
   /** Re-root only when the design changed, then reveal + highlight `path`. */

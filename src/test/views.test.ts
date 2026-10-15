@@ -255,6 +255,60 @@ test('composition webview: follows the editor by highlighting the current module
   assert.equal(pinnedPosted[pinnedPosted.length - 1].path, 'top', 'the root module highlights itself');
 });
 
+test('composition webview: points at an instantiation by highlighting the instance row', async () => {
+  // Mirrors the real chip_top fixture: `datapath #(...)` puts the instantiated
+  // module name and the instance name on different lines.
+  const src =
+    'module control (input wire clk); endmodule\n' +
+    'module datapath (input wire clk); endmodule\n' +
+    'module chip_top (input wire clk);\n' +
+    '  control u_ctrl (.clk(clk));\n' +
+    '  datapath #(\n' +
+    '    .WIDTH(8)\n' +
+    '  ) u_dpath (.clk(clk));\n' +
+    'endmodule\n';
+  const svc = await svcWith();
+  svc.index.addFile('/w/chip_top.v', src);
+  const { CompositionViewProvider } = await import('../vscode/compView');
+  const provider = new CompositionViewProvider(svc);
+
+  const posted: { type?: string; path?: string }[] = [];
+  provider.resolveWebviewView({
+    webview: {
+      options: {},
+      html: '',
+      onDidReceiveMessage: () => ({ dispose() {} }),
+      postMessage: async (m: { type?: string; path?: string }) => {
+        posted.push(m);
+      },
+    },
+  } as unknown as import('vscode').WebviewView);
+  const lastPath = () => posted[posted.length - 1].path;
+
+  const mod = svc.index.resolveModule('chip_top')!;
+  const ctrl = mod.instances.find((i) => i.name === 'u_ctrl')!;
+  const dpath = mod.instances.find((i) => i.name === 'u_dpath')!;
+  const at = (r: { start: { line: number; character: number } }) => [r.start.line, r.start.character] as const;
+
+  // Cursor on the instance name: that instance row, not the module.
+  provider.setContext('/w/chip_top.v', ...at(ctrl.nameRange));
+  assert.equal(lastPath(), 'chip_top.u_ctrl', 'pointing at u_ctrl highlights its row');
+
+  // Cursor on the instantiated module name: same instance row.
+  provider.setContext('/w/chip_top.v', ...at(ctrl.moduleNameRange));
+  assert.equal(lastPath(), 'chip_top.u_ctrl', 'pointing at the module name of the instantiation too');
+
+  // The parameterized instantiation tracks from both of its lines.
+  provider.setContext('/w/chip_top.v', ...at(dpath.nameRange));
+  assert.equal(lastPath(), 'chip_top.u_dpath', 'pointing at u_dpath highlights its row');
+  provider.setContext('/w/chip_top.v', ...at(dpath.moduleNameRange));
+  assert.equal(lastPath(), 'chip_top.u_dpath', 'even with the module name a few lines above the name');
+
+  // Cursor in the module but off any instantiation: the module row.
+  provider.setContext('/w/chip_top.v', mod.nameRange.start.line, 0);
+  assert.equal(lastPath(), 'chip_top', 'off an instantiation, the module itself is highlighted');
+});
+
 test("composition: its depth and instance budget are its own settings, unlimited by default", async () => {
   const { findByPath } = await import('../core/hierarchy');
   const src = [

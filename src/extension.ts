@@ -90,7 +90,11 @@ export function activate(context: vscode.ExtensionContext): void {
     // need the cursor to be on an instance.
     nets.setContext(editor.document.fileName, editor.selection.active.line);
     // The composition tree follows the active module unless a top is configured.
-    composition.setContext(editor.document.fileName, editor.selection.active.line);
+    composition.setContext(
+      editor.document.fileName,
+      editor.selection.active.line,
+      editor.selection.active.character,
+    );
   };
   context.subscriptions.push(
     vscode.window.onDidChangeActiveTextEditor(syncEditor),
