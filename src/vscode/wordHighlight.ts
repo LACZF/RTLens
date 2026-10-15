@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
 
-import { wordAtPosition } from '../core/resolve';
 import { findWordMatches, randomHighlightColor } from '../core/wordHighlight';
 
 interface ActiveHighlight {
@@ -11,8 +10,9 @@ interface ActiveHighlight {
 /**
  * Global (open-editors) word highlight toggled by F8.
  *
- * - Turning on: finds the identifier under the active cursor and highlights every
- *   standalone occurrence of it in every visible editor (whole-token match).
+ * - Turning on: takes the word under the active cursor (via the editor's own
+ *   word pattern, so it works in any file, not just HDL) and highlights every
+ *   standalone occurrence of it in every visible editor.
  * - Turning on again for the same word: removes its highlight (toggle off).
  * - Different words stay highlighted simultaneously; decorations do not interfere.
  * - The colour is picked at random each time a word is highlighted.
@@ -35,11 +35,14 @@ export class WordHighlighter implements vscode.Disposable {
       return;
     }
     const pos = editor.selection.active;
-    const found = wordAtPosition(editor.document.getText(), pos.line, pos.character);
-    if (!found || !found.name) {
+    const range = editor.document.getWordRangeAtPosition(pos);
+    if (!range || range.isEmpty) {
       return;
     }
-    const word = found.name;
+    const word = editor.document.getText(range);
+    if (!word) {
+      return;
+    }
     const idx = this.active.findIndex((a) => a.word === word);
     if (idx >= 0) {
       this.remove(idx);

@@ -1,10 +1,13 @@
 /**
  * Word-occurrence highlighting helpers.
  *
- * A syntax-agnostic, whole-token match: the word under the cursor (from
- * `wordAtPosition`) is searched verbatim so an identifier is highlighted only
- * when it stands alone, never as a prefix of a longer name. Deliberately not
- * comment/string aware, matching how editors highlight the current word.
+ * A language-agnostic, whole-token match: the word under the cursor (from the
+ * editor's own word pattern) is searched verbatim so a word is highlighted only
+ * when it stands alone, never as a fragment of a longer name. "Standing alone"
+ * means the characters on either side are not word characters (`\p{L}\p{N}_$`),
+ * which keeps the old identifier semantics (`a` never matches inside `ab`) while
+ * working for any script and any file type. Deliberately not comment/string
+ * aware, matching how editors highlight the current word.
  */
 
 export interface WordMatch {
@@ -16,14 +19,19 @@ export interface WordMatch {
   endChar: number;
 }
 
-/** Characters an HDL identifier (and a highlighted word) is made of. */
-const WORD_RE = /[A-Za-z0-9_$]+/g;
+/** A character that can glue two words into one token. */
+const WORD_CHAR_RE = /[\p{L}\p{N}_$]/u;
+
+function isWordChar(ch: string | undefined): boolean {
+  return ch !== undefined && WORD_CHAR_RE.test(ch);
+}
 
 /**
  * Every standalone occurrence of `word` in `text`, in document order.
  *
- * A match is only counted when the whole token equals `word`, so `a` does not
- * match inside `ab` or `a1`.
+ * A match is only counted when neither neighbour is a word character, so `a`
+ * does not match inside `ab`, `a1` or `数据a`, while `$display` matches next to
+ * punctuation and not inside `foo$display`.
  */
 export function findWordMatches(text: string, word: string): WordMatch[] {
   if (!word) {
@@ -32,12 +40,20 @@ export function findWordMatches(text: string, word: string): WordMatch[] {
   const out: WordMatch[] = [];
   const lines = text.split('\n');
   for (let line = 0; line < lines.length; line++) {
-    WORD_RE.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = WORD_RE.exec(lines[line])) !== null) {
-      if (m[0] === word) {
-        out.push({ line, startChar: m.index, endChar: m.index + word.length });
+    const src = lines[line];
+    let from = 0;
+    for (;;) {
+      const idx = src.indexOf(word, from);
+      if (idx < 0) {
+        break;
       }
+      const before = idx > 0 ? src[idx - 1] : undefined;
+      const end = idx + word.length;
+      const after = end < src.length ? src[end] : undefined;
+      if (!isWordChar(before) && !isWordChar(after)) {
+        out.push({ line, startChar: idx, endChar: end });
+      }
+      from = idx + 1;
     }
   }
   return out;

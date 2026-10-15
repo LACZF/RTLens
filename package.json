@@ -147,7 +147,7 @@
         "hdl.connectView.wordHighlight": {
           "type": "boolean",
           "default": true,
-          "description": "Enable F8 to highlight all occurrences of the word under the cursor across open editors. When disabled, the F8 keybinding falls back to the editor's default (Go to Next Problem)."
+          "description": "Enable F8 to highlight all occurrences of the word under the cursor across open editors, in any file type. When disabled, the F8 keybinding falls back to the editor's default (Go to Next Problem)."
         },
         "hdl.connectView.graph.maxNodes": {
           "type": "number",
@@ -340,7 +340,7 @@
         },
         {
           "command": "hdl.connectView.toggleWordHighlight",
-          "when": "editorLangId == verilog || editorLangId == systemverilog",
+          "when": "editorTextFocus",
           "group": "hdl@5"
         }
       ]
@@ -365,7 +365,7 @@
       {
         "command": "hdl.connectView.toggleWordHighlight",
         "key": "f8",
-        "when": "editorTextFocus && (editorLangId == verilog || editorLangId == systemverilog)"
+        "when": "editorTextFocus"
       }
     ],
     "semanticTokenTypes": [
