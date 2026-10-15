@@ -31,6 +31,13 @@ import { WordHighlighter } from './vscode/wordHighlight';
 
 const LANGUAGES = ['verilog', 'systemverilog'];
 
+/**
+ * Settings that change *which* files the index - and therefore the relation
+ * database - covers. A change to any of these rebuilds the database even when
+ * `hdl.connectView.autoUpdateDatabase` is off, because the file set moved.
+ */
+const SCAN_SETTINGS = ['files', 'includeDirs', 'exclude', 'databasePaths', 'databasePathsOnly'];
+
 export function activate(context: vscode.ExtensionContext): void {
   const log = vscode.window.createOutputChannel('RTLens');
   context.subscriptions.push(log);
@@ -305,9 +312,17 @@ export function activate(context: vscode.ExtensionContext): void {
   // path, and it re-indexes, refreshes the views and shows progress.
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration(SECTION)) {
-        void vscode.commands.executeCommand('hdl.connectView.refreshIndex');
+      if (!e.affectsConfiguration(SECTION)) {
+        return;
       }
+      // The file set moved: rebuild the database even if auto-update is off.
+      const fileSetChanged = SCAN_SETTINGS.some((k) => e.affectsConfiguration(`${SECTION}.${k}`));
+      void (async () => {
+        await vscode.commands.executeCommand('hdl.connectView.refreshIndex');
+        if (fileSetChanged) {
+          database.scheduleAutoRefresh(0);
+        }
+      })();
     }),
     { dispose: () => GraphPanel.disposeAll() },
   );

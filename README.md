@@ -65,6 +65,7 @@
 | `hdl.connectView.enableSemanticHighlighting` | `true` | 启用语义高亮（实例名、端口名、声明信号等） |
 | `hdl.connectView.databasePaths` | `[]` | 额外参与索引与数据库的路径或文件；相对路径按各工作区文件夹解析，绝对路径原样使用。目录按 `files` 递归扫描，文件直接索引 |
 | `hdl.connectView.databasePathsOnly` | `false` | 勾选后只扫描 `databasePaths` 指定的路径与文件，跳过当前打开的工作区；不勾选则在配置项之外同时扫描工作区 |
+| `hdl.connectView.autoUpdateDatabase` | `true` | 索引文件改动时自动增量更新关系数据库；关闭后仅由手动刷新命令、或 `files` / `includeDirs` / `exclude` / `databasePaths` / `databasePathsOnly` 变化时重建 |
 
 ## 快速开始
 
@@ -72,7 +73,7 @@
 2. 在编辑器中把光标放到某个 module 或实例上，按 `Ctrl+Alt+G` 打开连接关系图。
 3. 或在 **Composition** 视图里点击某行跳到源码，再用命令面板的 `HDL: Show Connectivity Graph` / `HDL: Generate Wrapper Module`。
 4. 若默认排除规则不适用，调整 `hdl.connectView.files` / `hdl.connectView.exclude` 后执行 `HDL: Refresh Index`。
-5. 信号/module 关系数据库保存在工作区的 `.vscode/rtlens/relations.json`，底部状态栏的 `RTLens DB` 按钮可手动刷新（增量或全量）；激活时只读取，不自动重写。
+5. 信号/module 关系数据库保存在工作区的 `.vscode/rtlens/relations.json`，底部状态栏的 `RTLens DB` 按钮可手动刷新（增量或全量）。默认（`hdl.connectView.autoUpdateDatabase` 开启）会在索引文件改动后自动增量更新；激活时只读取，不重写。关闭该设置后，只有手动刷新、或文件集合相关配置（`files` / `includeDirs` / `exclude` / `databasePaths` / `databasePathsOnly`）变化时才会重建。
 
 ## 开发
 

@@ -21,8 +21,9 @@ import type { IndexService } from './indexService';
  *
  * Every folder gets its own file (`<folder>/.vscode/rtlens/relations.json`) so
  * the database travels with the tree it describes and a multi-root workspace
- * does not collide. Writing only happens on an explicit refresh: activation
- * just reads whatever is already there.
+ * does not collide. Activation only reads whatever is already there; the file
+ * is written by an explicit refresh or, when `autoUpdateDatabase` is on, by the
+ * debounced incremental refresh that follows an index change.
  */
 export const DB_DIR = path.join('.vscode', 'rtlens');
 export const DB_FILE = 'relations.json';
@@ -105,6 +106,15 @@ export class DatabaseService implements vscode.Disposable {
   private readonly status: vscode.StatusBarItem;
   /** Latest known database per workspace folder, keyed by folder path. */
   private readonly databases = new Map<string, RelationDatabase>();
+  private readonly autoSub: vscode.Disposable;
+  private autoTimer: ReturnType<typeof setTimeout> | undefined;
+  private autoRunning = false;
+  private autoPending = false;
+  /**
+   * Auto-update starts only after `load()`, so the activation scan - which
+   * fires the same index event as an edit - does not rewrite the databases.
+   */
+  private autoStarted = false;
 
   constructor(
     private readonly svc: IndexService,
@@ -113,6 +123,7 @@ export class DatabaseService implements vscode.Disposable {
     this.status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 90);
     this.status.name = 'RTLens relation database';
     this.status.command = 'hdl.connectView.refreshDatabase';
+    this.autoSub = svc.onDidChange(() => this.onIndexChange());
     this.render();
   }
 
@@ -125,7 +136,53 @@ export class DatabaseService implements vscode.Disposable {
         this.databases.set(folder.uri.fsPath, db);
       }
     }
+    this.autoStarted = true;
     this.render();
+  }
+
+  /** A file edit (or reindex) landed: keep the database current if asked to. */
+  private onIndexChange(): void {
+    if (this.autoStarted && this.svc.config.autoUpdateDatabase) {
+      this.scheduleAutoRefresh();
+    }
+  }
+
+  /**
+   * Queue a debounced incremental refresh.
+   *
+   * The caller decides *whether* to refresh (this does not consult the setting):
+   * the index subscription gates on `autoUpdateDatabase`, while a change to the
+   * file set forces a refresh regardless. Debouncing coalesces the burst of
+   * index events a single save produces into one write.
+   */
+  scheduleAutoRefresh(delay = 500): void {
+    if (this.autoTimer) {
+      clearTimeout(this.autoTimer);
+    }
+    this.autoTimer = setTimeout(() => {
+      this.autoTimer = undefined;
+      void this.runAutoRefresh();
+    }, delay);
+  }
+
+  /** Run a queued refresh, never overlapping itself or a manual one. */
+  private async runAutoRefresh(): Promise<void> {
+    if (this.autoRunning) {
+      this.autoPending = true;
+      return;
+    }
+    this.autoRunning = true;
+    try {
+      await this.refresh('incremental');
+    } catch (e) {
+      this.log.appendLine(`[db] auto refresh failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      this.autoRunning = false;
+      if (this.autoPending) {
+        this.autoPending = false;
+        this.scheduleAutoRefresh(0);
+      }
+    }
   }
 
   /** Recompute and write the databases for every workspace folder. */
@@ -194,6 +251,10 @@ export class DatabaseService implements vscode.Disposable {
   }
 
   dispose(): void {
+    if (this.autoTimer) {
+      clearTimeout(this.autoTimer);
+    }
+    this.autoSub.dispose();
     this.status.dispose();
   }
 }

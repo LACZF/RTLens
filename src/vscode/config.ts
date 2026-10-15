@@ -26,6 +26,8 @@ export interface HdlConfig {
   semanticHighlighting: boolean;
   databasePaths: string[];
   databasePathsOnly: boolean;
+  /** Keep the relation database in sync as indexed files change. */
+  autoUpdateDatabase: boolean;
 }
 
 export const SECTION = 'hdl.connectView';
@@ -58,6 +60,7 @@ export function readConfig(scope?: vscode.Uri): HdlConfig {
     semanticHighlighting: cfg.get<boolean>('enableSemanticHighlighting') ?? true,
     databasePaths: strArray(cfg, 'databasePaths', []),
     databasePathsOnly: cfg.get<boolean>('databasePathsOnly') ?? false,
+    autoUpdateDatabase: cfg.get<boolean>('autoUpdateDatabase') ?? true,
   };
 }
 

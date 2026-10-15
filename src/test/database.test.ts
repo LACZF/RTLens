@@ -12,7 +12,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Module } from 'node:module';
 
-import { vscode } from './vscodeStub';
+import { documentFor, vscode } from './vscodeStub';
 
 const loader = Module as unknown as { _load: (request: string, ...rest: unknown[]) => unknown };
 const originalLoad = loader._load;
@@ -30,7 +30,11 @@ interface Log {
   appendLine(line: string): void;
 }
 
-async function setup() {
+const DB_FILE_ON_DISK = path.join(TEMP, '.vscode', 'rtlens', 'relations.json');
+
+const originalConfig = vscode.workspace.getConfiguration;
+
+async function setup(settings: Record<string, unknown> = {}) {
   fs.rmSync(TEMP, { recursive: true, force: true });
   fs.mkdirSync(TEMP, { recursive: true });
   fs.writeFileSync(CHILD, CHILD_SRC);
@@ -38,6 +42,11 @@ async function setup() {
   (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [
     { uri: vscode.Uri.file(TEMP), name: 'db', index: 0 },
   ];
+  // `IndexService` snapshots the configuration in its constructor, so the
+  // override has to be in place before the service is built.
+  (vscode.workspace as { getConfiguration: unknown }).getConfiguration = () => ({
+    get: (key: string, fallback: unknown) => (key in settings ? settings[key] : fallback),
+  });
 
   const { IndexService } = await import('../vscode/indexService');
   const mod = await import('../vscode/database');
@@ -49,9 +58,14 @@ async function setup() {
   return { mod, svc, db };
 }
 
+function wait(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 after(() => {
   fs.rmSync(TEMP, { recursive: true, force: true });
   (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = undefined;
+  vscode.workspace.getConfiguration = originalConfig;
 });
 
 test('database: a refresh writes relations under .vscode/rtlens', async () => {
@@ -107,4 +121,45 @@ test('database: pickRefreshMode returns the chosen mode', async () => {
   const mode = await mod.pickRefreshMode();
   assert.equal(mode, 'incremental');
   (vscode as unknown as { __quickPick?: unknown }).__quickPick = undefined;
+});
+
+test('database: auto-update writes the database after an index change', async () => {
+  const { db, svc } = await setup();
+  db.load();
+  assert.ok(!fs.existsSync(DB_FILE_ON_DISK), 'load() alone does not write');
+
+  // A watched document that is not yet synced ingests and fires onDidChange.
+  svc.watchDocument(documentFor(PARENT, PARENT_SRC) as never);
+  await wait(700);
+  db.dispose();
+
+  assert.ok(fs.existsSync(DB_FILE_ON_DISK), 'an index change auto-refreshes the database');
+  assert.equal(db.stats().modules, 2);
+});
+
+test('database: the activation scan alone does not write the database', async () => {
+  const { db, svc } = await setup();
+  // Fire the index event before `load()` - the case the activation scan hits.
+  // Wait past the debounce: otherwise the assertion would pass merely because
+  // the timer has not fired yet, whether or not the event was ignored.
+  svc.watchDocument(documentFor(PARENT, PARENT_SRC) as never);
+  await wait(700);
+  assert.ok(!fs.existsSync(DB_FILE_ON_DISK), 'auto-update starts only after load()');
+  db.dispose();
+});
+
+test('database: auto-update is skipped when disabled, but a file-set change forces it', async () => {
+  const { db, svc } = await setup({ autoUpdateDatabase: false });
+  db.load();
+
+  // Wait past the debounce so a would-be auto refresh has had time to fire.
+  svc.watchDocument(documentFor(PARENT, PARENT_SRC) as never);
+  await wait(700);
+  assert.ok(!fs.existsSync(DB_FILE_ON_DISK), 'a disabled auto-update leaves disk alone');
+
+  // The scan-set configuration exception goes through the same scheduler.
+  db.scheduleAutoRefresh(0);
+  await wait(100);
+  db.dispose();
+  assert.ok(fs.existsSync(DB_FILE_ON_DISK), 'an explicit schedule still rebuilds it');
 });

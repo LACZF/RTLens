@@ -197,6 +197,11 @@
           "default": false,
           "markdownDescription": "When enabled, only the paths and files listed in `hdl.connectView.databasePaths` are scanned; the open workspace folders are skipped. When disabled, the configured paths and files are scanned in addition to the workspace folders.",
           "scope": "resource"
+        },
+        "hdl.connectView.autoUpdateDatabase": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Keep the signal/module database in sync automatically, refreshing it incrementally whenever indexed files change. When disabled, the database is only rebuilt by the `HDL: Refresh Signal/Module Database` command, or when the file set itself changes (`hdl.connectView.files`, `includeDirs`, `exclude`, `databasePaths`, `databasePathsOnly`)."
         }
       }
     },
