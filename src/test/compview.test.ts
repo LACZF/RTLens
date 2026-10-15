@@ -212,6 +212,30 @@ test('composition webview: a search keeps matches plus their ancestors and opens
   assert.equal(chevron(rows[1]).textContent, '\u25BC', 'a path to a match is force-opened');
 });
 
+test('composition webview: a space separated query matches every token as a subsequence', () => {
+  const ui = start(ROWS);
+  ui.input.value = 'u mid';
+  fire(ui.input, 'input');
+
+  const rows = drawn(ui.list);
+  assert.deepEqual(
+    rows.map(rowText),
+    ['top', 'u_mid : mid'],
+    'both tokens match u_mid and only its ancestors survive',
+  );
+
+  const matched = rows[1].children.find((c) => c.attrs.class === 'nm')!;
+  const hits = matched.children.filter((c) => c.tagName === 'b').map((c) => c.textContent);
+  assert.deepEqual(hits, ['u', 'm', 'i', 'd'], 'both tokens are highlighted within the instance name');
+});
+
+test('composition webview: a space separated query with an unmatched token hides everything', () => {
+  const ui = start(ROWS);
+  ui.input.value = 'mid zzz';
+  fire(ui.input, 'input');
+  assert.equal(drawn(ui.list).length, 0, 'no row satisfies every token');
+});
+
 test('composition webview: clicking a row asks the host to reveal it', () => {
   const ui = start(ROWS);
   fire(chevron(drawn(ui.list)[0]), 'click');

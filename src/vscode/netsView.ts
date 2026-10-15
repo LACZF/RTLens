@@ -107,7 +107,7 @@ function html(): string {
 <body>
 <header>
   <div class="where"><span id="mod"></span><span id="file"></span></div>
-  <input id="q" type="search" placeholder="Filter signals (fuzzy)" spellcheck="false" autocomplete="off" autofocus>
+  <input id="q" type="search" placeholder="Filter signals (fuzzy, space separated)" spellcheck="false" autocomplete="off" autofocus>
 </header>
 <div id="empty" class="empty"></div>
 <div id="list" class="list"></div>
@@ -177,37 +177,42 @@ export const SCRIPT = String.raw`
   var rows = [];
   var moduleName = '';
 
-  // Subsequence match: every character of the query must appear in order.
-  // Returns the matched indices and a score that favours contiguous runs and
-  // matches at the start of the name (or of a word), or null when it fails.
+  // Space-separated fuzzy match: the query is split on whitespace into tokens,
+  // each token matches as a subsequence and every token must match. Returns the
+  // matched indices and a score that favours contiguous runs and matches at the
+  // start of the name (or of a word), or null when any token fails.
   function fuzzy(text, query) {
     var t = text.toLowerCase();
     var q = query.toLowerCase();
+    var tokens = q.split(/\s+/);
     var idx = [];
     var ti = 0;
     var streak = 0;
     var score = 0;
     var first = -1;
-    for (var i = 0; i < q.length; i++) {
-      var at = t.indexOf(q.charAt(i), ti);
-      if (at < 0) {
-        return null;
+    for (var k = 0; k < tokens.length; k++) {
+      var tok = tokens[k];
+      for (var i = 0; i < tok.length; i++) {
+        var at = t.indexOf(tok.charAt(i), ti);
+        if (at < 0) {
+          return null;
+        }
+        if (first < 0) {
+          first = at;
+        }
+        if (at === ti) {
+          streak += 1;
+          score += 2 + streak;
+        } else {
+          streak = 0;
+          score += 1;
+        }
+        if (at === 0 || /[._\s]/.test(text.charAt(at - 1))) {
+          score += 3;
+        }
+        idx.push(at);
+        ti = at + 1;
       }
-      if (first < 0) {
-        first = at;
-      }
-      if (at === ti) {
-        streak += 1;
-        score += 2 + streak;
-      } else {
-        streak = 0;
-        score += 1;
-      }
-      if (at === 0 || /[._\s]/.test(text.charAt(at - 1))) {
-        score += 3;
-      }
-      idx.push(at);
-      ti = at + 1;
     }
     score -= first * 0.05;
     return { idx: idx, score: score };
