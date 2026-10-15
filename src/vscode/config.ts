@@ -16,6 +16,8 @@ export interface HdlConfig {
   compositionMaxDepth: number;
   /** Composition-tree node budget; 0 means no limit. */
   compositionMaxInstances: number;
+  /** Enable F8 word highlight (false lets F8 fall back to default). */
+  wordHighlight: boolean;
   graphMaxNodes: number;
   graphShowContainment: boolean;
   graphMaxSignalsPerGroup: number;
@@ -47,6 +49,7 @@ export function readConfig(scope?: vscode.Uri): HdlConfig {
     maxInstances: cfg.get<number>('maxInstances') ?? 20000,
     compositionMaxDepth: cfg.get<number>('composition.maxDepth') ?? 0,
     compositionMaxInstances: cfg.get<number>('composition.maxInstances') ?? 0,
+    wordHighlight: cfg.get<boolean>('wordHighlight') ?? true,
     graphMaxNodes: cfg.get<number>('graph.maxNodes') ?? 800,
     graphShowContainment: cfg.get<boolean>('graph.showContainment') ?? false,
     graphMaxSignalsPerGroup: cfg.get<number>('graph.maxSignalsPerGroup') ?? 40,

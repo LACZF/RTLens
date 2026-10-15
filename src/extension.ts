@@ -27,6 +27,7 @@ import type { HierarchyNode, Range } from './core/ast';
 import { findByPath } from './core/hierarchy';
 import { basename } from './core/index';
 import { traceAt, type TraceDirection, type TraceStep } from './core/trace';
+import { WordHighlighter } from './vscode/wordHighlight';
 
 const LANGUAGES = ['verilog', 'systemverilog'];
 
@@ -40,7 +41,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // The signal/module relation database and its status-bar refresh button.
   const database = new DatabaseService(svc, log);
-  context.subscriptions.push(database);
+  const wordHighlighter = new WordHighlighter();
+  context.subscriptions.push(database, wordHighlighter);
 
   // --- views -------------------------------------------------------------
   const compositionTree = new CompositionTreeProvider(svc);
@@ -249,6 +251,14 @@ export function activate(context: vscode.ExtensionContext): void {
   };
   reg('hdl.connectView.traceUp', () => trace('up'));
   reg('hdl.connectView.traceDown', () => trace('down'));
+
+  reg('hdl.connectView.toggleWordHighlight', () => {
+    if (!svc.config.wordHighlight) {
+      void vscode.commands.executeCommand('editor.action.marker.nextInFiles');
+      return;
+    }
+    wordHighlighter.toggle();
+  });
 
   // `revealInstance` is the click target of the composition rows and (via webview)
   // the nets rows. Both shapes are handled instead of assuming the node is there.

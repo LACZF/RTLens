@@ -188,6 +188,7 @@ const api: Record<string, any> = {
   FileType: { File: 1, Directory: 2 },
   ProgressLocation: { Notification: 15, Window: 10 },
   StatusBarAlignment: { Left: 1, Right: 2 },
+  OverviewRulerLane: { Left:1, Center:2, Right:4, Full:7 },
   ViewColumn: { One: 1, Two: 2, Active: -1 },
   commands: {
     registerCommand(id: string, fn: (...args: unknown[]) => unknown) {
@@ -255,6 +256,7 @@ const api: Record<string, any> = {
       api.__quickPick ? api.__quickPick(items, opts) : undefined,
     showInputBox: async () => undefined,
     setStatusBarMessage: () => noop,
+    createTextEditorDecorationType(opts: any) { return { key: String(((api as any).__dt=(api as any).__dt||0)+1), __options: opts, dispose(){}, options: opts }; },
     createStatusBarItem() {
       const item = {
         text: '',
@@ -281,6 +283,7 @@ const api: Record<string, any> = {
     onDidChangeActiveTextEditor: () => noop,
     onDidChangeTextEditorSelection: () => noop,
     onDidChangeVisibleTextEditors: () => noop,
+    visibleTextEditors: [] as any[],
   },
   workspace: {
     workspaceFolders: undefined as { uri: Uri; name: string; index: number }[] | undefined,
@@ -304,7 +307,7 @@ const api: Record<string, any> = {
       closeListeners.push(f);
       return noop;
     },
-    onDidChangeTextDocument: () => noop,
+    onDidChangeTextDocument: (f: any) => { (api as any).__docListeners=f; return noop; },
     onDidSaveTextDocument: () => noop,
     onDidChangeConfiguration: () => noop,
     onDidChangeWorkspaceFolders: () => noop,
