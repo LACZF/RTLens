@@ -83,8 +83,14 @@ test('config: numeric settings have a floor', () => {
     if (schema.type !== 'number') {
       continue;
     }
-    // maxSignalsPerGroup can be 0 to mean "no cap"
-    if (key === 'hdl.connectView.graph.maxSignalsPerGroup') {
+    // A handful of settings can be 0 to mean "no cap": the graph signal cap,
+    // and the Composition tree's own depth / node budget (both unlimited by
+    // default).
+    if (
+      key === 'hdl.connectView.graph.maxSignalsPerGroup' ||
+      key === 'hdl.connectView.composition.maxDepth' ||
+      key === 'hdl.connectView.composition.maxInstances'
+    ) {
       assert.ok(
         typeof schema.minimum === 'number' && schema.minimum >= 0,
         `${key} must allow 0 or more`,

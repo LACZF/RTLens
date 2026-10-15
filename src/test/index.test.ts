@@ -187,6 +187,29 @@ test('hierarchy respects the instance budget', () => {
   assert.ok(budgeted.totalNodes <= 2, `budget honoured, got ${budgeted.totalNodes}`);
 });
 
+test('hierarchy treats an explicit zero depth/budget as no limit', () => {
+  const index = new HdlIndex();
+  index.addFile(
+    '/w/chain.v',
+    [
+      'module m0 (); m1 u (); endmodule',
+      'module m1 (); m2 u (); endmodule',
+      'module m2 (); m3 u (); endmodule',
+      'module m3 (); endmodule',
+    ].join('\n'),
+  );
+  // A positive cap still stops early...
+  const limited = buildHierarchy(index, 'm0', { maxDepth: 1 })!;
+  assert.equal(findByPath(limited.root, 'm0.u')?.children?.length, 0, 'maxDepth 1 keeps only the first level');
+  const capped = buildHierarchy(index, 'm0', { maxDepth: 0, maxInstances: 1 })!;
+  assert.ok(capped.truncated, 'a positive budget still truncates');
+  // ...but 0 lifts both caps, and the whole chain materialises.
+  const unlimited = buildHierarchy(index, 'm0', { maxDepth: 0, maxInstances: 0 })!;
+  assert.ok(findByPath(unlimited.root, 'm0.u.u.u'), 'maxDepth 0 expands the whole chain');
+  assert.equal(unlimited.truncated, false, 'no truncation without a limit');
+  assert.ok(unlimited.totalNodes >= 3, 'every instance is materialised');
+});
+
 test('hierarchy propagates parameter overrides into child scopes', () => {
   const index = freshIndex();
   const scope = paramScopeForPath(index, 'top.u_mid.u_leaf');

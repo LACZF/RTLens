@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 
 import type { IndexService } from './indexService';
 import type { HierarchyNode } from '../core/ast';
-import { containingDesign, findByPath } from '../core/hierarchy';
+import { findByPath } from '../core/hierarchy';
 
 /** Row payload sent to the webview. */
 export interface CompRow {
@@ -64,7 +64,7 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     if (tops.length) {
       const def = tops.map((name) => this.svc.index.resolveModule(name)).find((d) => d !== undefined);
       if (!def) return;
-      const root = this.svc.hierarchy(def.name, def.file)?.root;
+      const root = this.svc.compositionHierarchy(def.name, def.file)?.root;
       if (!root) return;
       this.show(root, mod ? this.locate(root, mod.name) : undefined);
       return;
@@ -78,12 +78,12 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
         return;
       }
     }
-    const design = containingDesign(this.svc.index, mod.name, file);
+    const design = this.svc.containingDesign(mod.name, file);
     if (design) {
       this.show(design.root, design.node.path);
       return;
     }
-    const root = this.svc.hierarchy(mod.name, file)?.root;
+    const root = this.svc.compositionHierarchy(mod.name, file)?.root;
     if (!root) return;
     this.show(root, root.path);
   }
@@ -177,7 +177,7 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
   }
 
   private rebuild(rootName?: string): void {
-    const root = this.cachedRoot ?? (rootName ? this.svc.hierarchy(rootName)?.root : undefined);
+    const root = this.cachedRoot ?? (rootName ? this.svc.compositionHierarchy(rootName)?.root : undefined);
     if (!root) {
       this.payload = { rootModule: this.cachedRootModule ?? '', rootPath: '', file: this.cachedFile ?? '', rows: [] };
       return;

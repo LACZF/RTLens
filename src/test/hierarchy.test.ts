@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 
 import { HdlIndex } from '../core/index';
-import { containingDesign, signalWidth } from '../core/hierarchy';
+import { containingDesign, signalWidth, findByPath } from '../core/hierarchy';
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const FIXTURES = path.join(ROOT, 'test', 'fixtures');
@@ -62,6 +62,25 @@ test('containingDesign: a real top is its own root, so its chain stays empty', (
   const top = containingDesign(index, 'chip_top');
   assert.equal(top!.root.path, 'chip_top');
   assert.equal(top!.node.path, 'chip_top', 'nothing is above a top, so the node is the root');
+});
+
+test('containingDesign forwards its depth/budget options into the built tree', () => {
+  const index = new HdlIndex();
+  index.addFile(
+    '/w/chain.v',
+    [
+      'module m3 (); endmodule',
+      'module m2 (); m3 u (); endmodule',
+      'module m1 (); m2 u (); endmodule',
+      'module m0 (); m1 u (); endmodule',
+    ].join('\n'),
+  );
+  const full = containingDesign(index, 'm3', undefined, [], { maxDepth: 0 });
+  assert.equal(full!.root.path, 'm0');
+  assert.ok(findByPath(full!.root, 'm0.u.u.u'), 'with no depth limit the deep node is built');
+  assert.equal(full!.node.path, 'm0.u.u.u', 'so the containing node is found');
+  const shallow = containingDesign(index, 'm3', undefined, [], { maxDepth: 1 });
+  assert.equal(shallow, undefined, 'a shallow limit cannot reach the module, so there is no chain to return');
 });
 
 test('hierarchy: the width of a signal is every dimension it was declared with', () => {

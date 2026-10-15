@@ -255,6 +255,43 @@ test('composition webview: follows the editor by highlighting the current module
   assert.equal(pinnedPosted[pinnedPosted.length - 1].path, 'top', 'the root module highlights itself');
 });
 
+test("composition: its depth and instance budget are its own settings, unlimited by default", async () => {
+  const { findByPath } = await import('../core/hierarchy');
+  const src = [
+    'module m0 (); m1 u (); endmodule',
+    'module m1 (); m2 u (); endmodule',
+    'module m2 (); m3 u (); endmodule',
+    'module m3 (); endmodule',
+  ].join('\n');
+
+  // The global hierarchy keeps its depth cap...
+  const svc = await svcWith({ maxDepth: 1 });
+  svc.index.addFile('/w/chain.v', src);
+  assert.equal(
+    findByPath(svc.hierarchy('m0')!.root, 'm0.u')?.children?.length,
+    0,
+    'the global hierarchy keeps the configured depth cap',
+  );
+  // ...but the Composition tree ignores it and expands the whole design.
+  assert.ok(
+    findByPath(svc.compositionHierarchy('m0')!.root, 'm0.u.u.u'),
+    'the Composition tree is not bound by the global depth cap',
+  );
+
+  // And the Composition tree has its own cap, set independently.
+  const capped = await svcWith({ maxDepth: 8, 'composition.maxDepth': 1 });
+  capped.index.addFile('/w/chain.v', src);
+  assert.equal(
+    findByPath(capped.compositionHierarchy('m0')!.root, 'm0.u')?.children?.length,
+    0,
+    'the Composition depth cap applies to the Composition tree only',
+  );
+  assert.ok(
+    findByPath(capped.hierarchy('m0')!.root, 'm0.u.u.u'),
+    'the global tree is untouched by the Composition cap',
+  );
+});
+
 test('composition: the graph child page follows defaultChildLimit', async () => {
   const svc = await svcWith({ defaultChildLimit: 13, 'graph.maxSignalsPerGroup': 10000 });
   const { GraphPanel } = await import('../vscode/graphPanel');

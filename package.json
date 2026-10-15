@@ -132,6 +132,18 @@
           "minimum": 100,
           "description": "Maximum number of hierarchy nodes materialised in one expansion."
         },
+        "hdl.connectView.composition.maxDepth": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "Maximum depth the Composition tree (left sidebar hierarchy) expands to, independent of hdl.connectView.maxDepth. 0 means no limit; cycle detection still stops self-instantiating modules."
+        },
+        "hdl.connectView.composition.maxInstances": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "Maximum number of instance rows the Composition tree (left sidebar hierarchy) materialises in one expansion, independent of hdl.connectView.maxInstances. 0 means no limit."
+        },
         "hdl.connectView.graph.maxNodes": {
           "type": "number",
           "default": 800,

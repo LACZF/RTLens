@@ -12,6 +12,10 @@ export interface HdlConfig {
   topModules: string[];
   maxDepth: number;
   maxInstances: number;
+  /** Composition-tree depth cap; 0 means no limit. */
+  compositionMaxDepth: number;
+  /** Composition-tree node budget; 0 means no limit. */
+  compositionMaxInstances: number;
   graphMaxNodes: number;
   graphShowContainment: boolean;
   graphMaxSignalsPerGroup: number;
@@ -41,6 +45,8 @@ export function readConfig(scope?: vscode.Uri): HdlConfig {
     topModules: strArray(cfg, 'topModules', []),
     maxDepth: cfg.get<number>('maxDepth') ?? 32,
     maxInstances: cfg.get<number>('maxInstances') ?? 20000,
+    compositionMaxDepth: cfg.get<number>('composition.maxDepth') ?? 0,
+    compositionMaxInstances: cfg.get<number>('composition.maxInstances') ?? 0,
     graphMaxNodes: cfg.get<number>('graph.maxNodes') ?? 800,
     graphShowContainment: cfg.get<boolean>('graph.showContainment') ?? false,
     graphMaxSignalsPerGroup: cfg.get<number>('graph.maxSignalsPerGroup') ?? 40,

@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { HdlIndex, basename, dirname } from '../core/index';
-import { buildHierarchy, findByPath, subtree } from '../core/hierarchy';
+import { buildHierarchy, containingDesign as containingDesignOf, findByPath, subtree } from '../core/hierarchy';
 import { buildGraph, type Graph, type GraphOptions } from '../core/graph';
 import type { HierarchyNode, ModuleDef } from '../core/ast';
 import type { HierarchyResult } from '../core/hierarchy';
@@ -472,6 +472,37 @@ export class IndexService implements vscode.Disposable {
         maxInstances: this.configValue.maxInstances,
       },
       def.file,
+    );
+  }
+
+  /**
+   * Hierarchy for the Composition view. The tree has its own depth / node
+   * budget (`hdl.connectView.composition.*`), independent of the global
+   * `maxDepth` / `maxInstances`, and both default to no limit.
+   */
+  compositionHierarchy(moduleName: string, fromFile?: string): HierarchyResult | undefined {
+    return buildHierarchy(
+      this.index,
+      moduleName,
+      {
+        maxDepth: this.configValue.compositionMaxDepth,
+        maxInstances: this.configValue.compositionMaxInstances,
+      },
+      fromFile,
+    );
+  }
+
+  /** Design containing `moduleName`, bounded by the Composition limits. */
+  containingDesign(moduleName: string, fromFile?: string): { root: HierarchyNode; node: HierarchyNode } | undefined {
+    return containingDesignOf(
+      this.index,
+      moduleName,
+      fromFile,
+      this.configValue.topModules,
+      {
+        maxDepth: this.configValue.compositionMaxDepth,
+        maxInstances: this.configValue.compositionMaxInstances,
+      },
     );
   }
 

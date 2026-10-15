@@ -13,7 +13,12 @@ import type { HierarchyNode, ModuleDef, ParamDecl, PortDecl, InstanceSite } from
 import { MapScope, rangeWidth, typeWidth } from './fold';
 
 export interface HierarchyOptions {
+  /**
+   * Depth cap; omitted keeps the default 32, an explicit 0 means no limit
+   * (cycle detection still stops a module that instantiates itself).
+   */
   maxDepth?: number;
+  /** Node budget; omitted keeps the default 20000, an explicit 0 means no limit. */
   maxInstances?: number;
   /** Modules along the current path, for cycle detection. */
   stopOnCycle?: boolean;
@@ -35,8 +40,11 @@ class Builder {
   unresolved = 0;
 
   constructor(private readonly index: HdlIndex, opts: HierarchyOptions) {
-    this.budget = opts.maxInstances ?? 20000;
-    this.maxDepth = opts.maxDepth ?? 32;
+    // `undefined` keeps the historic default; an explicit 0 lifts the cap.
+    this.budget =
+      opts.maxInstances === undefined ? 20000 : opts.maxInstances > 0 ? opts.maxInstances : Infinity;
+    this.maxDepth =
+      opts.maxDepth === undefined ? 32 : opts.maxDepth > 0 ? opts.maxDepth : Infinity;
   }
 
   build(moduleName: string, fromFile?: string): HierarchyResult | undefined {
@@ -280,6 +288,7 @@ export function containingDesign(
   moduleName: string,
   fromFile?: string,
   preferTops: string[] = [],
+  opts: HierarchyOptions = { maxDepth: 128 },
 ): { root: HierarchyNode; node: HierarchyNode } | undefined {
   if (!index.resolveModule(moduleName, fromFile)) {
     return undefined;
@@ -329,7 +338,7 @@ export function containingDesign(
       (a.top < b.top ? -1 : a.top > b.top ? 1 : 0),
   );
   const best = scored[0];
-  const res = buildHierarchy(index, best.top, { maxDepth: 128 });
+  const res = buildHierarchy(index, best.top, opts);
   const root = res?.root;
   if (!root) {
     return undefined;
