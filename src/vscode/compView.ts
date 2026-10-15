@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 
 import type { IndexService } from './indexService';
 import type { HierarchyNode } from '../core/ast';
-import { findByPath } from '../core/hierarchy';
+import { containingDesign, findByPath } from '../core/hierarchy';
 
 /** Row payload sent to the webview. */
 export interface CompRow {
@@ -50,34 +50,69 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     this.svc.onDidChangeState(() => this.refresh());
   }
 
+  /**
+   * Follow the active editor without moving the tree: root at the design top
+   * (a configured top, else the top that contains the current module) and keep
+   * that root while moving around inside it, revealing and highlighting the row
+   * for the module under the cursor.
+   */
   setContext(file: string | undefined, line: number | undefined): void {
+    const mod = file
+      ? this.svc.moduleAt(file, line ?? 0) ?? this.svc.index.modulesInFile(file)[0]
+      : undefined;
     const tops = this.svc.config.topModules;
     if (tops.length) {
       const def = tops.map((name) => this.svc.index.resolveModule(name)).find((d) => d !== undefined);
       if (!def) return;
-      const h = this.svc.hierarchy(def.name, def.file);
-      const root = h?.root;
+      const root = this.svc.hierarchy(def.name, def.file)?.root;
       if (!root) return;
-      if (this.cachedRootModule === def.name && this.cachedFile === root.file) return;
-      this.cachedRootModule = def.name;
-      this.cachedFile = root.file;
-      this.cachedRoot = root;
-      this.rebuild();
-      this.post();
+      this.show(root, mod ? this.locate(root, mod.name) : undefined);
       return;
     }
-    if (!file) return;
-    const mod = this.svc.moduleAt(file, line ?? 0) ?? this.svc.index.modulesInFile(file)[0];
-    if (!mod) return;
-    const h = this.svc.hierarchy(mod.name, file);
-    const root = h?.root;
+    if (!file || !mod) return;
+    // Already inside the shown design: just move the highlight, no rebuild.
+    if (this.cachedRoot) {
+      const here = this.locate(this.cachedRoot, mod.name);
+      if (here) {
+        this.show(this.cachedRoot, here);
+        return;
+      }
+    }
+    const design = containingDesign(this.svc.index, mod.name, file);
+    if (design) {
+      this.show(design.root, design.node.path);
+      return;
+    }
+    const root = this.svc.hierarchy(mod.name, file)?.root;
     if (!root) return;
-    if (this.cachedRootModule === mod.name && this.cachedFile === root.file) return;
-    this.cachedRootModule = mod.name;
-    this.cachedFile = root.file;
+    this.show(root, root.path);
+  }
+
+  /** Re-root only when the design changed, then reveal + highlight `path`. */
+  private show(root: HierarchyNode, path: string | undefined): void {
+    const changed = this.cachedRoot?.path !== root.path || this.cachedFile !== root.file;
     this.cachedRoot = root;
-    this.rebuild();
-    this.post();
+    this.cachedRootModule = root.moduleName;
+    this.cachedFile = root.file;
+    if (changed) {
+      this.rebuild();
+      this.post();
+    }
+    void this.view?.webview.postMessage({ type: 'highlightPath', path: path ?? '' });
+  }
+
+  /** Path of the first (nearest) row whose module is `name`, root included. */
+  private locate(root: HierarchyNode, name: string): string | undefined {
+    if (root.moduleName === name) return root.path;
+    const queue: HierarchyNode[] = [root];
+    while (queue.length) {
+      const node = queue.shift()!;
+      for (const child of node.children ?? []) {
+        if (child.moduleName === name) return child.path;
+        queue.push(child);
+      }
+    }
+    return undefined;
   }
 
   setRoot(node: HierarchyNode | undefined, moduleName?: string): void {
@@ -230,6 +265,8 @@ header { position:sticky; top:0; padding:6px 8px; background:var(--vscode-sideBa
 .list { padding:2px 0; }
 .row { display:flex; align-items:baseline; gap:6px; padding:2px 8px 2px 4px; cursor:pointer; white-space:nowrap; }
 .row:hover { background:var(--vscode-list-hoverBackground); }
+.row.sel { background:var(--vscode-list-activeSelectionBackground,var(--vscode-list-inactiveSelectionBackground)); color:var(--vscode-list-activeSelectionForeground,var(--vscode-foreground)); }
+.row.sel .badge { color:inherit; }
 .indent { flex:0 0 auto; }
 .tw { flex:0 0 14px; width:14px; text-align:center; color:var(--vscode-icon-foreground,var(--vscode-foreground)); font-size:.75em; user-select:none; }
 .tw.leaf { visibility:hidden; }
@@ -242,8 +279,9 @@ header { position:sticky; top:0; padding:6px 8px; background:var(--vscode-sideBa
  * The whole webview script, kept as a string so tests can run the real thing
  * against a stub DOM instead of a copy. It expects `#q`, `#mod`, `#file`,
  * `#empty` and `#list`, gets `{type:'rows', rootModule, rootPath, rows}` on a
- * rebuild and `{type:'revealPath', path}` to scroll to a row, and posts
- * `{type:'open', path}` when a row is clicked.
+ * rebuild, `{type:'revealPath', path}` to scroll to a row, and
+ * `{type:'highlightPath', path}` to mark the current module's row (revealing
+ * it); it posts `{type:'open', path}` when a row is clicked.
  */
 export const SCRIPT = String.raw`
 (function () {
@@ -258,6 +296,7 @@ export const SCRIPT = String.raw`
   var els = {};
   var collapsed = {};
   var lastRoot = '';
+  var selected = '';
 
   // Subsequence match: every character of the query must appear in order.
   // Returns the matched indices and a score that favours contiguous runs and
@@ -385,7 +424,7 @@ export const SCRIPT = String.raw`
       shown += 1;
 
       var el = document.createElement('div');
-      el.setAttribute('class', 'row');
+      el.setAttribute('class', r.path === selected ? 'row sel' : 'row');
       el.setAttribute('title', r.badge);
 
       var indent = document.createElement('span');
@@ -454,6 +493,18 @@ export const SCRIPT = String.raw`
       render();
       var target = els[m.path];
       if (target && target.scrollIntoView) target.scrollIntoView({ block: 'center' });
+      return;
+    }
+    if (m.type === 'highlightPath') {
+      // The current module's row: mark it, open the path down to it and scroll.
+      selected = m.path || '';
+      if (selected) {
+        expandAncestors(selected);
+        delete collapsed[selected];
+      }
+      render();
+      var mark = els[selected];
+      if (mark && mark.scrollIntoView) mark.scrollIntoView({ block: 'center' });
       return;
     }
     if (m.type !== 'rows') return;

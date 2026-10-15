@@ -181,6 +181,80 @@ test('composition webview: a row click jumps to its instance, not line 0', async
   );
 });
 
+test('composition webview: follows the editor by highlighting the current module without moving the root', async () => {
+  const src =
+    'module leaf (input wire a, output wire s); assign s = a; endmodule\n' +
+    'module top (input wire i, output wire o); leaf u (.a(i), .s(o)); endmodule\n';
+  const svc = await svcWith();
+  svc.index.addFile('/w/h.v', src);
+  const { CompositionViewProvider } = await import('../vscode/compView');
+  const provider = new CompositionViewProvider(svc);
+
+  const posted: { type?: string; path?: string }[] = [];
+  provider.resolveWebviewView({
+    webview: {
+      options: {},
+      html: '',
+      onDidReceiveMessage: () => ({ dispose() {} }),
+      postMessage: async (m: { type?: string; path?: string }) => {
+        posted.push(m);
+      },
+    },
+  } as unknown as import('vscode').WebviewView);
+
+  // Active module `top`: the design-top row is highlighted.
+  provider.setContext('/w/h.v', 1);
+  assert.equal(provider.root, 'top', 'the tree roots at the design top, not the cursor module');
+  assert.deepEqual(
+    [posted[posted.length - 1].type, posted[posted.length - 1].path],
+    ['highlightPath', 'top'],
+  );
+
+  // Move to `leaf`: the root stays put, the highlight follows down to its row.
+  const before = posted.length;
+  provider.setContext('/w/h.v', 0);
+  assert.equal(provider.root, 'top', 'moving inside the design does not move the root');
+  const moved = posted.slice(before);
+  assert.equal(moved.filter((m) => m.type === 'rows').length, 0, 'no rebuild when only the highlight changes');
+  assert.deepEqual(
+    moved.filter((m) => m.type === 'highlightPath').map((m) => m.path),
+    ['top.u'],
+    'the highlight follows to the module under the cursor',
+  );
+
+  // A fresh tree opened directly on the nested module roots at the design top
+  // (found upward from the cursor module) rather than at that module.
+  const fresh = new CompositionViewProvider(svc);
+  fresh.setContext('/w/h.v', 0);
+  assert.equal(fresh.root, 'top', 'a fresh tree roots at the design top of the cursor module');
+
+  // A configured top pins the root; the highlight is located inside the full design.
+  const pinnedSvc = await svcWith({ topModules: ['top'] });
+  pinnedSvc.index.addFile('/w/h.v', src);
+  const pinned = new CompositionViewProvider(pinnedSvc);
+  const pinnedPosted: { type?: string; path?: string }[] = [];
+  pinned.resolveWebviewView({
+    webview: {
+      options: {},
+      html: '',
+      onDidReceiveMessage: () => ({ dispose() {} }),
+      postMessage: async (m: { type?: string; path?: string }) => {
+        pinnedPosted.push(m);
+      },
+    },
+  } as unknown as import('vscode').WebviewView);
+
+  pinned.setContext('/w/h.v', 0);
+  assert.equal(pinned.root, 'top', 'a configured top stays the root');
+  assert.equal(
+    pinnedPosted[pinnedPosted.length - 1].path,
+    'top.u',
+    'the highlight is located by module name inside the configured top',
+  );
+  pinned.setContext('/w/h.v', 1);
+  assert.equal(pinnedPosted[pinnedPosted.length - 1].path, 'top', 'the root module highlights itself');
+});
+
 test('composition: the graph child page follows defaultChildLimit', async () => {
   const svc = await svcWith({ defaultChildLimit: 13, 'graph.maxSignalsPerGroup': 10000 });
   const { GraphPanel } = await import('../vscode/graphPanel');

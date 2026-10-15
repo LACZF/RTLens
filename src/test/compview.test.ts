@@ -227,3 +227,29 @@ test('composition webview: a reveal opens the path down to the row and scrolls t
   assert.ok(rows.some((r) => rowText(r) === 'u_a : leaf'), 'the revealed row is now visible');
   assert.equal(ui.scrollCount(), 1, 'and it is scrolled into view');
 });
+
+test('composition webview: a highlight marks only the current module row and scrolls to it', () => {
+  const ui = start(ROWS);
+  assert.equal(drawn(ui.list).length, 1);
+
+  ui.message({ type: 'highlightPath', path: 'top.u_mid.u_a' });
+  let rows = drawn(ui.list);
+  const leaf = rows.find((r) => rowText(r) === 'u_a : leaf')!;
+  assert.ok(leaf, 'the highlighted row is revealed along with its ancestors');
+  assert.ok(leaf.classList.contains('sel'), 'the current module row carries the selection class');
+  assert.equal(ui.scrollCount(), 1, 'and it is scrolled into view');
+  assert.ok(
+    rows.filter((r) => r.classList.contains('sel')).length === 1,
+    'no other row is marked',
+  );
+
+  // The highlight moves with the cursor; the old row is no longer selected.
+  ui.message({ type: 'highlightPath', path: 'top.u_top' });
+  rows = drawn(ui.list);
+  assert.ok(rows.find((r) => rowText(r) === 'u_top : leaf')!.classList.contains('sel'));
+  assert.ok(!rows.find((r) => rowText(r) === 'u_a : leaf')!.classList.contains('sel'), 'the previous highlight is cleared');
+
+  // An empty path clears the selection.
+  ui.message({ type: 'highlightPath', path: '' });
+  assert.equal(drawn(ui.list).filter((r) => r.classList.contains('sel')).length, 0);
+});
