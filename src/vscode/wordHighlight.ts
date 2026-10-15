@@ -3,20 +3,22 @@ import * as vscode from 'vscode';
 import { wordAtPosition } from '../core/resolve';
 import { findWordMatches, randomHighlightColor } from '../core/wordHighlight';
 
+interface ActiveHighlight {
+  word: string;
+  decoration: vscode.TextEditorDecorationType;
+}
+
 /**
  * Global (open-editors) word highlight toggled by F8.
  *
  * - Turning on: finds the identifier under the active cursor and highlights every
  *   standalone occurrence of it in every visible editor (whole-token match).
- * - Turning on again for the same word: clears it (toggle off).
- * - Turning on for a different word: clears the previous and highlights the new.
- * - The colour is picked at random each time highlighting is enabled.
+ * - Turning on again for the same word: removes its highlight (toggle off).
+ * - Different words stay highlighted simultaneously; decorations do not interfere.
+ * - The colour is picked at random each time a word is highlighted.
  */
 export class WordHighlighter implements vscode.Disposable {
-  private active?: {
-    word: string;
-    decoration: vscode.TextEditorDecorationType;
-  };
+  private readonly active: ActiveHighlight[] = [];
   private readonly disposables: vscode.Disposable[] = [];
 
   constructor() {
@@ -35,16 +37,14 @@ export class WordHighlighter implements vscode.Disposable {
     const pos = editor.selection.active;
     const found = wordAtPosition(editor.document.getText(), pos.line, pos.character);
     if (!found || !found.name) {
-      // Cursor is not on an identifier; ignore rather than clearing an existing
-      // highlight, so an accidental F8 does not lose a deliberate one.
       return;
     }
     const word = found.name;
-    if (this.active?.word === word) {
-      this.clear();
+    const idx = this.active.findIndex((a) => a.word === word);
+    if (idx >= 0) {
+      this.remove(idx);
       return;
     }
-    this.clear();
     const color = randomHighlightColor();
     const decoration = vscode.window.createTextEditorDecorationType({
       backgroundColor: color.background,
@@ -53,43 +53,50 @@ export class WordHighlighter implements vscode.Disposable {
       overviewRulerLane: vscode.OverviewRulerLane.Center,
       borderRadius: '2px',
     });
-    this.active = { word, decoration };
+    this.active.push({ word, decoration });
     this.reapply();
   }
 
-  /** The currently highlighted word, or `undefined` if none is active. */
-  get word(): string | undefined {
-    return this.active?.word;
+  /** Currently highlighted words. */
+  get words(): string[] {
+    return this.active.map((a) => a.word);
   }
 
   private reapply(): void {
-    const active = this.active;
-    if (!active) {
-      return;
-    }
     for (const editor of vscode.window.visibleTextEditors) {
       const text = editor.document.getText();
-      const ranges = findWordMatches(text, active.word).map(
-        (m) => new vscode.Range(m.line, m.startChar, m.line, m.endChar),
-      );
-      editor.setDecorations(active.decoration, ranges);
+      for (const a of this.active) {
+        const ranges = findWordMatches(text, a.word).map(
+          (m) => new vscode.Range(m.line, m.startChar, m.line, m.endChar),
+        );
+        editor.setDecorations(a.decoration, ranges);
+      }
     }
   }
 
-  private clear(): void {
-    const active = this.active;
-    if (!active) {
-      return;
-    }
+  private remove(idx: number): void {
+    if (idx < 0 || idx >= this.active.length) return;
+    const [a] = this.active.splice(idx, 1);
     for (const editor of vscode.window.visibleTextEditors) {
-      editor.setDecorations(active.decoration, []);
+      editor.setDecorations(a.decoration, []);
     }
-    active.decoration.dispose();
-    this.active = undefined;
+    a.decoration.dispose();
+    this.reapply();
+  }
+
+  private clearAll(): void {
+    for (let i = this.active.length - 1; i >= 0; i--) {
+      const a = this.active[i];
+      for (const editor of vscode.window.visibleTextEditors) {
+        editor.setDecorations(a.decoration, []);
+      }
+      a.decoration.dispose();
+    }
+    this.active.length = 0;
   }
 
   dispose(): void {
-    this.clear();
+    this.clearAll();
     for (const d of this.disposables) {
       d.dispose();
     }
