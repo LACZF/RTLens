@@ -3,7 +3,14 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 import { HdlIndex, basename, dirname } from '../core/index';
-import { buildHierarchy, containingDesign as containingDesignOf, findByPath, subtree } from '../core/hierarchy';
+import {
+  buildHierarchy,
+  containingDesign as containingDesignOf,
+  containingPath,
+  findByPath,
+  HierarchyBuilder,
+  subtree,
+} from '../core/hierarchy';
 import { buildGraph, type Graph, type GraphOptions } from '../core/graph';
 import type { HierarchyNode, ModuleDef } from '../core/ast';
 import type { HierarchyResult } from '../core/hierarchy';
@@ -511,6 +518,24 @@ export class IndexService implements vscode.Disposable {
       },
       fromFile,
     );
+  }
+
+  /**
+   * A lazy builder for the Composition view. It carries the same
+   * `hdl.connectView.composition.*` limits as {@link compositionHierarchy}, but
+   * materialises one level at a time, so a very large design costs only the
+   * rows the reader actually opens.
+   */
+  compositionExpander(): HierarchyBuilder {
+    return new HierarchyBuilder(this.index, {
+      maxDepth: this.configValue.compositionMaxDepth,
+      maxInstances: this.configValue.compositionMaxInstances,
+    });
+  }
+
+  /** Nearest design top for `moduleName` and the path down to it, no tree built. */
+  containingPath(moduleName: string, fromFile?: string): { top: string; path: string } | undefined {
+    return containingPath(this.index, moduleName, fromFile, this.configValue.topModules);
   }
 
   /** Design containing `moduleName`, bounded by the Composition limits. */

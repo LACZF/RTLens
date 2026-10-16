@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 import type { IndexService } from './indexService';
 import type { HierarchyNode, ModuleDef } from '../core/ast';
 import type { Range } from '../core/lexer';
-import { findByPath } from '../core/hierarchy';
+import { childOnPath, findByPath, type HierarchyBuilder } from '../core/hierarchy';
 
 /** Whether `(line, character)` sits inside `range`. */
 function inRange(range: Range, line: number, character: number): boolean {
@@ -70,10 +70,14 @@ export interface CompPayload {
  */
 export class CompositionViewProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
+  /** Lazy builder for the tree; `cachedRoot`'s levels are pulled through it. */
+  private expander?: HierarchyBuilder;
   private cachedRoot?: HierarchyNode;
   private cachedRootModule?: string;
   private cachedFile?: string;
   private payload: CompPayload = { rootModule: '', rootPath: '', file: '', rows: [] };
+  /** Levels materialised since the last full post, whose child rows are still owed to the webview. */
+  private pending: HierarchyNode[] = [];
 
   constructor(private readonly svc: IndexService) {
     this.svc.onDidChange(() => this.refresh());
@@ -100,65 +104,45 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     if (tops.length) {
       const def = tops.map((name) => this.svc.index.resolveModule(name)).find((d) => d !== undefined);
       if (!def) return;
-      const root = this.svc.compositionHierarchy(def.name, def.file)?.root;
-      if (!root) return;
-      this.show(root, mod ? this.focusPath(root, mod.name, local) : undefined);
+      this.ensureRoot(def.name, def.file);
+      // A configured top pins the root; the cursor's module is located inside it
+      // only when its own chain ends at that same top.
+      let modulePath = mod ? this.locateMaterialized(mod.name) : undefined;
+      if (mod && file && !modulePath) {
+        const design = this.svc.containingPath(mod.name, file);
+        if (design && design.top === def.name) {
+          modulePath = design.path;
+        }
+      }
+      this.show(modulePath, local);
       return;
     }
     if (!file || !mod) return;
-    // Already inside the shown design: just move the highlight, no rebuild.
-    if (this.cachedRoot) {
-      const here = this.focusPath(this.cachedRoot, mod.name, local);
-      if (here) {
-        this.show(this.cachedRoot, here);
-        return;
-      }
-    }
-    const design = this.svc.containingDesign(mod.name, file);
-    if (design) {
-      const node = local ? findByPath(design.root, `${design.node.path}.${local}`) : undefined;
-      this.show(design.root, node ? node.path : design.node.path);
+    // The module is already drawn: move the highlight without a reverse walk.
+    const here = this.locateMaterialized(mod.name);
+    if (here) {
+      this.show(here, local);
       return;
     }
-    const root = this.svc.compositionHierarchy(mod.name, file)?.root;
-    if (!root) return;
-    this.show(root, this.focusPath(root, mod.name, local) ?? root.path);
-  }
-
-  /**
-   * The row to highlight for a cursor in `moduleName`: the instance row
-   * `local` under the module's row when that instance is drawn, else the
-   * module's own row.
-   */
-  private focusPath(root: HierarchyNode, moduleName: string, local: string | undefined): string | undefined {
-    const base = this.locate(root, moduleName);
-    if (!base || !local) return base;
-    const full = `${base}.${local}`;
-    return findByPath(root, full) ? full : base;
-  }
-
-  /** Re-root only when the design changed, then reveal + highlight `path`. */
-  private show(root: HierarchyNode, path: string | undefined): void {
-    const changed = this.cachedRoot?.path !== root.path || this.cachedFile !== root.file;
-    this.cachedRoot = root;
-    this.cachedRootModule = root.moduleName;
-    this.cachedFile = root.file;
-    if (changed) {
-      this.rebuild();
-      this.post();
+    const design = this.svc.containingPath(mod.name, file);
+    if (design) {
+      this.ensureRoot(design.top, this.svc.index.resolveModule(design.top)?.file);
+      this.show(design.path, local);
+      return;
     }
-    void this.view?.webview.postMessage({ type: 'highlightPath', path: path ?? '' });
+    this.ensureRoot(mod.name, file);
+    this.show(mod.name, local);
   }
 
-  /** Path of the first (nearest) row whose module is `name`, root included. */
-  private locate(root: HierarchyNode, name: string): string | undefined {
+  /** Path of the first materialised row whose module is `name`, root included. */
+  private locateMaterialized(name: string): string | undefined {
+    const root = this.cachedRoot;
+    if (!root) return undefined;
     if (root.moduleName === name) return root.path;
-    // Index-pointer BFS: `queue.shift()` is O(n) and this runs on every cursor
-    // move, so a design with thousands of instances turned into O(n^2).
+    // Index-pointer BFS to avoid `queue.shift()`'s O(n): this runs every cursor move.
     const queue: HierarchyNode[] = [root];
     for (let head = 0; head < queue.length; head++) {
-      const node = queue[head];
-      for (const child of node.children ?? []) {
+      for (const child of queue[head].children ?? []) {
         if (child.moduleName === name) return child.path;
         queue.push(child);
       }
@@ -166,7 +150,88 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     return undefined;
   }
 
+  /**
+   * Point the tree at a root without moving it: only a different design (a new
+   * path/file) rebuilds, so moving the cursor inside one design keeps the
+   * materialised levels and the reader's collapse state.
+   */
+  private ensureRoot(moduleName: string, fromFile?: string): void {
+    if (this.cachedRoot && this.cachedRootModule === moduleName && this.cachedFile === fromFile) {
+      return;
+    }
+    this.expander = this.svc.compositionExpander();
+    this.cachedRoot = this.expander.root(moduleName, fromFile);
+    this.cachedRootModule = moduleName;
+    this.cachedFile = fromFile;
+    this.rebuild();
+    this.post();
+  }
+
+  /**
+   * Reveal and highlight the row for a cursor in `modulePath`, pulling the
+   * levels above it (and the instance `local` under it when that is where the
+   * cursor sits) from the lazy builder. The host materialises first and streams
+   * the new `children` before the highlight, so the webview only ever draws
+   * rows it has.
+   */
+  private show(modulePath: string | undefined, local: string | undefined): void {
+    const root = this.cachedRoot;
+    if (!root) return;
+    let target = '';
+    if (modulePath) {
+      this.materializeTo(modulePath);
+      if (findByPath(root, modulePath)) {
+        target = modulePath;
+        if (local) {
+          const full = `${modulePath}.${local}`;
+          this.materializeTo(full);
+          if (findByPath(root, full)) {
+            target = full;
+          }
+        }
+      }
+    }
+    this.flushChildren();
+    void this.view?.webview.postMessage({ type: 'highlightPath', path: target });
+  }
+
+  /**
+   * Expand every node on the path down to `target`. Only unexpanded nodes are
+   * materialised (one level each); the nodes that gained children are queued so
+   * their rows can be streamed to the webview.
+   */
+  private materializeTo(target: string): void {
+    const root = this.cachedRoot;
+    const expander = this.expander;
+    if (!root || !expander) return;
+    let node: HierarchyNode | undefined = root;
+    while (node && node.path !== target) {
+      if (node.children === undefined) {
+        if (expander.childCount(node) === 0) break;
+        expander.expandLevel(node);
+        this.pending.push(node);
+      }
+      const next = childOnPath(node, target);
+      if (!next) break;
+      node = next;
+    }
+  }
+
+  /** Send the child rows of every level materialised since the last flush. */
+  private flushChildren(): void {
+    if (!this.view || this.pending.length === 0) return;
+    const nodes = this.pending;
+    this.pending = [];
+    for (const node of nodes) {
+      void this.view.webview.postMessage({ type: 'children', parentPath: node.path, rows: this.childRows(node) });
+    }
+  }
+
   setRoot(node: HierarchyNode | undefined, moduleName?: string): void {
+    // A caller hands us a fully built tree (e.g. reveal in Composition); we keep
+    // it whole by handing the builder only the root's identity for later
+    // refreshes.
+    this.expander = this.svc.compositionExpander();
     this.cachedRoot = node;
     this.cachedRootModule = moduleName ?? node?.moduleName;
     this.cachedFile = node?.file;
@@ -185,8 +250,8 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
   modelFor(path: string): CompRow | undefined {
     const root = this.cachedRoot;
     if (!root) return undefined;
-    const node = findByPath(root, path);
-    if (!node) return undefined;
+    if (!findByPath(root, path)) return undefined;
+    this.materializeTo(path);
     this.rebuild();
     this.post();
     const row = this.payload.rows.find((r) => r.path === path);
@@ -195,15 +260,42 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
 
   /** Scroll the webview to `path`, expanding the rows above it. */
   reveal(path: string): void {
+    this.materializeTo(path);
+    this.flushChildren();
     void this.view?.webview.postMessage({ type: 'revealPath', path });
   }
 
   /**
-   * Expand or collapse every row in the instance hierarchy. The webview owns
-   * the per-row collapse state, so the title-bar button just asks it to switch.
+   * Expand or collapse every row in the instance hierarchy. Expanding is the
+   * host's job (it owns the tree): it materialises the whole design, bounded by
+   * the Composition limits, then tells the webview. Collapsing is client-side.
    */
   setExpandedAll(expanded: boolean): void {
-    void this.view?.webview.postMessage({ type: 'setExpanded', expanded });
+    if (!expanded) {
+      void this.view?.webview.postMessage({ type: 'setExpanded', expanded: false });
+      return;
+    }
+    this.expandAll();
+    this.rebuild();
+    this.post();
+    void this.view?.webview.postMessage({ type: 'setExpanded', expanded: true });
+  }
+
+  /** Materialise every level the limits allow, for Expand all. */
+  private expandAll(): void {
+    const root = this.cachedRoot;
+    const expander = this.expander;
+    if (!root || !expander) return;
+    const stack: HierarchyNode[] = [root];
+    while (stack.length > 0) {
+      const node = stack.pop()!;
+      if (node.children === undefined && expander.childCount(node) > 0) {
+        expander.expandLevel(node);
+      }
+      for (const child of node.children ?? []) {
+        stack.push(child);
+      }
+    }
   }
 
   refresh(): void {
@@ -211,9 +303,33 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     // Re-derive the tree from the (possibly reindexed) workspace. Reusing the
     // cached `HierarchyNode` would keep the old children, so a module added
     // since the last build - and everything below it - would never show up.
-    this.cachedRoot = this.svc.compositionHierarchy(this.cachedRootModule, this.cachedFile)?.root;
+    // The previously materialised frontier is re-opened so the view does not
+    // collapse on every edit.
+    const expanded = this.cachedRoot ? materializedPaths(this.cachedRoot) : new Set<string>();
+    this.expander = this.svc.compositionExpander();
+    this.cachedRoot = this.expander.root(this.cachedRootModule, this.cachedFile);
+    if (this.cachedRoot) {
+      this.rematerialize(expanded);
+    }
     this.rebuild();
     this.post();
+  }
+
+  /** Re-open every previously materialised path on the freshly built root. */
+  private rematerialize(expanded: Set<string>): void {
+    const root = this.cachedRoot;
+    const expander = this.expander;
+    if (!root || !expander) return;
+    const stack: HierarchyNode[] = [root];
+    while (stack.length > 0) {
+      const node = stack.pop()!;
+      if (node.children === undefined && expanded.has(node.path) && expander.childCount(node) > 0) {
+        expander.expandLevel(node);
+      }
+      for (const child of node.children ?? []) {
+        stack.push(child);
+      }
+    }
   }
 
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -225,6 +341,16 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
       // button can show Expand all or Collapse all.
       if (msg?.type === 'expandState') {
         void vscode.commands.executeCommand('setContext', 'hdl.compositionExpanded', !!msg.expanded);
+        return;
+      }
+      // The webview opens a chevron on a level it has not seen yet: materialise
+      // just that one level and stream the child rows back.
+      if (msg?.type === 'expand' && msg.path) {
+        const node = this.cachedRoot ? findByPath(this.cachedRoot, msg.path) : undefined;
+        if (node && this.expander && node.children === undefined && this.expander.childCount(node) > 0) {
+          this.expander.expandLevel(node);
+          void view.webview.postMessage({ type: 'children', parentPath: node.path, rows: this.childRows(node) });
+        }
         return;
       }
       if (msg?.type !== 'open' || !msg.path) {
@@ -241,68 +367,22 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
         node,
       });
     });
+    this.rebuild();
     this.post();
   }
 
-  private rebuild(rootName?: string): void {
-    const root = this.cachedRoot ?? (rootName ? this.svc.compositionHierarchy(rootName)?.root : undefined);
-    if (!root) {
+  /** Flatten the materialised tree into pre-order rows for the webview. */
+  private rebuild(): void {
+    const root = this.cachedRoot;
+    if (!root || this.dropped(root)) {
       this.payload = { rootModule: this.cachedRootModule ?? '', rootPath: '', file: this.cachedFile ?? '', rows: [] };
       return;
     }
-    this.cachedRoot = root;
-    // Module filter: mode 1 keeps a filtered instance but prunes its submodules
-    // (it shows as a leaf); mode 2 drops the instance and everything below it.
-    const filter = new Set(this.svc.config.compositionFilterModules);
-    const filterMode = this.svc.config.compositionFilterMode;
     const rows: CompRow[] = [];
-    // Iterative pre-order walk: the Composition tree lifts the depth cap, so a
-    // deep chain must not overflow the call stack. Children are pushed in
-    // reverse so the flat rows keep their parent-before-child order.
-    const stack: { node: HierarchyNode; depth: number; parentPath: string }[] = [
-      { node: root, depth: 0, parentPath: '' },
-    ];
-    while (stack.length > 0) {
-      const { node, depth, parentPath } = stack.pop()!;
-      const hidden = filter.size > 0 && filter.has(node.moduleName);
-      if (hidden && filterMode === 2) {
-        // Drop the filtered instance and its whole subtree.
-        continue;
-      }
-      const def = this.svc.index.resolveModule(node.moduleName, node.file);
-      const realChildCount = node.children?.length ?? 0;
-      const pruned = hidden && realChildCount > 0;
-      const childCount = pruned ? 0 : realChildCount;
-      const paramCount = node.params ? Object.keys(node.params).length : 0;
-      const parts: string[] = [];
-      if (realChildCount) parts.push(`${realChildCount} child${realChildCount === 1 ? '' : 'ren'}`);
-      if (paramCount) parts.push(`${paramCount} param${paramCount === 1 ? '' : 's'}`);
-      if (node.truncated) parts.push(node.cycle ? 'cycle' : 'truncated');
-      if (!def) parts.push('module not found');
-      if (pruned) parts.push('filtered');
-      const isRoot = depth === 0;
-      rows.push({
-        path: node.path,
-        parentPath,
-        instName: node.instName,
-        moduleName: node.moduleName,
-        label: isRoot ? node.moduleName : node.instName,
-        note: isRoot ? (node.file ? this.svc.relFile(node.file) : '') : `${node.instName} : ${node.moduleName}`,
-        badge: parts.join(' · '),
-        icon: def ? 'symbol-module' : 'warning',
-        childCount,
-        depth,
-        file: node.file,
-        unresolved: !def,
-        truncated: !!node.truncated,
-      });
-      if (pruned) {
-        continue;
-      }
-      const children = node.children ?? [];
-      for (let i = children.length - 1; i >= 0; i--) {
-        stack.push({ node: children[i], depth: depth + 1, parentPath: node.path });
-      }
+    rows.push(this.rowFor(root, true));
+    // An unloaded level has no rows below it yet; the webview asks for them.
+    if (root.children !== undefined) {
+      this.pushRows(root, rows);
     }
     this.payload = {
       rootModule: root.moduleName,
@@ -312,9 +392,100 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     };
   }
 
+  /**
+   * Append the materialised subtree under `parent` in pre-order.
+   *
+   * Iterative on purpose: the Composition tree lifts the depth cap, so a chain
+   * of distinct modules must not overflow the call stack. Children are pushed
+   * in reverse so the flat rows keep their parent-before-child order.
+   */
+  private pushRows(parent: HierarchyNode, rows: CompRow[]): void {
+    const stack: HierarchyNode[] = [];
+    const seed = parent.children ?? [];
+    for (let i = seed.length - 1; i >= 0; i--) stack.push(seed[i]);
+    while (stack.length > 0) {
+      const node = stack.pop()!;
+      if (this.dropped(node)) continue;
+      rows.push(this.rowFor(node, false));
+      if (node.children === undefined || this.pruned(node)) continue;
+      for (let i = node.children.length - 1; i >= 0; i--) stack.push(node.children[i]);
+    }
+  }
+
+  /** The direct child rows of an expanded node, for a `children` message. */
+  private childRows(node: HierarchyNode): CompRow[] {
+    const rows: CompRow[] = [];
+    this.pushRows(node, rows);
+    return rows;
+  }
+
+  /** Mode 2 (hide) drops a filtered instance and everything below it. */
+  private dropped(node: HierarchyNode): boolean {
+    const filter = this.svc.config.compositionFilterModules;
+    return filter.length > 0 && this.svc.config.compositionFilterMode === 2 && filter.indexOf(node.moduleName) >= 0;
+  }
+
+  /** Mode 1 (prune) keeps a filtered instance but hides its whole subtree. */
+  private pruned(node: HierarchyNode): boolean {
+    const filter = this.svc.config.compositionFilterModules;
+    if (filter.length === 0 || this.svc.config.compositionFilterMode !== 1) return false;
+    if (filter.indexOf(node.moduleName) < 0) return false;
+    return this.directCount(node) > 0;
+  }
+
+  private directCount(node: HierarchyNode): number {
+    return node.children !== undefined ? node.children.length : this.expander?.childCount(node) ?? 0;
+  }
+
+  private rowFor(node: HierarchyNode, isRoot: boolean): CompRow {
+    const def = this.svc.index.resolveModule(node.moduleName, node.file);
+    const prospective = this.directCount(node);
+    const pruned = this.pruned(node);
+    const depthCut =
+      node.children === undefined &&
+      this.svc.config.compositionMaxDepth > 0 &&
+      node.depth >= this.svc.config.compositionMaxDepth;
+    const parts: string[] = [];
+    if (prospective) parts.push(`${prospective} child${prospective === 1 ? '' : 'ren'}`);
+    const paramCount = node.params ? Object.keys(node.params).length : 0;
+    if (paramCount) parts.push(`${paramCount} param${paramCount === 1 ? '' : 's'}`);
+    if (node.truncated || depthCut) parts.push(node.cycle ? 'cycle' : 'truncated');
+    if (!def) parts.push('module not found');
+    if (pruned) parts.push('filtered');
+    return {
+      path: node.path,
+      parentPath: node.parentPath ?? '',
+      instName: node.instName,
+      moduleName: node.moduleName,
+      label: isRoot ? node.moduleName : node.instName,
+      note: isRoot ? (node.file ? this.svc.relFile(node.file) : '') : `${node.instName} : ${node.moduleName}`,
+      badge: parts.join(' · '),
+      icon: def ? 'symbol-module' : 'warning',
+      childCount: pruned ? 0 : prospective,
+      depth: node.depth,
+      file: node.file,
+      unresolved: !def,
+      truncated: !!node.truncated,
+    };
+  }
+
   private post(): void {
+    this.pending = [];
     void this.view?.webview.postMessage({ type: 'rows', ...this.payload });
   }
+}
+
+/** Every path with a materialised level below it (used to preserve the frontier). */
+function materializedPaths(root: HierarchyNode): Set<string> {
+  const out = new Set<string>();
+  const stack: HierarchyNode[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (node.children === undefined) continue;
+    out.add(node.path);
+    for (const child of node.children) stack.push(child);
+  }
+  return out;
 }
 
 function html(): string {
@@ -371,10 +542,12 @@ header { position:sticky; top:0; padding:6px 8px; background:var(--vscode-sideBa
  * The whole webview script, kept as a string so tests can run the real thing
  * against a stub DOM instead of a copy. It expects `#q`, `#mod`, `#file`,
  * `#empty` and `#list`, gets `{type:'rows', rootModule, rootPath, rows}` on a
- * rebuild, `{type:'revealPath', path}` to scroll to a row,
+ * rebuild, `{type:'children', parentPath, rows}` with one more level the reader
+ * opened, `{type:'revealPath', path}` to scroll to a row,
  * `{type:'highlightPath', path}` to mark the current module's row (revealing
  * it), and `{type:'setExpanded', expanded}` from the title button to open or
- * fold every row; it posts `{type:'open', path}` when a row is clicked and
+ * fold every row; it posts `{type:'open', path}` when a row is clicked,
+ * `{type:'expand', path}` when a row's level is not loaded yet, and
  * `{type:'expandState', expanded}` so the host can swap the title button.
  */
 export const SCRIPT = String.raw`
@@ -389,6 +562,10 @@ export const SCRIPT = String.raw`
   var byPath = {};
   var els = {};
   var collapsed = {};
+  // Parents whose children have arrived. The host streams deeper levels when a
+  // row is opened, so a row can show a disclosure triangle before its children
+  // are known; the collapsed set then only switches once the level is loaded.
+  var loaded = {};
   var lastRoot = '';
   var selected = '';
   var reportedExpanded;
@@ -450,7 +627,13 @@ export const SCRIPT = String.raw`
 
   function index() {
     byPath = {};
-    for (var i = 0; i < rows.length; i++) byPath[rows[i].path] = rows[i];
+    loaded = {};
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      byPath[r.path] = r;
+      // A parent is loaded as soon as a row under it is present.
+      if (r.parentPath) loaded[r.parentPath] = true;
+    }
   }
 
   function expandAncestors(path) {
@@ -464,8 +647,17 @@ export const SCRIPT = String.raw`
   }
 
   function toggle(path) {
-    if (collapsed[path]) delete collapsed[path];
-    else collapsed[path] = true;
+    if (collapsed[path]) {
+      // Opening a level the host has not sent yet: ask for it and keep the row
+      // folded until its children arrive (the 'children' handler opens it).
+      if (!loaded[path]) {
+        vscode.postMessage({ type: 'expand', path: path });
+        return;
+      }
+      delete collapsed[path];
+    } else {
+      collapsed[path] = true;
+    }
     render();
   }
 
@@ -664,6 +856,27 @@ export const SCRIPT = String.raw`
     if (m.type === 'setExpanded') {
       if (m.expanded) expandAll();
       else collapseAll();
+      return;
+    }
+    if (m.type === 'children') {
+      // One more level arrived. Rows are flat pre-order, so a parent's children
+      // go right after the parent; opening the level reveals them, and each new
+      // child starts collapsed so the tree still opens one level at a time.
+      var add = m.rows || [];
+      if (add.length) {
+        var at = -1;
+        for (var ci = 0; ci < rows.length; ci++) {
+          if (rows[ci].path === m.parentPath) { at = ci; break; }
+        }
+        if (at >= 0) Array.prototype.splice.apply(rows, [at + 1, 0].concat(add));
+        else rows = rows.concat(add);
+        for (var ai = 0; ai < add.length; ai++) {
+          if (add[ai].childCount > 0) collapsed[add[ai].path] = true;
+        }
+        index();
+      }
+      delete collapsed[m.parentPath];
+      render();
       return;
     }
     if (m.type !== 'rows') return;

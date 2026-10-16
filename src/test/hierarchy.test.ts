@@ -4,7 +4,16 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 
 import { HdlIndex } from '../core/index';
-import { buildHierarchy, containingDesign, signalWidth, findByPath, pathChain } from '../core/hierarchy';
+import {
+  buildHierarchy,
+  childOnPath,
+  containingDesign,
+  containingPath,
+  HierarchyBuilder,
+  signalWidth,
+  findByPath,
+  pathChain,
+} from '../core/hierarchy';
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const FIXTURES = path.join(ROOT, 'test', 'fixtures');
@@ -196,4 +205,94 @@ endmodule`,
   assert.equal(signalWidth(index, 'm', 'i'), 32, 'an integer is 32 bits');
   assert.equal(signalWidth(index, 'm', 'folded'), 4, 'a range written in terms of a parameter');
   assert.equal(signalWidth(index, 'm', 'nope'), undefined, 'an unknown name has no width');
+});
+
+test('lazy hierarchy: root/expandLevel materialise one level at a time, childCount predicts it', () => {
+  const index = new HdlIndex();
+  index.addFile(
+    '/w/t.v',
+    [
+      'module leaf (); endmodule',
+      'module mid (); leaf a (); leaf b (); endmodule',
+      'module top (); mid u_mid (); leaf u_top (); endmodule',
+    ].join('\n'),
+  );
+  const b = new HierarchyBuilder(index, { maxDepth: 0, maxInstances: 0 });
+  const root = b.root('top')!;
+
+  assert.equal(root.path, 'top');
+  assert.equal(root.children, undefined, 'a lazy root has no children until asked');
+  assert.equal(b.childCount(root), 2, 'the root predicts its two instances');
+  assert.equal(b.childCount(root.children?.[0] ?? root), 2, 'an unexpanded child predicts from its definition');
+
+  b.expandLevel(root);
+  assert.deepEqual(root.children!.map((c) => c.path), ['top.u_mid', 'top.u_top']);
+  assert.equal(root.children![0].children, undefined, 'expanding a node does not touch its children');
+  assert.equal(root.children![0].parentPath, 'top', 'a child knows its parent path');
+  assert.equal(root.children![0].depth, 1, 'and its depth');
+  assert.equal(b.childCount(root.children![0]), 2, 'the mid instance predicts its own two leaves');
+
+  b.expandLevel(root.children![0]);
+  assert.deepEqual(root.children![0].children!.map((c) => c.path), ['top.u_mid.a', 'top.u_mid.b']);
+  assert.equal(b.childCount(root.children![0].children![0]), 0, 'a leaf predicts no children');
+});
+
+test('lazy hierarchy: a cycle is marked truncated, exactly as the eager build does', () => {
+  const index = new HdlIndex();
+  index.addFile('/w/c.v', 'module a (); a u (); endmodule\n');
+  const b = new HierarchyBuilder(index, { maxDepth: 0, maxInstances: 0 });
+  const root = b.root('a')!;
+  b.expandLevel(root);
+  const child = root.children![0];
+  assert.equal(child.path, 'a.u');
+  assert.equal(child.cycle, true, 'the self-instantiation is flagged');
+  assert.equal(child.truncated, true, 'and drawn as truncated');
+  assert.equal(b.childCount(child), 0, 'so it offers no further expansion');
+});
+
+test('lazy hierarchy: the budget cuts later siblings, matching the eager build\'s truncated flag', () => {
+  const index = new HdlIndex();
+  index.addFile(
+    '/w/wide.v',
+    'module leaf (); endmodule\nmodule top ();\n  leaf u0 ();\n  leaf u1 ();\n  leaf u2 ();\nendmodule\n',
+  );
+  const b = new HierarchyBuilder(index, { maxDepth: 0, maxInstances: 2 });
+  const root = b.root('top')!;
+  b.expandLevel(root);
+  assert.equal(root.children!.length, 2, 'the budget stops after two nodes');
+  assert.equal(root.truncated, true, 'and the cut is flagged');
+  assert.equal(b.childCount(root.children![0]), 0, 'a budget-cut node has no children to expand');
+});
+
+test('containingPath: the design top and the dotted path, without materialising the tree', () => {
+  const index = new HdlIndex();
+  index.addFile(
+    '/w/d.v',
+    [
+      'module adder (); endmodule',
+      'module datapath (); adder u_adder (); endmodule',
+      'module chip_top (); datapath u_dpath (); endmodule',
+    ].join('\n'),
+  );
+  assert.deepEqual(containingPath(index, 'adder'), { top: 'chip_top', path: 'chip_top.u_dpath.u_adder' });
+  assert.deepEqual(containingPath(index, 'datapath'), { top: 'chip_top', path: 'chip_top.u_dpath' });
+  assert.deepEqual(containingPath(index, 'chip_top'), { top: 'chip_top', path: 'chip_top' }, 'a top is its own root');
+  // A configured top stops the walk even when something else instantiates it.
+  index.addFile('/w/tb.v', 'module tb (); chip_top dut (); endmodule\n');
+  assert.equal(containingPath(index, 'adder')!.top, 'tb', 'the closest root is the testbench');
+  assert.deepEqual(containingPath(index, 'adder', undefined, ['chip_top']), {
+    top: 'chip_top',
+    path: 'chip_top.u_dpath.u_adder',
+  });
+});
+
+test('childOnPath: descends exactly one segment, never a prefix sibling', () => {
+  const index = new HdlIndex();
+  index.addFile('/w/p.v', 'module leaf (); endmodule\nmodule top (); leaf u (); leaf u_extra (); endmodule\n');
+  const b = new HierarchyBuilder(index, { maxDepth: 0, maxInstances: 0 });
+  const root = b.root('top')!;
+  b.expandLevel(root);
+  assert.equal(childOnPath(root, 'top.u')?.path, 'top.u', 'the exact segment resolves');
+  assert.equal(childOnPath(root, 'top.u_extra')?.path, 'top.u_extra', 'the longer sibling resolves to itself');
+  assert.equal(childOnPath(root, 'top.nope'), undefined, 'an unknown segment yields nothing');
 });

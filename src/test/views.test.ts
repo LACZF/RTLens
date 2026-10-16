@@ -239,13 +239,17 @@ test('composition webview: refresh rebuilds from the reindexed hierarchy, down t
   const { CompositionViewProvider } = await import('../vscode/compView');
   const provider = new CompositionViewProvider(svc);
 
-  const posted: { type?: string; rows?: { path: string }[] }[] = [];
+  const posted: { type?: string; rows?: { path: string; childCount: number }[] }[] = [];
+  let onMsg: ((m: unknown) => void) | undefined;
   provider.resolveWebviewView({
     webview: {
       options: {},
       html: '',
-      onDidReceiveMessage: () => ({ dispose() {} }),
-      postMessage: async (m: { type?: string; rows?: { path: string }[] }) => {
+      onDidReceiveMessage: (cb: (m: unknown) => void) => {
+        onMsg = cb;
+        return { dispose() {} };
+      },
+      postMessage: async (m: { type?: string; rows?: { path: string; childCount: number }[] }) => {
         posted.push(m);
       },
     },
@@ -265,11 +269,19 @@ test('composition webview: refresh rebuilds from the reindexed hierarchy, down t
     'module top (input wire i, output wire o); sub u (.a(i), .s(o)); endmodule\n',
   );
   provider.refresh();
+  // Refresh re-sends only the open levels (the root here), but the reindexed
+  // root now advertises its child - the design is not materialised up front.
+  assert.deepEqual(lastRows().map((r) => r.path), ['top'], 'refresh still sends only the open levels');
+  assert.equal(lastRows()[0].childCount, 1, 'the reindexed root knows it now has a child');
 
+  // Opening `top`, then `top.u`, streams one level at a time from the new index.
+  onMsg!({ type: 'expand', path: 'top' });
+  onMsg!({ type: 'expand', path: 'top.u' });
+  const children = posted.filter((m) => m.type === 'children');
   assert.deepEqual(
-    lastRows().map((r) => r.path),
-    ['top', 'top.u', 'top.u.l'],
-    'refresh rebuilds from the new index, down to nested children',
+    children.map((m) => (m.rows ?? []).map((r) => r.path)),
+    [['top.u'], ['top.u.l']],
+    'each opened level arrives nested down to the leaves',
   );
 });
 
@@ -305,6 +317,9 @@ async function filteredRows(filterMode: number, filterModules: string[] = ['a'])
     },
   } as unknown as import('vscode').WebviewView);
   provider.setContext('/w/t.v', 0);
+  // Expand all so the whole (limit-bounded) tree is materialised and sent,
+  // then read its rows.
+  provider.setExpandedAll(true);
   return [...posted].reverse().find((m) => m.type === 'rows')!.rows!;
 }
 

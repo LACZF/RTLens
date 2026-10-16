@@ -352,3 +352,59 @@ test('composition webview: thousands of siblings expand and collapse in one clic
   fire(chevron(drawn(ui.list)[0]), 'click');
   assert.equal(drawn(ui.list).length, 1, 'and one click folds them all away again');
 });
+
+test('composition webview: opening an unloaded level asks the host, then splices the level in', () => {
+  // Only the root row is present; its level has not been streamed yet.
+  const ui = start([row('top', '', '', 'top', 0, 3)]);
+  assert.equal(drawn(ui.list).length, 1);
+
+  fire(chevron(drawn(ui.list)[0]), 'click');
+  assert.deepEqual(
+    ui.posted.filter((m) => m.type === 'expand'),
+    [{ type: 'expand', path: 'top' }],
+    'an unloaded level is requested from the host',
+  );
+  assert.equal(drawn(ui.list).length, 1, 'nothing is drawn until the children arrive');
+
+  // The host streams one level; it is spliced right after the parent, open.
+  ui.message({
+    type: 'children',
+    parentPath: 'top',
+    rows: [
+      row('top.u_mid', 'top', 'u_mid', 'mid', 1, 1),
+      row('top.u_top', 'top', 'u_top', 'leaf', 1, 0),
+    ],
+  });
+  assert.deepEqual(
+    drawn(ui.list).map(rowText),
+    ['top', 'u_mid : mid', 'u_top : leaf'],
+    'the streamed children are inserted and the level opens',
+  );
+
+  // A nested level is requested the same way and lands under its own parent.
+  fire(chevron(drawn(ui.list)[1]), 'click');
+  assert.deepEqual(
+    ui.posted.filter((m) => m.type === 'expand').map((m) => m.path),
+    ['top', 'top.u_mid'],
+    'the next unloaded level is requested by its path',
+  );
+  ui.message({
+    type: 'children',
+    parentPath: 'top.u_mid',
+    rows: [row('top.u_mid.u_a', 'top.u_mid', 'u_a', 'leaf', 2, 0)],
+  });
+  assert.deepEqual(
+    drawn(ui.list).map(rowText),
+    ['top', 'u_mid : mid', 'u_a : leaf', 'u_top : leaf'],
+    'the nested level is inserted under its parent',
+  );
+
+  // A level that is already loaded collapses locally, without asking again.
+  fire(chevron(drawn(ui.list)[1]), 'click');
+  assert.deepEqual(
+    drawn(ui.list).map(rowText),
+    ['top', 'u_mid : mid', 'u_top : leaf'],
+    'a loaded level folds without another request',
+  );
+  assert.equal(ui.posted.filter((m) => m.type === 'expand').length, 2, 'no extra expand message');
+});

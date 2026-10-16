@@ -32,7 +32,7 @@ export interface HierarchyResult {
   unresolved: number;
 }
 
-class Builder {
+export class HierarchyBuilder {
   private nodeCount = 0;
   private budget: number;
   private maxDepth: number;
@@ -71,6 +71,146 @@ class Builder {
       totalNodes: this.nodeCount,
       unresolved: this.unresolved,
     };
+  }
+
+  // ------------------------------------------------------------------ lazy
+
+  /**
+   * Create a root node whose children are not materialised yet.
+   *
+   * This is the entry point for the Composition view: it pulls one level at a
+   * time through {@link expandLevel}, so a design with a huge instance count
+   * never materialises nor serialises the whole tree up front. `children`
+   * staying `undefined` is what marks a node as unexpanded; the eager
+   * {@link build} fills it in for every node instead.
+   */
+  root(moduleName: string, fromFile?: string): HierarchyNode | undefined {
+    const def = this.index.resolveModule(moduleName, fromFile);
+    if (!def) {
+      return undefined;
+    }
+    this.nodeCount = 0;
+    return {
+      path: def.name,
+      instName: def.name,
+      moduleName: def.name,
+      depth: 0,
+      file: def.file,
+      nameRange: def.nameRange,
+      moduleNameRange: def.nameRange,
+      range: def.range,
+      unresolved: false,
+    };
+  }
+
+  /**
+   * How many direct children `node` would have, without materialising them.
+   * A node that is already expanded answers its real child count; an
+   * unexpanded one is asked of its definition, so the view can draw a
+   * disclosure triangle before the level is loaded.
+   */
+  childCount(node: HierarchyNode): number {
+    if (node.children !== undefined) {
+      return node.children.length;
+    }
+    if (node.truncated || node.cycle || node.depth >= this.maxDepth || this.nodeCount >= this.budget) {
+      return 0;
+    }
+    const def = this.index.resolveModule(node.moduleName, node.file);
+    return def ? def.instances.length : 0;
+  }
+
+  /**
+   * Materialise `node`'s *direct* children only, leaving each child
+   * unexpanded. The lazy counterpart of {@link expand}: the tree view asks for
+   * a level when the reader opens a node, so an untouched subtree costs
+   * nothing.
+   */
+  expandLevel(node: HierarchyNode): HierarchyNode {
+    if (node.children !== undefined) {
+      return node;
+    }
+    node.children = [];
+    if (node.truncated || node.cycle) {
+      return node;
+    }
+    const def = this.index.resolveModule(node.moduleName, node.file);
+    if (!def) {
+      node.unresolved = true;
+      return node;
+    }
+    if (node.depth >= this.maxDepth) {
+      if (def.instances.length > 0) {
+        node.truncated = true;
+        this.truncated = true;
+      }
+      return node;
+    }
+    const onPath = this.moduleNamesOnPath(node.path);
+    for (const inst of def.instances) {
+      if (this.nodeCount >= this.budget) {
+        this.truncated = true;
+        node.truncated = true;
+        break;
+      }
+      this.nodeCount++;
+      const instPath = inst.genPrefix ? `${inst.genPrefix}.${inst.name}` : inst.name;
+      const childPath = node.path ? `${node.path}.${instPath}` : instPath;
+      const childDef = this.index.resolveModule(inst.moduleName, def.file);
+      const onCycle = onPath.has(inst.moduleName);
+      const child: HierarchyNode = {
+        path: childPath,
+        instName: instPath,
+        moduleName: inst.moduleName,
+        depth: node.depth + 1,
+        parentPath: node.path,
+        file: def.file,
+        nameRange: inst.nameRange,
+        moduleNameRange: inst.moduleNameRange,
+        range: inst.range,
+        unresolved: !childDef,
+        cycle: onCycle,
+        generate: inst.genPrefix,
+      };
+      if (onCycle) {
+        child.truncated = true;
+      }
+      node.children.push(child);
+    }
+    return node;
+  }
+
+  /**
+   * Module names along a node path, root first, for cycle detection in the
+   * lazy walk. Follows a generate label (`g[0].u`) as the two segments it is
+   * on the path, exactly as {@link moduleAtPath} does.
+   */
+  private moduleNamesOnPath(path: string): Set<string> {
+    const parts = path.split('.').filter(Boolean);
+    const names = new Set<string>();
+    if (parts.length === 0) {
+      return names;
+    }
+    let def = this.index.resolveModule(parts[0]);
+    names.add(parts[0]);
+    for (let i = 1; i < parts.length && def; i++) {
+      let inst = findInstance(def, parts[i]);
+      if (!inst && i + 1 < parts.length) {
+        inst = findInstance(def, `${parts[i]}.${parts[i + 1]}`);
+        if (inst) {
+          names.add(inst.moduleName);
+          def = this.index.resolveModule(inst.moduleName, def.file);
+          i++;
+          continue;
+        }
+      }
+      if (!inst) {
+        break;
+      }
+      names.add(inst.moduleName);
+      def = this.index.resolveModule(inst.moduleName, def.file);
+    }
+    return names;
   }
 
   /** Materialise the children of a node that was created lazily. */
@@ -314,27 +454,27 @@ export function buildHierarchy(
   opts: HierarchyOptions = {},
   fromFile?: string,
 ): HierarchyResult | undefined {
-  return new Builder(index, opts).build(moduleName, fromFile);
+  return new HierarchyBuilder(index, opts).build(moduleName, fromFile);
 }
 
 /**
- * Where a module's definition lives inside the wider design. A module's own
- * file cannot say who instantiates it, so a graph opened from a bare module
- * root (the definition, not an instance) walks the reverse instances upward:
- * adder sits inside datapath, datapath inside chip_top. Breadth-first keeps
- * the *closest* design root, so an instantiating testbench cannot steal the
- * chain from the real top; a name in `preferTops` wins over a longer chain.
- * Returns the hierarchy rooted at that top and the node standing for the
- * module inside it, so the containing chain can be revealed above the graph
- * root with the left-edge +/-.
+ * The nearest design top that contains `moduleName`, and the dotted hierarchy
+ * path from that top down to the module - computed without materialising the
+ * tree, so the lazy Composition view can root at the design top and walk its
+ * own way down to the cursor's module.
+ *
+ * A module's own file cannot say who instantiates it, so this walks the reverse
+ * instances upward: adder sits inside datapath, datapath inside chip_top.
+ * Breadth-first keeps the *closest* design root, so an instantiating testbench
+ * cannot steal the chain from the real top; a name in `preferTops` wins over a
+ * longer chain.
  */
-export function containingDesign(
+export function containingPath(
   index: HdlIndex,
   moduleName: string,
   fromFile?: string,
   preferTops: string[] = [],
-  opts: HierarchyOptions = { maxDepth: 128 },
-): { root: HierarchyNode; node: HierarchyNode } | undefined {
+): { top: string; path: string } | undefined {
   if (!index.resolveModule(moduleName, fromFile)) {
     return undefined;
   }
@@ -383,11 +523,6 @@ export function containingDesign(
       (a.top < b.top ? -1 : a.top > b.top ? 1 : 0),
   );
   const best = scored[0];
-  const res = buildHierarchy(index, best.top, opts);
-  const root = res?.root;
-  if (!root) {
-    return undefined;
-  }
   // Top-down path through the chain: each segment's instance sits in the scope
   // of the module above it.
   let path = best.top;
@@ -399,7 +534,32 @@ export function containingDesign(
     const local = seg.inst.genPrefix ? `${seg.inst.genPrefix}.${seg.inst.name}` : seg.inst.name;
     path = `${path}.${local}`;
   }
-  const node = findByPath(root, path);
+  return { top: best.top, path };
+}
+
+/**
+ * Where a module's definition lives inside the wider design: the hierarchy
+ * rooted at the containing top and the node standing for the module inside it,
+ * so the containing chain can be revealed above the graph root with the
+ * left-edge +/-.
+ */
+export function containingDesign(
+  index: HdlIndex,
+  moduleName: string,
+  fromFile?: string,
+  preferTops: string[] = [],
+  opts: HierarchyOptions = { maxDepth: 128 },
+): { root: HierarchyNode; node: HierarchyNode } | undefined {
+  const found = containingPath(index, moduleName, fromFile, preferTops);
+  if (!found) {
+    return undefined;
+  }
+  const res = buildHierarchy(index, found.top, opts);
+  const root = res?.root;
+  if (!root) {
+    return undefined;
+  }
+  const node = findByPath(root, found.path);
   return node ? { root, node } : undefined;
 }
 
@@ -408,7 +568,7 @@ export function containingDesign(
  * values visible there after applying `#(...)` overrides and `defparam`.
  */
 export function paramScopeForPath(index: HdlIndex, path: string): MapScope {
-  return new Builder(index, {}).paramScopeFor({ path } as HierarchyNode);
+  return new HierarchyBuilder(index, {}).paramScopeFor({ path } as HierarchyNode);
 }
 
 /** Bit width of a port / signal as seen at a hierarchy path. */
@@ -497,7 +657,7 @@ export function findByPath(root: HierarchyNode, path: string): HierarchyNode | u
  * which would rescan the entire prefix once per level and make a deep chain
  * quadratic. Comparing the segment in place keeps navigation O(path length).
  */
-function childOnPath(node: HierarchyNode, path: string): HierarchyNode | undefined {
+export function childOnPath(node: HierarchyNode, path: string): HierarchyNode | undefined {
   // Below `node.path` the path must continue with a `.`; anything else is not a
   // descendant.
   if (path.length <= node.path.length || path.charCodeAt(node.path.length) !== 46 /* '.' */) {
