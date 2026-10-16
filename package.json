@@ -421,12 +421,6 @@
         "command": "hdl.connectView.toggleWordHighlight",
         "key": "f8",
         "when": "editorTextFocus"
-      },
-      {
-        "command": "hdl.connectView.goToModule",
-        "key": "ctrl+t",
-        "mac": "cmd+t",
-        "when": "editorTextFocus && (editorLangId == verilog || editorLangId == systemverilog)"
       }
     ],
     "semanticTokenTypes": [

@@ -92,6 +92,15 @@ class Hover {
   }
 }
 
+class SymbolInformation {
+  constructor(
+    public name: string,
+    public kind: number,
+    public containerName: string,
+    public location: Location,
+  ) {}
+}
+
 class MarkdownString {
   value = '';
   isTrusted = false;
@@ -171,6 +180,7 @@ const api: Record<string, any> = {
   EventEmitter,
   TreeItem,
   DocumentSymbol,
+  SymbolInformation,
   Hover,
   MarkdownString,
   ThemeIcon,
@@ -353,6 +363,10 @@ const api: Record<string, any> = {
       api.__symbols = p;
       return noop;
     },
+    registerWorkspaceSymbolProvider: (p: unknown) => {
+      api.__workspaceSymbols = p;
+      return noop;
+    },
   },
   SemanticTokensBuilder: class {
     private tokens: number[] = [];
@@ -385,7 +399,7 @@ export function fireClose(doc: StubDocument): void {
 }
 
 /** The providers the extension registered, by name. */
-export function provider(name: 'definition' | 'hover' | 'references' | 'rename' | 'symbols') {
+export function provider(name: 'definition' | 'hover' | 'references' | 'rename' | 'symbols' | 'workspaceSymbols') {
   return api[`__${name}`];
 }
 

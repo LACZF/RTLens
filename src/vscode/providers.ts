@@ -428,11 +428,7 @@ export class HdlDocumentSymbolProvider implements vscode.DocumentSymbolProvider 
         children.push(symbol(vscode.SymbolKind.Method, f.name, '', range(f.range), range(f.nameRange), f.kind));
       }
       const sym = symbol(
-        m.kind === 'package'
-          ? vscode.SymbolKind.Namespace
-          : m.kind === 'interface'
-            ? vscode.SymbolKind.Interface
-            : vscode.SymbolKind.Class,
+        moduleSymbolKind(m.kind),
         m.name,
         m.kind,
         range(m.range),
@@ -444,6 +440,60 @@ export class HdlDocumentSymbolProvider implements vscode.DocumentSymbolProvider 
     }
     return out;
   }
+}
+
+/**
+ * The workspace-symbol feed for the system quick open (`#`, `Ctrl+T`,
+ * `workbench.action.showAllSymbols`). One `SymbolInformation` per
+ * module definition - not per name, so an RTL module and its black-box stub
+ * stay distinguishable - with `location` pinned to `nameRange` so choosing a
+ * row opens the declaration with the cursor on the name.
+ */
+export class HdlWorkspaceSymbolProvider implements vscode.WorkspaceSymbolProvider {
+  constructor(private readonly svc: IndexService) {}
+
+  async provideWorkspaceSymbols(query: string): Promise<vscode.SymbolInformation[]> {
+    await this.svc.ensureReady();
+    const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+    const mods = this.svc.index
+      .allModules()
+      .sort((a, b) => a.name.localeCompare(b.name) || a.file.localeCompare(b.file));
+    const out: vscode.SymbolInformation[] = [];
+    for (const m of mods) {
+      const rel = String(this.svc.relFile(m.file)).toLowerCase();
+      if (tokens.length && !tokens.every((t) => subsequence(m.name.toLowerCase(), t) || subsequence(rel, t))) {
+        continue;
+      }
+      out.push(new vscode.SymbolInformation(m.name, moduleSymbolKind(m.kind), m.kind, locationOf(m.file, m.nameRange)));
+    }
+    return out;
+  }
+}
+
+function moduleSymbolKind(kind: ModuleDef['kind']): vscode.SymbolKind {
+  switch (kind) {
+    case 'package':
+      return vscode.SymbolKind.Namespace;
+    case 'interface':
+      return vscode.SymbolKind.Interface;
+    case 'class':
+      return vscode.SymbolKind.Class;
+    default:
+      return vscode.SymbolKind.Module;
+  }
+}
+
+/** Case-insensitive subsequence test: every character of `token`, in order. */
+function subsequence(text: string, token: string): boolean {
+  let at = 0;
+  for (const ch of token) {
+    at = text.indexOf(ch, at);
+    if (at < 0) {
+      return false;
+    }
+    at += 1;
+  }
+  return true;
 }
 
 function symbol(

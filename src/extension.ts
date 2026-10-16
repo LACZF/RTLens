@@ -8,6 +8,7 @@ import {
   HdlHoverProvider,
   HdlReferenceProvider,
   HdlRenameProvider,
+  HdlWorkspaceSymbolProvider,
   range,
   selectionAt,
 } from './vscode/providers';
@@ -23,7 +24,7 @@ import { CompositionViewProvider } from './vscode/compView';
 import { GraphPanel } from './vscode/graphPanel';
 import { runGenerateWrapper } from './vscode/generate';
 import { DatabaseService, pickRefreshMode } from './vscode/database';
-import type { HierarchyNode, ModuleDef, Range } from './core/ast';
+import type { HierarchyNode, Range } from './core/ast';
 import { findByPath } from './core/hierarchy';
 import { basename } from './core/index';
 import { traceAt, type TraceDirection, type TraceStep } from './core/trace';
@@ -82,6 +83,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.languages.registerReferenceProvider(selector, new HdlReferenceProvider(svc)),
     vscode.languages.registerRenameProvider(selector, new HdlRenameProvider(svc)),
     vscode.languages.registerDocumentSymbolProvider(selector, new HdlDocumentSymbolProvider(svc)),
+    vscode.languages.registerWorkspaceSymbolProvider(new HdlWorkspaceSymbolProvider(svc)),
   );
 
   // --- editor tracking ---------------------------------------------------
@@ -274,27 +276,11 @@ export function activate(context: vscode.ExtensionContext): void {
     wordHighlighter.toggle();
   });
 
-  // Ctrl-T in an HDL editor: fuzzy-search every module in the workspace and open
-  // its definition. The quick pick owns the fuzzy matching (label, description
-  // and detail), so this is only the item list and the jump.
-  reg('hdl.connectView.goToModule', async () => {
-    await svc.ensureReady();
-    const items = svc.moduleItems();
-    if (!items.length) {
-      void vscode.window.showInformationMessage('HDL: no modules found in this workspace.');
-      return;
-    }
-    const pick = await vscode.window.showQuickPick(items, {
-      title: 'HDL: go to module',
-      placeHolder: 'Fuzzy-search a module name',
-      matchOnDescription: true,
-      matchOnDetail: true,
-    });
-    const def = (pick as (vscode.QuickPickItem & { def?: ModuleDef }) | undefined)?.def;
-    if (def) {
-      await revealLocation(def.file, def.nameRange);
-    }
-  });
+  // The editor context menu still offers "Go to Module", but it reuses the
+  // system's symbol search (the same `#` box `Ctrl+T` opens) instead of growing
+  // a second input widget. Modules reach that box through
+  // `HdlWorkspaceSymbolProvider`.
+  reg('hdl.connectView.goToModule', () => vscode.commands.executeCommand('workbench.action.showAllSymbols'));
 
   // `revealInstance` is the click target of the composition rows and (via webview)
   // the nets rows. Both shapes are handled instead of assuming the node is there.

@@ -13,7 +13,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Module } from 'node:module';
 
-import { vscode, documentFor, fireOpen, fireClose, provider, log, openedEditors, type StubDocument } from './vscodeStub';
+import { vscode, documentFor, fireOpen, fireClose, provider, log, type StubDocument } from './vscodeStub';
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const FIXTURES = path.join(ROOT, 'test', 'fixtures');
@@ -178,51 +178,45 @@ test('providers: closing an excluded file puts the workspace back', async () => 
   assert.equal(hits, undefined, 'an excluded file is not part of the index once it is closed');
 });
 
-/** The quick pick the go-to-module command opened, and what it was asked for. */
-async function goToModule(pickLabel: string): Promise<{
-  labels: string[];
-  details: string[];
-  opts: { matchOnDescription?: boolean; matchOnDetail?: boolean };
-}> {
-  const labels: string[] = [];
-  const details: string[] = [];
-  let opts: { matchOnDescription?: boolean; matchOnDetail?: boolean } = {};
-  (vscode as unknown as { __quickPick?: unknown }).__quickPick = (
-    items: { label: string; detail?: string }[],
-    o: typeof opts,
-  ) => {
-    for (const i of items) {
-      labels.push(i.label);
-      details.push(i.detail ?? '');
-    }
-    opts = o ?? {};
-    return items.find((i) => i.label === pickLabel);
+/** The extension's workspace-symbol feed, as the system `#` box drives it. */
+function workspaceSymbols() {
+  return provider('workspaceSymbols') as {
+    provideWorkspaceSymbols(query: string): Promise<{ name: string; location: { uri: { fsPath: string }; range: { start: { line: number; character: number } } } }[]>;
   };
-  try {
-    await vscode.commands.executeCommand('hdl.connectView.goToModule');
-  } finally {
-    (vscode as unknown as { __quickPick?: unknown }).__quickPick = undefined;
-  }
-  return { labels, details, opts };
 }
 
-test('go to module: offers every indexed module, sorted, and fuzzy-matched on path too', async () => {
-  const { labels, opts } = await goToModule('adder');
+test('workspace symbols: offers every indexed module, sorted, and matched on the path too', async () => {
+  const all = await workspaceSymbols().provideWorkspaceSymbols('');
+  const names = all.map((s) => s.name);
   for (const name of ['adder', 'chip_top', 'types_pkg', 'bus_if', 'fifo']) {
-    assert.ok(labels.includes(name), `"${name}" is offered`);
+    assert.ok(names.includes(name), `"${name}" is offered`);
   }
-  assert.deepEqual(labels, [...labels].sort(), 'the list is sorted by module name');
-  assert.equal(opts.matchOnDescription, true, 'kind is fuzzy-matched');
-  assert.equal(opts.matchOnDetail, true, 'file path is fuzzy-matched');
+  assert.deepEqual(names, [...names].sort(), 'the list is sorted by module name');
+
+  // `fifo` lives in legacy.v - only the file path matches the query.
+  const pathOnly = await workspaceSymbols().provideWorkspaceSymbols('legacy');
+  assert.deepEqual(pathOnly.map((s) => s.name), ['fifo'], 'a path-only match is found');
+
+  const none = await workspaceSymbols().provideWorkspaceSymbols('zzz_nope');
+  assert.deepEqual(none, [], 'a query that matches nothing clears the list');
 });
 
-test('go to module: picking a module opens its definition with the cursor on the name', async () => {
-  const before = openedEditors().length;
-  await goToModule('adder');
-  const editors = openedEditors();
-  assert.equal(editors.length, before + 1, 'exactly one document opened');
-  const editor = editors[before];
-  assert.equal(editor.document.uri.fsPath, path.join(FIXTURES, 'lib/adder.v'));
-  assert.equal(editor.selection.start.line, 1, 'the `module adder` line (0-based)');
-  assert.equal(editor.selection.start.character, 7, 'the name inside `module adder`');
+test('workspace symbols: a module points at its declaration with the cursor on the name', async () => {
+  const all = await workspaceSymbols().provideWorkspaceSymbols('adder');
+  const adder = all.find((s) => s.name === 'adder');
+  assert.ok(adder, 'adder is offered');
+  assert.equal(adder.location.uri.fsPath, path.join(FIXTURES, 'lib/adder.v'));
+  assert.equal(adder.location.range.start.line, 1, 'the `module adder` line (0-based)');
+  assert.equal(adder.location.range.start.character, 7, 'the name inside `module adder`');
+});
+
+test('go to module: reuses the system symbol search instead of a second input box', async () => {
+  let calls = 0;
+  (vscode as unknown as { __commands: Record<string, () => unknown> }).__commands[
+    'workbench.action.showAllSymbols'
+  ] = () => {
+    calls += 1;
+  };
+  await vscode.commands.executeCommand('hdl.connectView.goToModule');
+  assert.equal(calls, 1, 'the command opens the built-in `#` box');
 });

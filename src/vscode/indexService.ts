@@ -454,27 +454,6 @@ export class IndexService implements vscode.Disposable {
       }));
   }
 
-  /**
-   * Every module definition as a quick-pick row, sorted by name then file.
-   *
-   * One row per definition rather than per name: a name defined twice (an RTL
-   * module and its black-box stub, say) has to stay distinguishable, and the
-   * path in `detail` is what tells the two apart. The quick pick does the fuzzy
-   * matching itself, over the label and - because the caller asks for it - the
-   * description and detail too.
-   */
-  moduleItems(): vscode.QuickPickItem[] {
-    return this.index
-      .allModules()
-      .sort((a, b) => a.name.localeCompare(b.name) || a.file.localeCompare(b.file))
-      .map((m) => ({
-        label: m.name,
-        description: m.kind,
-        detail: `${this.relFile(m.file)}:${m.nameRange.start.line + 1}`,
-        def: m,
-      }));
-  }
-
   hierarchy(moduleName: string, fromFile?: string): HierarchyResult | undefined {
     return buildHierarchy(
       this.index,
