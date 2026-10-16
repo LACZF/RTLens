@@ -178,6 +178,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   });
 
+  reg('hdl.connectView.expandComposition', () => composition.setExpandedAll(true));
+  reg('hdl.connectView.collapseComposition', () => composition.setExpandedAll(false));
+
   reg('hdl.connectView.showGraphForSelection', async () => {
     const sel = editorSelection(svc);
     const node = sel ? sel.node : await pickRoot(svc);

@@ -181,6 +181,58 @@ test('composition webview: a row click jumps to its instance, not line 0', async
   );
 });
 
+test('composition webview: the title button expands/collapses all and reflects its state', async () => {
+  const svc = await svcWith({ topModules: ['top'] });
+  const { CompositionViewProvider } = await import('../vscode/compView');
+  svc.index.addFile('/w/top.v', 'module leaf (input wire a, output wire s); assign s=a; endmodule\n' +
+    'module top (input wire i, output wire o); leaf u (.a(i), .s(o)); endmodule\n');
+  const provider = new CompositionViewProvider(svc);
+
+  const posted: { type?: string; expanded?: boolean }[] = [];
+  let onMsg: ((m: unknown) => void) | undefined;
+  provider.resolveWebviewView({
+    webview: {
+      options: {},
+      html: '',
+      onDidReceiveMessage: (cb: (m: unknown) => void) => {
+        onMsg = cb;
+        return { dispose() {} };
+      },
+      postMessage: async (m: { type?: string; expanded?: boolean }) => {
+        posted.push(m);
+      },
+    },
+  } as unknown as import('vscode').WebviewView);
+
+  provider.setExpandedAll(false);
+  provider.setExpandedAll(true);
+  assert.deepEqual(
+    posted.filter((m) => m.type === 'setExpanded').map((m) => m.expanded),
+    [false, true],
+    'the button asks the webview to open or fold every row',
+  );
+
+  // The webview reports its state back; the host publishes it so the title
+  // button can switch between Expand all and Collapse all.
+  const cmds = vscode.commands as unknown as { executeCommand: (id: string, ...a: unknown[]) => unknown };
+  const original = cmds.executeCommand;
+  const calls: { id: string; args: unknown[] }[] = [];
+  cmds.executeCommand = (id: string, ...args: unknown[]) => {
+    calls.push({ id, args });
+    return undefined;
+  };
+  try {
+    onMsg!({ type: 'expandState', expanded: true });
+    onMsg!({ type: 'expandState', expanded: false });
+  } finally {
+    cmds.executeCommand = original;
+  }
+  assert.deepEqual(calls, [
+    { id: 'setContext', args: ['hdl.compositionExpanded', true] },
+    { id: 'setContext', args: ['hdl.compositionExpanded', false] },
+  ]);
+});
+
 test('composition webview: follows the editor by highlighting the current module without moving the root', async () => {
   const src =
     'module leaf (input wire a, output wire s); assign s = a; endmodule\n' +

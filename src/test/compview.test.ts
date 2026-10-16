@@ -240,7 +240,41 @@ test('composition webview: clicking a row asks the host to reveal it', () => {
   const ui = start(ROWS);
   fire(chevron(drawn(ui.list)[0]), 'click');
   fire(drawn(ui.list)[2], 'click');
-  assert.deepEqual(ui.posted, [{ type: 'open', path: 'top.u_top' }]);
+  // The webview also reports its expand state; only the row click is a request.
+  assert.deepEqual(
+    ui.posted.filter((m) => m.type === 'open'),
+    [{ type: 'open', path: 'top.u_top' }],
+  );
+});
+
+test('composition webview: the title button expands and collapses every level', () => {
+  const ui = start(ROWS);
+  assert.equal(drawn(ui.list).length, 1, 'a new tree starts fully collapsed');
+
+  ui.message({ type: 'setExpanded', expanded: true });
+  assert.deepEqual(
+    drawn(ui.list).map(rowText),
+    ['top', 'u_mid : mid', 'u_a : leaf', 'u_top : leaf'],
+    'expand-all opens every level at once',
+  );
+
+  ui.message({ type: 'setExpanded', expanded: false });
+  assert.equal(drawn(ui.list).length, 1, 'collapse-all folds the whole tree back to the root');
+});
+
+test('composition webview: it reports whether the whole tree is expanded', () => {
+  const ui = start(ROWS);
+  const states = () => ui.posted.filter((m) => m.type === 'expandState').map((m) => m.expanded);
+
+  assert.deepEqual(states(), [false], 'a new tree reports itself fully collapsed');
+
+  ui.message({ type: 'setExpanded', expanded: true });
+  assert.deepEqual(states(), [false, true], 'expand-all reports itself fully expanded');
+
+  // Opening a single level by hand leaves the rest folded: still not "expanded".
+  ui.message({ type: 'setExpanded', expanded: false });
+  fire(chevron(drawn(ui.list)[0]), 'click');
+  assert.deepEqual(states(), [false, true, false], 'a partial expansion does not flip the button');
 });
 
 test('composition webview: a reveal opens the path down to the row and scrolls to it', () => {

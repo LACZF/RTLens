@@ -198,6 +198,14 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     void this.view?.webview.postMessage({ type: 'revealPath', path });
   }
 
+  /**
+   * Expand or collapse every row in the instance hierarchy. The webview owns
+   * the per-row collapse state, so the title-bar button just asks it to switch.
+   */
+  setExpandedAll(expanded: boolean): void {
+    void this.view?.webview.postMessage({ type: 'setExpanded', expanded });
+  }
+
   refresh(): void {
     if (!this.cachedRootModule) return;
     const root = this.cachedRoot;
@@ -209,7 +217,13 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     this.view = view;
     view.webview.options = { enableScripts: true };
     view.webview.html = html();
-    view.webview.onDidReceiveMessage((msg: { type?: string; path?: string }) => {
+    view.webview.onDidReceiveMessage((msg: { type?: string; path?: string; expanded?: boolean }) => {
+      // The webview reports whether the whole tree is expanded so the title
+      // button can show Expand all or Collapse all.
+      if (msg?.type === 'expandState') {
+        void vscode.commands.executeCommand('setContext', 'hdl.compositionExpanded', !!msg.expanded);
+        return;
+      }
       if (msg?.type !== 'open' || !msg.path) {
         return;
       }
@@ -339,9 +353,11 @@ header { position:sticky; top:0; padding:6px 8px; background:var(--vscode-sideBa
  * The whole webview script, kept as a string so tests can run the real thing
  * against a stub DOM instead of a copy. It expects `#q`, `#mod`, `#file`,
  * `#empty` and `#list`, gets `{type:'rows', rootModule, rootPath, rows}` on a
- * rebuild, `{type:'revealPath', path}` to scroll to a row, and
+ * rebuild, `{type:'revealPath', path}` to scroll to a row,
  * `{type:'highlightPath', path}` to mark the current module's row (revealing
- * it); it posts `{type:'open', path}` when a row is clicked.
+ * it), and `{type:'setExpanded', expanded}` from the title button to open or
+ * fold every row; it posts `{type:'open', path}` when a row is clicked and
+ * `{type:'expandState', expanded}` so the host can swap the title button.
  */
 export const SCRIPT = String.raw`
 (function () {
@@ -357,6 +373,7 @@ export const SCRIPT = String.raw`
   var collapsed = {};
   var lastRoot = '';
   var selected = '';
+  var reportedExpanded;
 
   // Space-separated fuzzy match: the query is split on whitespace into tokens,
   // each token matches as a subsequence and every token must match. Returns the
@@ -434,6 +451,39 @@ export const SCRIPT = String.raw`
     render();
   }
 
+  function expandAll() {
+    collapsed = {};
+    render();
+  }
+
+  // Every row with children collapsed means the whole tree is folded, so the
+  // title button offers "expand all"; a single open row flips it to "collapse".
+  function collapseAll() {
+    collapsed = {};
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].childCount > 0) collapsed[rows[i].path] = true;
+    }
+    render();
+  }
+
+  function anyCollapsed() {
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].childCount > 0 && collapsed[rows[i].path]) return true;
+    }
+    return false;
+  }
+
+  // Tell the host which way the title button should read. Only a change is
+  // sent: rendering runs on every cursor move, and the state rarely moves.
+  function reportExpanded() {
+    if (!rows.length) return;
+    var expanded = !anyCollapsed();
+    if (expanded !== reportedExpanded) {
+      reportedExpanded = expanded;
+      vscode.postMessage({ type: 'expandState', expanded: expanded });
+    }
+  }
+
   // Matches plus every ancestor of a match, so the path down to it is walkable.
   function search(query) {
     var matched = {};
@@ -456,6 +506,7 @@ export const SCRIPT = String.raw`
   }
 
   function render() {
+    reportExpanded();
     list.textContent = '';
     els = {};
     if (!rows.length) {
@@ -590,6 +641,11 @@ export const SCRIPT = String.raw`
       render();
       var mark = els[selected];
       if (mark && mark.scrollIntoView) mark.scrollIntoView({ block: 'center' });
+      return;
+    }
+    if (m.type === 'setExpanded') {
+      if (m.expanded) expandAll();
+      else collapseAll();
       return;
     }
     if (m.type !== 'rows') return;

@@ -224,6 +224,18 @@
         "icon": "$(type-hierarchy-sub)"
       },
       {
+        "command": "hdl.connectView.expandComposition",
+        "title": "HDL: Expand All in Composition",
+        "category": "HDL",
+        "icon": "$(expand-all)"
+      },
+      {
+        "command": "hdl.connectView.collapseComposition",
+        "title": "HDL: Collapse All in Composition",
+        "category": "HDL",
+        "icon": "$(collapse-all)"
+      },
+      {
         "command": "hdl.connectView.showGraphForSelection",
         "title": "HDL: Show Connectivity Graph for Current Module",
         "category": "HDL"
@@ -300,8 +312,13 @@
           "group": "navigation@1"
         },
         {
-          "command": "hdl.connectView.showGraph",
-          "when": "view == hdl.composition",
+          "command": "hdl.connectView.expandComposition",
+          "when": "view == hdl.composition && !hdl.compositionExpanded",
+          "group": "navigation@2"
+        },
+        {
+          "command": "hdl.connectView.collapseComposition",
+          "when": "view == hdl.composition && hdl.compositionExpanded",
           "group": "navigation@2"
         }
       ],
