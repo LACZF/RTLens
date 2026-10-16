@@ -16,6 +16,10 @@ export interface HdlConfig {
   compositionMaxDepth: number;
   /** Composition-tree node budget; 0 means no limit. */
   compositionMaxInstances: number;
+  /** Module names the Composition tree hides. */
+  compositionFilterModules: string[];
+  /** 1 = keep filtered instances but hide their submodules; 2 = hide them too. */
+  compositionFilterMode: 1 | 2;
   /** Enable F8 word highlight (false lets F8 fall back to default). */
   wordHighlight: boolean;
   graphMaxNodes: number;
@@ -51,6 +55,8 @@ export function readConfig(scope?: vscode.Uri): HdlConfig {
     maxInstances: cfg.get<number>('maxInstances') ?? 20000,
     compositionMaxDepth: cfg.get<number>('composition.maxDepth') ?? 0,
     compositionMaxInstances: cfg.get<number>('composition.maxInstances') ?? 0,
+    compositionFilterModules: strArray(cfg, 'composition.filterModules', []),
+    compositionFilterMode: cfg.get<number>('composition.filterMode') === 2 ? 2 : 1,
     wordHighlight: cfg.get<boolean>('wordHighlight') ?? true,
     graphMaxNodes: cfg.get<number>('graph.maxNodes') ?? 800,
     graphShowContainment: cfg.get<boolean>('graph.showContainment') ?? false,

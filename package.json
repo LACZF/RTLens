@@ -144,6 +144,28 @@
           "minimum": 0,
           "description": "Maximum number of instance rows the Composition tree (left sidebar hierarchy) materialises in one expansion, independent of hdl.connectView.maxInstances. 0 means no limit."
         },
+        "hdl.connectView.composition.filterModules": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Module names to filter out of the Composition tree (left sidebar hierarchy). Matching is by the instantiated module name; see `#hdl.connectView.composition.filterMode#` for what gets hidden."
+        },
+        "hdl.connectView.composition.filterMode": {
+          "type": "number",
+          "enum": [
+            1,
+            2
+          ],
+          "enumDescriptions": [
+            "Mode 1: hide the submodules under every instance of a filtered module, but keep the instance rows themselves (the module shows as a pruned leaf).",
+            "Mode 2: hide every instance of a filtered module together with its whole subtree."
+          ],
+          "minimum": 1,
+          "default": 1,
+          "description": "How the Composition tree hides the modules listed in hdl.connectView.composition.filterModules. 1 = keep the filtered instances but hide their submodules; 2 = hide the filtered instances and their submodules."
+        },
         "hdl.connectView.wordHighlight": {
           "type": "boolean",
           "default": true,

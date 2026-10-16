@@ -251,6 +251,10 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     this.cachedRoot = root;
+    // Module filter: mode 1 keeps a filtered instance but prunes its submodules
+    // (it shows as a leaf); mode 2 drops the instance and everything below it.
+    const filter = new Set(this.svc.config.compositionFilterModules);
+    const filterMode = this.svc.config.compositionFilterMode;
     const rows: CompRow[] = [];
     // Iterative pre-order walk: the Composition tree lifts the depth cap, so a
     // deep chain must not overflow the call stack. Children are pushed in
@@ -260,14 +264,22 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     ];
     while (stack.length > 0) {
       const { node, depth, parentPath } = stack.pop()!;
+      const hidden = filter.size > 0 && filter.has(node.moduleName);
+      if (hidden && filterMode === 2) {
+        // Drop the filtered instance and its whole subtree.
+        continue;
+      }
       const def = this.svc.index.resolveModule(node.moduleName, node.file);
-      const childCount = node.children?.length ?? 0;
+      const realChildCount = node.children?.length ?? 0;
+      const pruned = hidden && realChildCount > 0;
+      const childCount = pruned ? 0 : realChildCount;
       const paramCount = node.params ? Object.keys(node.params).length : 0;
       const parts: string[] = [];
-      if (childCount) parts.push(`${childCount} child${childCount === 1 ? '' : 'ren'}`);
+      if (realChildCount) parts.push(`${realChildCount} child${realChildCount === 1 ? '' : 'ren'}`);
       if (paramCount) parts.push(`${paramCount} param${paramCount === 1 ? '' : 's'}`);
       if (node.truncated) parts.push(node.cycle ? 'cycle' : 'truncated');
       if (!def) parts.push('module not found');
+      if (pruned) parts.push('filtered');
       const isRoot = depth === 0;
       rows.push({
         path: node.path,
@@ -284,6 +296,9 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
         unresolved: !def,
         truncated: !!node.truncated,
       });
+      if (pruned) {
+        continue;
+      }
       const children = node.children ?? [];
       for (let i = children.length - 1; i >= 0; i--) {
         stack.push({ node: children[i], depth: depth + 1, parentPath: node.path });

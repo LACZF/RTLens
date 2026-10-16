@@ -273,6 +273,70 @@ test('composition webview: refresh rebuilds from the reindexed hierarchy, down t
   );
 });
 
+// `a` is instantiated only under `u_b` and itself instantiates `other`, so the
+// two filter modes differ: mode 1 keeps `u_a2 : a` and hides `u_t : other`,
+// mode 2 drops `u_a2` and its subtree.
+const FILTER_SRC =
+  'module other (input wire x); endmodule\n' +
+  'module a (input wire x); other u_t (.x(x)); endmodule\n' +
+  'module d (input wire x); endmodule\n' +
+  'module b (input wire x); a u_a2 (.x(x)); d u_d (.x(x)); endmodule\n' +
+  'module c (input wire x); endmodule\n' +
+  'module top (input wire x); b u_b (.x(x)); c u_c (.x(x)); endmodule\n';
+
+async function filteredRows(filterMode: number, filterModules: string[] = ['a']) {
+  const svc = await svcWith({
+    topModules: ['top'],
+    'composition.filterModules': filterModules,
+    'composition.filterMode': filterMode,
+  });
+  svc.index.addFile('/w/t.v', FILTER_SRC);
+  const { CompositionViewProvider } = await import('../vscode/compView');
+  const provider = new CompositionViewProvider(svc);
+  const posted: { type?: string; rows?: { path: string; badge: string; childCount: number }[] }[] = [];
+  provider.resolveWebviewView({
+    webview: {
+      options: {},
+      html: '',
+      onDidReceiveMessage: () => ({ dispose() {} }),
+      postMessage: async (m: { type?: string; rows?: { path: string; badge: string; childCount: number }[] }) => {
+        posted.push(m);
+      },
+    },
+  } as unknown as import('vscode').WebviewView);
+  provider.setContext('/w/t.v', 0);
+  return [...posted].reverse().find((m) => m.type === 'rows')!.rows!;
+}
+
+test('composition webview: filter mode 1 keeps a filtered instance but prunes its submodules', async () => {
+  const rows = await filteredRows(1);
+  assert.deepEqual(
+    rows.map((r) => r.path),
+    ['top', 'top.u_b', 'top.u_b.u_a2', 'top.u_b.u_d', 'top.u_c'],
+    'the `a` instance stays, its submodule `u_t` is gone',
+  );
+  const filtered = rows.find((r) => r.path === 'top.u_b.u_a2')!;
+  assert.equal(filtered.childCount, 0, 'the pruned instance is drawn as a leaf');
+  assert.ok(filtered.badge.includes('filtered'), 'the row is marked as filtered');
+});
+
+test('composition webview: filter mode 2 drops the filtered instance and its subtree', async () => {
+  const rows = await filteredRows(2);
+  assert.deepEqual(
+    rows.map((r) => r.path),
+    ['top', 'top.u_b', 'top.u_b.u_d', 'top.u_c'],
+    'the `a` instance and everything below it are hidden',
+  );
+});
+
+test('composition webview: an empty filter list leaves the tree untouched', async () => {
+  const rows = await filteredRows(1, []);
+  assert.ok(
+    rows.some((r) => r.path === 'top.u_b.u_a2.u_t'),
+    'with nothing filtered, `a` still expands into `other`',
+  );
+});
+
 test('composition webview: follows the editor by highlighting the current module without moving the root', async () => {
   const src =
     'module leaf (input wire a, output wire s); assign s = a; endmodule\n' +
