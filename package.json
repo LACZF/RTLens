@@ -6,7 +6,7 @@
   "publisher": "local",
   "license": "MIT",
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.81.0"
   },
   "categories": [
     "Programming Languages",
@@ -233,7 +233,7 @@
         "title": "HDL: Refresh Index",
         "category": "HDL"
       },
-       {
+      {
         "command": "hdl.connectView.refreshDatabase",
         "title": "HDL: Refresh Signal/Module Database",
         "category": "HDL",
@@ -558,7 +558,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
-    "@types/vscode": "^1.85.0",
+    "@types/vscode": "^1.81.0",
     "typescript": "^5.4.0"
   },
   "icon": "resources/icon.png"
