@@ -208,8 +208,11 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
 
   refresh(): void {
     if (!this.cachedRootModule) return;
-    const root = this.cachedRoot;
-    this.rebuild(root ? undefined : this.cachedRootModule);
+    // Re-derive the tree from the (possibly reindexed) workspace. Reusing the
+    // cached `HierarchyNode` would keep the old children, so a module added
+    // since the last build - and everything below it - would never show up.
+    this.cachedRoot = this.svc.compositionHierarchy(this.cachedRootModule, this.cachedFile)?.root;
+    this.rebuild();
     this.post();
   }
 

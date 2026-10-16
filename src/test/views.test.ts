@@ -233,6 +233,46 @@ test('composition webview: the title button expands/collapses all and reflects i
   ]);
 });
 
+test('composition webview: refresh rebuilds from the reindexed hierarchy, down to nested children', async () => {
+  const svc = await svcWith({ topModules: ['top'] });
+  svc.index.addFile('/w/top.v', 'module top (input wire i, output wire o); endmodule\n');
+  const { CompositionViewProvider } = await import('../vscode/compView');
+  const provider = new CompositionViewProvider(svc);
+
+  const posted: { type?: string; rows?: { path: string }[] }[] = [];
+  provider.resolveWebviewView({
+    webview: {
+      options: {},
+      html: '',
+      onDidReceiveMessage: () => ({ dispose() {} }),
+      postMessage: async (m: { type?: string; rows?: { path: string }[] }) => {
+        posted.push(m);
+      },
+    },
+  } as unknown as import('vscode').WebviewView);
+  const lastRows = () =>
+    [...posted].reverse().find((m) => m.type === 'rows')?.rows ?? [];
+
+  provider.setContext('/w/top.v', 0);
+  assert.deepEqual(lastRows().map((r) => r.path), ['top'], 'the tree starts as a single module');
+
+  // The workspace gains a submodule: `top` now instantiates `sub`, which
+  // itself instantiates `leaf` a level further down.
+  svc.index.addFile(
+    '/w/top.v',
+    'module leaf (input wire a, output wire s); assign s = a; endmodule\n' +
+    'module sub (input wire a, output wire s); leaf l (.a(a), .s(s)); endmodule\n' +
+    'module top (input wire i, output wire o); sub u (.a(i), .s(o)); endmodule\n',
+  );
+  provider.refresh();
+
+  assert.deepEqual(
+    lastRows().map((r) => r.path),
+    ['top', 'top.u', 'top.u.l'],
+    'refresh rebuilds from the new index, down to nested children',
+  );
+});
+
 test('composition webview: follows the editor by highlighting the current module without moving the root', async () => {
   const src =
     'module leaf (input wire a, output wire s); assign s = a; endmodule\n' +
