@@ -13,7 +13,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Module } from 'node:module';
 
-import { vscode, documentFor, fireOpen, fireClose, provider, log, type StubDocument } from './vscodeStub';
+import { vscode, documentFor, fireOpen, fireClose, provider, log, openedEditors, type StubDocument } from './vscodeStub';
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const FIXTURES = path.join(ROOT, 'test', 'fixtures');
@@ -176,4 +176,53 @@ test('providers: closing an excluded file puts the workspace back', async () => 
 
   const hits = await definition(tb, 11, 'chip_top');
   assert.equal(hits, undefined, 'an excluded file is not part of the index once it is closed');
+});
+
+/** The quick pick the go-to-module command opened, and what it was asked for. */
+async function goToModule(pickLabel: string): Promise<{
+  labels: string[];
+  details: string[];
+  opts: { matchOnDescription?: boolean; matchOnDetail?: boolean };
+}> {
+  const labels: string[] = [];
+  const details: string[] = [];
+  let opts: { matchOnDescription?: boolean; matchOnDetail?: boolean } = {};
+  (vscode as unknown as { __quickPick?: unknown }).__quickPick = (
+    items: { label: string; detail?: string }[],
+    o: typeof opts,
+  ) => {
+    for (const i of items) {
+      labels.push(i.label);
+      details.push(i.detail ?? '');
+    }
+    opts = o ?? {};
+    return items.find((i) => i.label === pickLabel);
+  };
+  try {
+    await vscode.commands.executeCommand('hdl.connectView.goToModule');
+  } finally {
+    (vscode as unknown as { __quickPick?: unknown }).__quickPick = undefined;
+  }
+  return { labels, details, opts };
+}
+
+test('go to module: offers every indexed module, sorted, and fuzzy-matched on path too', async () => {
+  const { labels, opts } = await goToModule('adder');
+  for (const name of ['adder', 'chip_top', 'types_pkg', 'bus_if', 'fifo']) {
+    assert.ok(labels.includes(name), `"${name}" is offered`);
+  }
+  assert.deepEqual(labels, [...labels].sort(), 'the list is sorted by module name');
+  assert.equal(opts.matchOnDescription, true, 'kind is fuzzy-matched');
+  assert.equal(opts.matchOnDetail, true, 'file path is fuzzy-matched');
+});
+
+test('go to module: picking a module opens its definition with the cursor on the name', async () => {
+  const before = openedEditors().length;
+  await goToModule('adder');
+  const editors = openedEditors();
+  assert.equal(editors.length, before + 1, 'exactly one document opened');
+  const editor = editors[before];
+  assert.equal(editor.document.uri.fsPath, path.join(FIXTURES, 'lib/adder.v'));
+  assert.equal(editor.selection.start.line, 1, 'the `module adder` line (0-based)');
+  assert.equal(editor.selection.start.character, 7, 'the name inside `module adder`');
 });

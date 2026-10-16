@@ -297,6 +297,12 @@
         "command": "hdl.connectView.toggleWordHighlight",
         "title": "HDL: Toggle Word Highlight",
         "category": "HDL"
+      },
+      {
+        "command": "hdl.connectView.goToModule",
+        "title": "HDL: Go to Module",
+        "category": "HDL",
+        "icon": "$(symbol-module)"
       }
     ],
     "viewsContainers": {
@@ -386,6 +392,11 @@
           "command": "hdl.connectView.toggleWordHighlight",
           "when": "editorTextFocus",
           "group": "hdl@5"
+        },
+        {
+          "command": "hdl.connectView.goToModule",
+          "when": "editorLangId == verilog || editorLangId == systemverilog",
+          "group": "hdl@6"
         }
       ]
     },
@@ -410,6 +421,12 @@
         "command": "hdl.connectView.toggleWordHighlight",
         "key": "f8",
         "when": "editorTextFocus"
+      },
+      {
+        "command": "hdl.connectView.goToModule",
+        "key": "ctrl+t",
+        "mac": "cmd+t",
+        "when": "editorTextFocus && (editorLangId == verilog || editorLangId == systemverilog)"
       }
     ],
     "semanticTokenTypes": [

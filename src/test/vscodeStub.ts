@@ -190,6 +190,7 @@ const api: Record<string, any> = {
   StatusBarAlignment: { Left: 1, Right: 2 },
   OverviewRulerLane: { Left:1, Center:2, Right:4, Full:7 },
   ViewColumn: { One: 1, Two: 2, Active: -1 },
+  TextEditorRevealType: { Default: 0, InCenter: 1, InCenterIfOutsideViewport: 2, AtTop: 3 },
   commands: {
     registerCommand(id: string, fn: (...args: unknown[]) => unknown) {
       (api.__commands ??= {})[id] = fn;
@@ -251,7 +252,18 @@ const api: Record<string, any> = {
     showErrorMessage: async () => undefined,
     showInformationMessage: async () => undefined,
     showWarningMessage: async () => undefined,
-    showTextDocument: async () => undefined,
+    showTextDocument: async (doc: unknown) => {
+      const editor = {
+        document: doc,
+        selection: undefined as unknown,
+        revealRange: (range: unknown, kind?: unknown) => {
+          editor.__revealed = { range, kind };
+        },
+        __revealed: undefined as unknown,
+      };
+      (api.__editors ??= []).push(editor);
+      return editor;
+    },
     showQuickPick: async (items: unknown, opts?: unknown) =>
       api.__quickPick ? api.__quickPick(items, opts) : undefined,
     showInputBox: async () => undefined,
@@ -380,6 +392,14 @@ export function provider(name: 'definition' | 'hover' | 'references' | 'rename' 
 /** Lines the extension logged to its output channel. */
 export function log(): string[] {
   return api.__log;
+}
+
+/** Editors the extension opened with `showTextDocument`, oldest first. */
+export function openedEditors(): {
+  document: { uri: { fsPath: string } };
+  selection: { start: { line: number; character: number } };
+}[] {
+  return api.__editors ?? [];
 }
 
 export const vscode = api;
