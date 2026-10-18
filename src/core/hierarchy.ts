@@ -53,7 +53,19 @@ export interface RowTemplate {
   hasChildren: boolean;
 }
 
-export class HierarchyBuilder {
+/**
+ * The level-at-a-time tree walk the Composition view drives. Both
+ * {@link HierarchyBuilder} (built from the index) and the database-backed
+ * `HierarchyDbBuilder` satisfy it, so a view can switch between them when the
+ * persisted database goes stale without changing anything else.
+ */
+export interface HierarchyExpander {
+  root(moduleName: string, fromFile?: string): HierarchyNode | undefined;
+  childCount(node: HierarchyNode): number;
+  expandLevel(node: HierarchyNode): HierarchyNode;
+}
+
+export class HierarchyBuilder implements HierarchyExpander {
   private nodeCount = 0;
   private budget: number;
   private maxDepth: number;
