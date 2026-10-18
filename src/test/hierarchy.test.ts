@@ -9,6 +9,7 @@ import {
   childOnPath,
   containingDesign,
   containingPath,
+  entryOf,
   HierarchyBuilder,
   signalWidth,
   findByPath,
@@ -279,11 +280,36 @@ test('containingPath: the design top and the dotted path, without materialising 
   assert.deepEqual(containingPath(index, 'chip_top'), { top: 'chip_top', path: 'chip_top' }, 'a top is its own root');
   // A configured top stops the walk even when something else instantiates it.
   index.addFile('/w/tb.v', 'module tb (); chip_top dut (); endmodule\n');
-  assert.equal(containingPath(index, 'adder')!.top, 'tb', 'the closest root is the testbench');
+  assert.equal(containingPath(index, 'adder')!.top, 'tb', 'the only parent chain walks up to the testbench');
   assert.deepEqual(containingPath(index, 'adder', undefined, ['chip_top']), {
     top: 'chip_top',
     path: 'chip_top.u_dpath.u_adder',
   });
+});
+
+test('containingPath: several instantiators take the first branch deterministically', () => {
+  const index = new HdlIndex();
+  index.addFile('/w/a.v', 'module leaf (); endmodule\nmodule top_a (); leaf u_leaf (); endmodule\n');
+  index.addFile('/w/b.v', 'module top_b (); leaf u_leaf (); endmodule\n');
+  assert.deepEqual(containingPath(index, 'leaf'), { top: 'top_a', path: 'top_a.u_leaf' });
+
+  const sameFile = new HdlIndex();
+  sameFile.addFile(
+    '/w/x.v',
+    'module leaf (); endmodule\nmodule top_x ();\n  leaf u_late ();\n  leaf u_early ();\nendmodule\n',
+  );
+  assert.deepEqual(containingPath(sameFile, 'leaf'), { top: 'top_x', path: 'top_x.u_late' });
+});
+
+test('entryOf: reports the parent chain bottom-up', () => {
+  const index = new HdlIndex();
+  index.addFile(
+    '/w/d.v',
+    'module adder (); endmodule\nmodule datapath (); adder u_adder (); endmodule\nmodule chip_top (); datapath u_dpath (); endmodule\n',
+  );
+  const entry = entryOf(index, 'adder')!;
+  assert.equal(entry.top, 'chip_top');
+  assert.deepEqual(entry.segs.map((s) => s.inst.name), ['u_adder', 'u_dpath']);
 });
 
 test('childOnPath: descends exactly one segment, never a prefix sibling', () => {

@@ -8,8 +8,9 @@
  * otherwise expand forever).
  */
 
-import type { HdlIndex } from './index';
+import type { HdlIndex, ParentRef } from './index';
 import type { HierarchyNode, ModuleDef, ParamDecl, PortDecl, InstanceSite } from './ast';
+import type { Range } from './lexer';
 import { MapScope, rangeWidth, typeWidth } from './fold';
 
 export interface HierarchyOptions {
@@ -32,12 +33,34 @@ export interface HierarchyResult {
   unresolved: number;
 }
 
+/**
+ * A module's direct instances compiled for the view, without any path prefix:
+ * the same template is reused for every occurrence of the module, so a module
+ * instantiated N times compiles its child rows once. `resolved`/`hasChildren`
+ * are precomputed so drawing a row needs no further index lookups.
+ */
+export interface RowTemplate {
+  instName: string;
+  rawName: string;
+  moduleName: string;
+  nameRange: Range;
+  moduleNameRange: Range;
+  range: Range;
+  genPrefix?: string;
+  conditional?: boolean;
+  file: string;
+  resolved: boolean;
+  hasChildren: boolean;
+}
+
 export class HierarchyBuilder {
   private nodeCount = 0;
   private budget: number;
   private maxDepth: number;
   truncated = false;
   unresolved = 0;
+  /** Per-module compiled child rows, reused across occurrences for this builder's life. */
+  private readonly templateCache = new Map<ModuleDef, RowTemplate[]>();
 
   constructor(private readonly index: HdlIndex, opts: HierarchyOptions) {
     // `undefined` keeps the historic default; an explicit 0 lifts the cap.
@@ -120,6 +143,31 @@ export class HierarchyBuilder {
     return def ? def.instances.length : 0;
   }
 
+  /** The compiled direct instances of `def`, memoised per module. */
+  private levelTemplate(def: ModuleDef): RowTemplate[] {
+    let t = this.templateCache.get(def);
+    if (!t) {
+      t = def.instances.map((inst) => {
+        const child = this.index.resolveModule(inst.moduleName, def.file);
+        return {
+          instName: inst.genPrefix ? `${inst.genPrefix}.${inst.name}` : inst.name,
+          rawName: inst.rawName,
+          moduleName: inst.moduleName,
+          nameRange: inst.nameRange,
+          moduleNameRange: inst.moduleNameRange,
+          range: inst.range,
+          genPrefix: inst.genPrefix,
+          conditional: inst.conditional,
+          file: def.file,
+          resolved: !!child,
+          hasChildren: !!child && child.instances.length > 0,
+        };
+      });
+      this.templateCache.set(def, t);
+    }
+    return t;
+  }
+
   /**
    * Materialise `node`'s *direct* children only, leaving each child
    * unexpanded. The lazy counterpart of {@link expand}: the tree view asks for
@@ -147,30 +195,28 @@ export class HierarchyBuilder {
       return node;
     }
     const onPath = this.moduleNamesOnPath(node.path);
-    for (const inst of def.instances) {
+    for (const t of this.levelTemplate(def)) {
       if (this.nodeCount >= this.budget) {
         this.truncated = true;
         node.truncated = true;
         break;
       }
       this.nodeCount++;
-      const instPath = inst.genPrefix ? `${inst.genPrefix}.${inst.name}` : inst.name;
-      const childPath = node.path ? `${node.path}.${instPath}` : instPath;
-      const childDef = this.index.resolveModule(inst.moduleName, def.file);
-      const onCycle = onPath.has(inst.moduleName);
+      const childPath = node.path ? `${node.path}.${t.instName}` : t.instName;
+      const onCycle = onPath.has(t.moduleName);
       const child: HierarchyNode = {
         path: childPath,
-        instName: instPath,
-        moduleName: inst.moduleName,
+        instName: t.instName,
+        moduleName: t.moduleName,
         depth: node.depth + 1,
         parentPath: node.path,
-        file: def.file,
-        nameRange: inst.nameRange,
-        moduleNameRange: inst.moduleNameRange,
-        range: inst.range,
-        unresolved: !childDef,
+        file: t.file,
+        nameRange: t.nameRange,
+        moduleNameRange: t.moduleNameRange,
+        range: t.range,
+        unresolved: !t.resolved,
         cycle: onCycle,
-        generate: inst.genPrefix,
+        generate: t.genPrefix,
       };
       if (onCycle) {
         child.truncated = true;
@@ -185,8 +231,7 @@ export class HierarchyBuilder {
    * lazy walk. Follows a generate label (`g[0].u`) as the two segments it is
    * on the path, exactly as {@link moduleAtPath} does.
    */
-  private moduleNamesOnPath(path: string): Set<string> {
-    const parts = path.split('.').filter(Boolean);
+  private moduleNamesOnPath(path: string): Set<string> {    const parts = path.split('.').filter(Boolean);
     const names = new Set<string>();
     if (parts.length === 0) {
       return names;
@@ -457,17 +502,87 @@ export function buildHierarchy(
   return new HierarchyBuilder(index, opts).build(moduleName, fromFile);
 }
 
+/** A module's place in the design: the root module and the dotted path to it. */
+export interface HierarchyEntry {
+  top: string;
+  path: string;
+  /** Bottom-up parent sites, from the module's direct parent up to the root. */
+  segs: { parent: string; inst: InstanceSite }[];
+}
+
 /**
- * The nearest design top that contains `moduleName`, and the dotted hierarchy
- * path from that top down to the module - computed without materialising the
- * tree, so the lazy Composition view can root at the design top and walk its
- * own way down to the cursor's module.
- *
- * A module's own file cannot say who instantiates it, so this walks the reverse
- * instances upward: adder sits inside datapath, datapath inside chip_top.
- * Breadth-first keeps the *closest* design root, so an instantiating testbench
- * cannot steal the chain from the real top; a name in `preferTops` wins over a
- * longer chain.
+ * The first reverse edge of `moduleName`: the parent site with the smallest
+ * `(file, line, character, rawName)` key. Deterministic, so "the first branch"
+ * of a module with several instantiators is stable and reproducible.
+ */
+export function firstParent(index: HdlIndex, moduleName: string): ParentRef | undefined {
+  let best: ParentRef | undefined;
+  for (const r of index.parentsOf(moduleName)) {
+    if (!best || parentLess(r, best)) {
+      best = r;
+    }
+  }
+  return best;
+}
+
+function parentLess(a: ParentRef, b: ParentRef): boolean {
+  if (a.file !== b.file) {
+    return a.file < b.file;
+  }
+  const al = a.inst.nameRange.start;
+  const bl = b.inst.nameRange.start;
+  if (al.line !== bl.line) {
+    return al.line < bl.line;
+  }
+  if (al.character !== bl.character) {
+    return al.character < bl.character;
+  }
+  return a.inst.rawName < b.inst.rawName;
+}
+
+/**
+ * The design entry of `moduleName`: follow the *first* parent edge at each step
+ * up to a module with no parent (or a configured top, or a cycle). The chain is
+ * deterministic, so the tree root and the branch opened for an editor are
+ * always the same line, computed without materialising the tree in O(depth).
+ */
+export function entryOf(
+  index: HdlIndex,
+  moduleName: string,
+  fromFile?: string,
+  preferTops: string[] = [],
+): HierarchyEntry | undefined {
+  if (!index.resolveModule(moduleName, fromFile)) {
+    return undefined;
+  }
+  const segs: { parent: string; inst: InstanceSite }[] = [];
+  const seen = new Set<string>([moduleName]);
+  let cur = moduleName;
+  while (!preferTops.includes(cur)) {
+    const p = firstParent(index, cur);
+    if (!p || seen.has(p.parentModule)) {
+      break;
+    }
+    segs.push({ parent: p.parentModule, inst: p.inst });
+    seen.add(p.parentModule);
+    cur = p.parentModule;
+  }
+  let path = cur;
+  for (let i = segs.length - 1; i >= 0; i--) {
+    const inst = segs[i].inst;
+    const local = inst.genPrefix ? `${inst.genPrefix}.${inst.name}` : inst.name;
+    path = `${path}.${local}`;
+  }
+  return { top: cur, path, segs };
+}
+
+/**
+ * The design top that contains `moduleName`, and the dotted path from that top
+ * down to the module - computed without materialising the tree, so the lazy
+ * Composition view can root at the design top and walk its own way down to the
+ * cursor's module. Follows the {@link entryOf} first branch; a name in
+ * `preferTops` ends the walk there (a configured top is the root even when
+ * something instantiates it).
  */
 export function containingPath(
   index: HdlIndex,
@@ -475,66 +590,8 @@ export function containingPath(
   fromFile?: string,
   preferTops: string[] = [],
 ): { top: string; path: string } | undefined {
-  if (!index.resolveModule(moduleName, fromFile)) {
-    return undefined;
-  }
-  // Chains are lists of module names, bottom-up, with the instance that names
-  // the module below each one in its own scope.
-  interface Seg {
-    parent: string;
-    inst: InstanceSite | null;
-  }
-  const open: { name: string; chain: Seg[] }[] = [{ name: moduleName, chain: [] }];
-  const seen = new Set<string>([moduleName]);
-  const candidates: { top: string; chain: Seg[] }[] = [];
-  while (open.length) {
-    const cur = open.shift()!;
-    // A module named as a preferred top ends the chain there, testbench or not:
-    // the configured top is the design root even when something instantiates it.
-    if (preferTops.includes(cur.name)) {
-      candidates.push({ top: cur.name, chain: cur.chain });
-      continue;
-    }
-    const parents = Array.from(
-      new Map(index.instantiatorsOf(cur.name).map((p) => [p.parent, p.inst])).entries(),
-    );
-    if (parents.length === 0) {
-      candidates.push({ top: cur.name, chain: cur.chain });
-      continue;
-    }
-    for (const [parent, inst] of parents) {
-      if (!seen.has(parent)) {
-        seen.add(parent);
-        open.push({ name: parent, chain: [...cur.chain, { parent, inst }] });
-      }
-    }
-  }
-  if (candidates.length === 0) {
-    return undefined;
-  }
-  const scored = candidates.map((c) => ({
-    ...c,
-    prefer: preferTops.includes(c.top) ? 0 : 1,
-  }));
-  scored.sort(
-    (a, b) =>
-      a.prefer - b.prefer ||
-      a.chain.length - b.chain.length ||
-      (a.top < b.top ? -1 : a.top > b.top ? 1 : 0),
-  );
-  const best = scored[0];
-  // Top-down path through the chain: each segment's instance sits in the scope
-  // of the module above it.
-  let path = best.top;
-  for (let i = best.chain.length - 1; i >= 0; i--) {
-    const seg = best.chain[i];
-    if (!seg.inst) {
-      continue;
-    }
-    const local = seg.inst.genPrefix ? `${seg.inst.genPrefix}.${seg.inst.name}` : seg.inst.name;
-    path = `${path}.${local}`;
-  }
-  return { top: best.top, path };
+  const entry = entryOf(index, moduleName, fromFile, preferTops);
+  return entry ? { top: entry.top, path: entry.path } : undefined;
 }
 
 /**
