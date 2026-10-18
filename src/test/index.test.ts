@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import { HdlIndex } from '../core/index';
 import { parseSource } from '../core/parser';
 import { buildHierarchy, findByPath, paramScopeForPath, signalWidth, subtree, pathChain } from '../core/hierarchy';
-import { resolveInScope, resolvePath, wordAtPosition, referencesTo, resolveAt } from '../core/resolve';
+import { resolveInScope, resolvePath, wordAtPosition, referencesTo, resolveAt, instancesOf } from '../core/resolve';
 
 const SRC = `
 \`define ADDER adder
@@ -436,4 +436,44 @@ test('index: removing a file twice is a no-op and frees the name', () => {
   index.addFile('/w/other.v', 'module a (); endmodule\n');
   assert.equal(index.stats.modules, 1);
   assert.equal(index.resolveModule('a')!.file, '/w/other.v');
+});
+
+test('parentsOf: reverse edges list every instantiation site of a module', () => {
+  const index = new HdlIndex();
+  index.addFile('/w/a.v', 'module leaf (); endmodule\nmodule top (); leaf u0 (); leaf u1 (); endmodule\n');
+  const edges = index.parentsOf('leaf');
+  assert.deepEqual(edges.map((e) => e.parentModule), ['top', 'top'], 'both sites of the same parent');
+  assert.deepEqual(edges.map((e) => e.inst.name), ['u0', 'u1']);
+  assert.equal(edges[0].file, '/w/a.v');
+  assert.deepEqual(index.parentsOf('top'), [], 'a never-instantiated module has no parent');
+});
+
+test('parentsOf: reindexing a file replaces its edges; removal drops them', () => {
+  const index = new HdlIndex();
+  const src = 'module leaf (); endmodule\nmodule top (); leaf u (); endmodule\n';
+  index.addFile('/w/a.v', src);
+  assert.equal(index.parentsOf('leaf').length, 1);
+  index.addFile('/w/a.v', src);
+  assert.equal(index.parentsOf('leaf').length, 1, 'no duplicated edge after a reindex');
+  index.removeFile('/w/a.v');
+  assert.deepEqual(index.parentsOf('leaf'), [], 'removal takes the edge back');
+});
+
+test('edgeEpoch: bumps on every change to the instance edges', () => {
+  const index = new HdlIndex();
+  const start = index.edgeEpoch;
+  index.addFile('/w/a.v', 'module leaf (); endmodule\nmodule top (); leaf u (); endmodule\n');
+  const added = index.edgeEpoch;
+  assert.ok(added > start, 'an edge was added');
+  index.removeFile('/w/a.v');
+  assert.ok(index.edgeEpoch > added, 'the edge was removed');
+});
+
+test('instancesOf: resolves each reverse edge back to its definition and site', () => {
+  const index = new HdlIndex();
+  index.addFile('/w/a.v', 'module leaf (); endmodule\nmodule top (); leaf u (); endmodule\n');
+  const insts = instancesOf(index, 'leaf');
+  assert.equal(insts.length, 1);
+  assert.equal(insts[0].mod.name, 'top');
+  assert.equal(insts[0].inst.name, 'u');
 });

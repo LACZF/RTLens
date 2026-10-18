@@ -43,6 +43,23 @@ export interface IndexStats {
   parseMs: number;
 }
 
+/**
+ * One reverse edge of the instance graph: a module that instantiates
+ * `inst.moduleName`. Kept in `HdlIndex.parentIndex` and maintained
+ * incrementally, so "who instantiates this module" is O(parents) instead of a
+ * scan over every module's instance list.
+ */
+export interface ParentRef {
+  /** The instantiating module definition. */
+  parent: ModuleDef;
+  /** The instantiating module's name (== `parent.name`). */
+  parentModule: string;
+  /** The file holding the instantiation (== `parent.file`). */
+  file: string;
+  /** The instantiation site. */
+  inst: InstanceSite;
+}
+
 export interface TopCandidate {
   name: string;
   def: ModuleDef;
@@ -97,6 +114,16 @@ export class HdlIndex {
   private preferEpoch = 0;
   /** Tables built so far - read by tests to see the cache at work. */
   private jumpBuilds = 0;
+  /**
+   * Reverse instance edges, module name -> the sites that instantiate it.
+   * Maintained incrementally by `addFile`/`removeFile` (see {@link addEdges}),
+   * so a reverse query never scans the whole index.
+   */
+  private parentIndex = new Map<string, ParentRef[]>();
+  /** Reverse edges a single file contributed, so `removeFile` can take them back. */
+  private fileEdges = new Map<string, ParentRef[]>();
+  /** Bumped whenever the instance edges change, so derived caches can invalidate. */
+  private edgeEpochValue = 0;
 
   stats: IndexStats = { files: 0, modules: 0, unresolvedInstances: 0, parseMs: 0 };
 
@@ -153,6 +180,7 @@ export class HdlIndex {
         }
       }
     }
+    this.addEdges(file, mods);
     this.stats.files = this.files.size;
     this.stats.modules = this.countModules();
     this.stats.unresolvedInstances = this.countUnresolvedInstances();
@@ -339,6 +367,7 @@ export class HdlIndex {
     this.fileIncludes.delete(file);
     this.macrosByFile.delete(file);
     this.parsed.delete(file);
+    this.removeEdges(file);
     const mods = this.byFile.get(file);
     if (!mods) {
       if (wasHeader) {
@@ -376,6 +405,9 @@ export class HdlIndex {
     this.parsed.clear();
     this.jumpTables.clear();
     this.jumpEntries = 0;
+    this.parentIndex.clear();
+    this.fileEdges.clear();
+    this.edgeEpochValue++;
     this.stats = { files: 0, modules: 0, unresolvedInstances: 0, parseMs: 0 };
   }
 
@@ -506,24 +538,71 @@ export class HdlIndex {
   }
 
   /**
+   * The reverse instance edges of `moduleName`: every site that instantiates
+   * it, with the instantiating definition and file. Backed by the incrementally
+   * maintained `parentIndex`, so this is O(parents) and never scans the
+   * workspace - the upward walk (`containingDesign`, trace) is the hot path.
+   */
+  parentsOf(moduleName: string): ParentRef[] {
+    return this.parentIndex.get(moduleName) ?? [];
+  }
+
+  /**
    * Every place `moduleName` is instantiated: the instantiating module's name
-   * together with the instance, wherever it sits. The graph uses this to walk
-   * upward from a module's own definition to the design root that contains it
-   * (`containingDesign` in `hierarchy.ts`); plain top inference knows only the
-   * reverse direction.
+   * together with the instance, wherever it sits. A thin view over
+   * {@link parentsOf} kept for callers that only need the name.
    */
   instantiatorsOf(moduleName: string): { parent: string; inst: InstanceSite }[] {
-    const out: { parent: string; inst: InstanceSite }[] = [];
-    for (const mods of this.byFile.values()) {
-      for (const m of mods) {
-        for (const inst of m.instances) {
-          if (inst.moduleName === moduleName) {
-            out.push({ parent: m.name, inst });
-          }
+    return this.parentsOf(moduleName).map((p) => ({ parent: p.parentModule, inst: p.inst }));
+  }
+
+  /** The epoch of the instance-edge database; changes when an edge is added or removed. */
+  get edgeEpoch(): number {
+    return this.edgeEpochValue;
+  }
+
+  /** Record the reverse edges a file's modules contribute. */
+  private addEdges(file: string, mods: ModuleDef[]): void {
+    const edges: ParentRef[] = [];
+    for (const m of mods) {
+      for (const inst of m.instances) {
+        const ref: ParentRef = { parent: m, parentModule: m.name, file: m.file, inst };
+        edges.push(ref);
+        const list = this.parentIndex.get(inst.moduleName);
+        if (list) {
+          list.push(ref);
+        } else {
+          this.parentIndex.set(inst.moduleName, [ref]);
         }
       }
     }
-    return out;
+    if (edges.length > 0) {
+      this.fileEdges.set(file, edges);
+    }
+    this.edgeEpochValue++;
+  }
+
+  /** Take back the reverse edges a file contributed, when it is reindexed or removed. */
+  private removeEdges(file: string): void {
+    const edges = this.fileEdges.get(file);
+    if (!edges) {
+      return;
+    }
+    for (const ref of edges) {
+      const list = this.parentIndex.get(ref.inst.moduleName);
+      if (!list) {
+        continue;
+      }
+      const i = list.indexOf(ref);
+      if (i >= 0) {
+        list.splice(i, 1);
+      }
+      if (list.length === 0) {
+        this.parentIndex.delete(ref.inst.moduleName);
+      }
+    }
+    this.fileEdges.delete(file);
+    this.edgeEpochValue++;
   }
 
   /** Every indexed file path. */
@@ -711,12 +790,8 @@ export class HdlIndex {
    */
   tops(explicit: string[] = []): TopCandidate[] {
     const instantiated = new Map<string, number>();
-    for (const mods of this.byFile.values()) {
-      for (const m of mods) {
-        for (const inst of m.instances) {
-          instantiated.set(inst.moduleName, (instantiated.get(inst.moduleName) ?? 0) + 1);
-        }
-      }
+    for (const [name, refs] of this.parentIndex) {
+      instantiated.set(name, refs.length);
     }
     const out: TopCandidate[] = [];
     const seen = new Set<string>();

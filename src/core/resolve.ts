@@ -718,20 +718,12 @@ export function leafRangeIn(
   };
 }
 
-/** All instantiation sites of a module across the workspace. */
+/** All instantiation sites of a module, via the index's reverse edges (O(parents)). */
 export function instancesOf(
   index: HdlIndex,
   name: string,
 ): { mod: ModuleDef; inst: ModuleDef['instances'][number] }[] {
-  const out: { mod: ModuleDef; inst: ModuleDef['instances'][number] }[] = [];
-  for (const m of index.allModules()) {
-    for (const inst of m.instances) {
-      if (inst.moduleName === name) {
-        out.push({ mod: m, inst });
-      }
-    }
-  }
-  return out;
+  return index.parentsOf(name).map((p) => ({ mod: p.parent, inst: p.inst }));
 }
 
 /** All reference sites to `name` across the workspace. */
