@@ -5,8 +5,10 @@
  * the actual script and checks which rows survive a space-separated fuzzy query
  * and which letters are highlighted.
  */
-import { test, before } from 'node:test';
+import { test, before, after } from 'node:test';
 import * as assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { Module } from 'node:module';
 
 import { vscode } from './vscodeStub';
@@ -148,4 +150,124 @@ test('nets webview: a space separated query with an unmatched token hides everyt
   fire(ui.input, 'input');
   assert.equal(drawn(ui.list).length, 0, 'no signal satisfies every token');
   assert.equal(ui.empty.style.display, 'block');
+});
+
+// Same handshake as Composition: rows posted before the document has installed
+// its `message` listener never arrive, and afterwards the host only re-sends
+// them on an index change - so a view opened on an already-indexed file would
+// sit on its empty placeholder.
+test('nets webview: rows are delivered after the webview reports ready', async () => {
+  const { IndexService } = await import('../vscode/indexService');
+  const { NetsViewProvider } = await import('../vscode/netsView');
+  const svc = new IndexService(vscode.window.createOutputChannel('test'));
+  svc.index.addFile('/w/m.v', 'module m (input wire clk, output wire q); assign q = clk; endmodule\n');
+
+  const provider = new NetsViewProvider(svc);
+  // The module is resolved while the sidebar is still closed.
+  provider.setContext('/w/m.v', 0);
+
+  const delivered: { type?: string }[] = [];
+  let ready = false;
+  let onMsg: ((m: unknown) => void) | undefined;
+  provider.resolveWebviewView({
+    webview: {
+      options: {},
+      html: '',
+      onDidReceiveMessage: (cb: (m: unknown) => void) => {
+        onMsg = cb;
+        return { dispose() {} };
+      },
+      // Anything sent before the script has installed its listener never
+      // arrives - the real webview behaves the same way.
+      postMessage: async (m: { type?: string }) => {
+        if (ready) {
+          delivered.push(m);
+        }
+      },
+    },
+  } as unknown as import('vscode').WebviewView);
+
+  // The document has installed its listener by now, so anything sent from
+  // here on arrives - the script asks for the rows at that point.
+  ready = true;
+  onMsg!({ type: 'ready' });
+
+  assert.ok(
+    delivered.some((m) => m.type === 'rows'),
+    'the rows reach the webview once it can receive them',
+  );
+});
+
+// A reindex clears the index and only then announces the new state, so a view
+// that rebuilds on every change reads the half-cleared index and pushes an
+// empty list - the rows would blink out for the whole scan. The rebuild has to
+// wait for `ready`, the same way the composition tree does.
+const TEMP = path.join('/tmp/opencode', 'rtlens-nets-test');
+const FILE = path.join(TEMP, 'm.v');
+const SRC = 'module m (input wire clk, output wire q); assign q = clk; endmodule\n';
+
+after(() => {
+  fs.rmSync(TEMP, { recursive: true, force: true });
+});
+
+test('nets webview: reindexing keeps the rows on screen', async () => {
+  fs.rmSync(TEMP, { recursive: true, force: true });
+  fs.mkdirSync(TEMP, { recursive: true });
+  fs.writeFileSync(FILE, SRC);
+  const folders = (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders;
+  const findFiles = (vscode.workspace as { findFiles: unknown }).findFiles;
+  (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [
+    { uri: vscode.Uri.file(TEMP), name: 'nets', index: 0 },
+  ];
+  // The scan only re-ingests what findFiles hands back, so the file that has
+  // to survive the reindex is offered here.
+  (vscode.workspace as { findFiles: unknown }).findFiles = async () => [vscode.Uri.file(FILE)];
+
+  try {
+    const { IndexService } = await import('../vscode/indexService');
+    const { NetsViewProvider } = await import('../vscode/netsView');
+    const svc = new IndexService(vscode.window.createOutputChannel('test'));
+    svc.index.addFile(FILE, SRC);
+
+    const provider = new NetsViewProvider(svc);
+
+    const posted: { type?: string; rows?: unknown[] }[] = [];
+    let ready = false;
+    provider.resolveWebviewView({
+      webview: {
+        options: {},
+        html: '',
+        onDidReceiveMessage: () => ({ dispose() {} }),
+        // Anything sent before the script has installed its listener never
+        // arrives - the real webview behaves the same way.
+        postMessage: async (m: { type?: string; rows?: unknown[] }) => {
+          if (ready) {
+            posted.push(m);
+          }
+        },
+      },
+    } as unknown as import('vscode').WebviewView);
+
+    // The document has installed its listener by now, so anything sent from
+    // here on arrives - the context set below is what puts the rows on screen.
+    ready = true;
+    provider.setContext(FILE, 0);
+
+    const rowCounts = () =>
+      posted.filter((m) => m.type === 'rows').map((m) => (m.rows ?? []).length);
+    assert.ok(rowCounts().pop()! > 0, 'the rows are on screen');
+
+    await svc.refresh();
+
+    assert.equal(
+      rowCounts().some((n) => n === 0),
+      false,
+      'no empty row list is pushed while the workspace is reindexed',
+    );
+    assert.ok(rowCounts().pop()! > 0, 'the rows are still there when the scan finishes');
+    svc.dispose();
+  } finally {
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = folders;
+    (vscode.workspace as { findFiles: unknown }).findFiles = findFiles;
+  }
 });

@@ -83,8 +83,16 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
   private pending: HierarchyNode[] = [];
 
   constructor(private readonly svc: IndexService) {
-    this.svc.onDidChange(() => this.refresh());
-    this.svc.onDidChangeState(() => this.refresh());
+    this.svc.onDidChange(() => {
+      if (this.svc.state === 'ready') {
+        this.refresh();
+      }
+    });
+    this.svc.onDidChangeState((s) => {
+      if (s === 'ready') {
+        this.refresh();
+      }
+    });
   }
 
   /**
@@ -357,6 +365,15 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     view.webview.options = { enableScripts: true };
     view.webview.html = html();
     view.webview.onDidReceiveMessage((msg: { type?: string; path?: string; expanded?: boolean }) => {
+      // The document drops everything VS Code posted before its `message`
+      // listener existed, so it asks for the tree once it can receive - the
+      // only reliable first delivery, and the re-arm after the webview was
+      // torn down and rebuilt on a show.
+      if (msg?.type === 'ready') {
+        this.rebuild();
+        this.post();
+        return;
+      }
       // The webview reports whether the whole tree is expanded so the title
       // button can show Expand all or Collapse all.
       if (msg?.type === 'expandState') {
@@ -387,8 +404,6 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
         node,
       });
     });
-    this.rebuild();
-    this.post();
   }
 
   /** Flatten the materialised tree into pre-order rows for the webview. */
@@ -934,5 +949,6 @@ export const SCRIPT = String.raw`
     render();
   });
   render();
+  vscode.postMessage({ type: 'ready' });
 })();
 `;

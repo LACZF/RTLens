@@ -285,6 +285,120 @@ test('composition webview: refresh rebuilds from the reindexed hierarchy, down t
   );
 });
 
+// VS Code drops every message posted before the webview's document has
+// installed its `message` listener, and once the tree is rooted the host only
+// ever sends `highlightPath` on a cursor move - so a first `rows` message that
+// races the document load leaves the view on "No composition hierarchy"
+// forever. The webview has to ask for the tree again once it can receive it.
+test('composition webview: rows are delivered after the webview reports ready', async () => {
+  const svc = await svcWith({ topModules: ['top'] });
+  svc.index.addFile('/w/top.v', 'module top (input wire i, output wire o); endmodule\n');
+  const { CompositionViewProvider } = await import('../vscode/compView');
+  const provider = new CompositionViewProvider(svc);
+
+  // The tree is rooted while the sidebar is still closed: activation runs
+  // `syncEditor` as soon as the scan finishes, long before the view is opened.
+  provider.setContext('/w/top.v', 0, 0);
+
+  const delivered: { type?: string; rows?: { path: string }[] }[] = [];
+  let ready = false;
+  let onMsg: ((m: unknown) => void) | undefined;
+  provider.resolveWebviewView({
+    webview: {
+      options: {},
+      html: '',
+      onDidReceiveMessage: (cb: (m: unknown) => void) => {
+        onMsg = cb;
+        return { dispose() {} };
+      },
+      // Anything sent before the script has installed its listener never
+      // arrives - the real webview behaves the same way.
+      postMessage: async (m: { type?: string; rows?: { path: string }[] }) => {
+        if (ready) {
+          delivered.push(m);
+        }
+      },
+    },
+  } as unknown as import('vscode').WebviewView);
+
+  // The document has installed its listener by now, so anything sent from
+  // here on arrives - the script asks for the tree at that point.
+  ready = true;
+  onMsg!({ type: 'ready' });
+
+  const rows = delivered.filter((m) => m.type === 'rows');
+  assert.equal(rows.length, 1, 'exactly one rebuild is delivered once the webview can receive it');
+  assert.deepEqual(
+    rows[0].rows!.map((r) => r.path),
+    ['top'],
+    'the tree rooted before the view opened arrives instead of an empty view',
+  );
+});
+
+// A reindex walks idle -> indexing -> ready. Dropping the payload on
+// `indexing` blanks a view that already has the tree on screen for the whole
+// scan - on a large workspace that is seconds of "No composition hierarchy".
+test('composition webview: reindexing keeps the tree on screen', async () => {
+  const svc = await svcWith({ topModules: ['top'] });
+  svc.index.addFile('/w/top.v', 'module top (input wire i, output wire o); endmodule\n');
+  const { CompositionViewProvider } = await import('../vscode/compView');
+  const provider = new CompositionViewProvider(svc);
+  provider.setContext('/w/top.v', 0, 0);
+
+  const posted: { type?: string; rows?: { path: string }[] }[] = [];
+  let onMsg: ((m: unknown) => void) | undefined;
+  provider.resolveWebviewView({
+    webview: {
+      options: {},
+      html: '',
+      onDidReceiveMessage: (cb: (m: unknown) => void) => {
+        onMsg = cb;
+        return { dispose() {} };
+      },
+      postMessage: async (m: { type?: string; rows?: { path: string }[] }) => {
+        posted.push(m);
+      },
+    },
+  } as unknown as import('vscode').WebviewView);
+  onMsg!({ type: 'ready' });
+
+  const rowPaths = () =>
+    posted.filter((m) => m.type === 'rows').map((m) => (m.rows ?? []).map((r) => r.path));
+  assert.deepEqual(rowPaths().pop(), ['top'], 'the rooted tree is on screen');
+
+  await svc.ensureReady();
+
+  assert.equal(
+    rowPaths().some((paths) => paths.length === 0),
+    false,
+    'no empty tree is pushed while the workspace is reindexed',
+  );
+  assert.deepEqual(rowPaths().pop(), ['top'], 'the tree is still there when the scan finishes');
+});
+
+// `IndexService.refresh()` tears the index down synchronously and only then
+// announces the new state. Views rebuild on `onDidChange` whenever the state
+// reads `ready`, so the event has to arrive *after* the state moved to
+// `indexing` - otherwise every view rebuilds from a half-cleared index: the
+// composition tree loses its root, and with it the expanded frontier (the
+// frontier is captured from the root it had, so an empty root loses it for the
+// rebuild that follows).
+test('index: a rebuild announces indexing before it clears the index', async () => {
+  const svc = await svcWith();
+  svc.index.addFile('/w/top.v', 'module top (input wire i, output wire o); endmodule\n');
+
+  const changes: { state: string; files: number }[] = [];
+  svc.onDidChange(() => changes.push({ state: svc.state, files: svc.stats.files }));
+
+  await svc.refresh();
+
+  assert.deepEqual(
+    changes[0],
+    { state: 'indexing', files: 0 },
+    'the first change of a rebuild is seen while the index reports indexing, not ready',
+  );
+});
+
 // `a` is instantiated only under `u_b` and itself instantiates `other`, so the
 // two filter modes differ: mode 1 keeps `u_a2 : a` and hides `u_t : other`,
 // mode 2 drops `u_a2` and its subtree.

@@ -93,6 +93,12 @@ export class IndexService implements vscode.Disposable {
 
   /** Full rescan, e.g. after a configuration change. */
   async refresh(): Promise<void> {
+    // The state has to move before the index is torn down: views rebuild on
+    // `onDidChange`, and they only rebuild while they read `ready`. Announcing
+    // afterwards would let every subscriber rebuild from a half-cleared index -
+    // the composition tree would lose its root and, with it, the expanded
+    // frontier it captured from that root.
+    this.setState('indexing');
     this.readyPromise = undefined;
     this.stopWatchers();
     this.includedFiles.clear();

@@ -31,7 +31,15 @@ export class NetsViewProvider implements vscode.WebviewViewProvider {
   private payload: NetsPayload = { module: '', file: '', rows: [] };
 
   constructor(private readonly svc: IndexService) {
-    this.svc.onDidChange(() => this.refresh());
+    // A reindex clears the index before it announces the new state; rebuilding
+    // on that event would push an empty list over rows that are already on
+    // screen, so the rebuild waits for `ready` - the composition tree gates the
+    // same way.
+    this.svc.onDidChange(() => {
+      if (this.svc.state === 'ready') {
+        this.refresh();
+      }
+    });
   }
 
   /** Point the view at the module around `line` of `file`. */
@@ -61,6 +69,14 @@ export class NetsViewProvider implements vscode.WebviewViewProvider {
     view.webview.options = { enableScripts: true };
     view.webview.html = html();
     view.webview.onDidReceiveMessage((msg: { type?: string; line?: number }) => {
+      // Rows posted before the document installed its `message` listener never
+      // arrive, and afterwards nothing re-sends them until the next index
+      // change - so a view opened on an already-indexed file would sit on its
+      // placeholder until the script asks for the rows itself.
+      if (msg?.type === 'ready') {
+        this.refresh();
+        return;
+      }
       if (msg?.type === 'open' && typeof msg.line === 'number' && this.shownFile) {
         void vscode.commands.executeCommand('hdl.connectView.revealInstance', {
           file: this.shownFile,
@@ -68,7 +84,6 @@ export class NetsViewProvider implements vscode.WebviewViewProvider {
         });
       }
     });
-    this.post();
   }
 
   private rebuild(): void {
@@ -319,5 +334,6 @@ export const SCRIPT = String.raw`
     render();
   });
   render();
+  vscode.postMessage({ type: 'ready' });
 })();
 `;

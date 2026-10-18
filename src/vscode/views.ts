@@ -29,8 +29,18 @@ export class CompositionTreeProvider implements vscode.TreeDataProvider<Composit
   private autoKey: string | undefined;
 
   constructor(private readonly svc: IndexService) {
-    this.svc.onDidChange(() => this.refresh());
-    this.svc.onDidChangeState(() => this.refresh());
+    this.svc.onDidChange(() => {
+      if (this.svc.state === 'ready') {
+        this.refresh();
+      }
+    });
+    this.svc.onDidChangeState((s) => {
+      if (s === 'ready') {
+        this.refresh();
+      } else if (s === 'idle' || s === 'indexing') {
+        this.rendered.clear();
+      }
+    });
   }
 
   refresh(): void {
