@@ -18,7 +18,7 @@
 - **组成树（Composition）**：侧边栏 webview，展示 module 之间的例化关系，可跳转到源码。根固定在整个设计上：设置了 `hdl.connectView.topModules` 就从该顶层 module 展开，未设置则自动向上找到包含**当前所在 module** 的设计顶层。切换文件时**树不搬家**（只有换到另一份设计才重建），而是**自动定位并高亮**当前文件对应的 module 行——展开沿途、滚动到它并加高亮，可在整个设计里随时看清自己编辑的 module 处在什么位置。层次的深度与实例数由**独立的** `hdl.connectView.composition.maxDepth` / `composition.maxInstances` 控制，默认都为 `0`（不限制），与连接图等使用的全局 `maxDepth` / `maxInstances` 互不影响。**层次化显示 + 逐级展开/折叠**：每行带缩进与折叠三角，每一级默认**折叠**，点三角逐级展开/折叠，可一直展开到叶子 module；下级一次性全部列出，不分页。**标题栏全局展开/折叠**：视图右上角的按钮一按即把整棵例化树全部展开或全部折回根部，图标会随当前状态自动在 `Expand all` / `Collapse all` 之间切换（原来占这个位置的 `Show Connectivity Graph` 按钮移到了该视图的行内右键菜单与命令面板）。**刷新索引**：新增（或改动）module 及其子层次后，点视图标题栏的刷新按钮重扫工作区，组成树会**从最新索引重建**并把新增的层次（含子层）显示出来。**模块过滤**：用 `hdl.connectView.composition.filterModules` 填要过滤的 module 名、`composition.filterMode` 选模式——模式 `1` 保留该 module 的实例行、只隐藏它下面的子模块（当叶子显示并标 `filtered`）；模式 `2` 连实例行及整棵子树一起隐藏。**搜索**：顶部输入框对实例名 / module 名做模糊（子序列）匹配并高亮命中字母，查询可用空格分隔多个词（每个词各作子序列匹配、全部命中才算命中，如 `u mid` 命中 `u_mid`），只保留命中行及其祖先并自动展开这条路径，清空即恢复整棵树——与 Nets 视图同一套搜索。**按需懒加载**：整棵树不再一次性建好再传给界面，而是**打开哪一层才建哪一层**——只发根行，点开某个层级时后台只材料化这一层并把它的子行补进来。这样即便层次默认不限深、不限实例（几万、几十万节点），初始视图也只是一行、光标移动只更新高亮而不重建，编辑器里再加 module 也不会因为一次编辑就重发整棵树。注意搜索此时只覆盖**已经展开**的层级（没打开的层还没有行）。
 - **Net 视图与问题视图**：列出网络与解析过程中的告警（未声明信号、缺失 module、被丢弃的 typedef 等）。
 - **包装 module 生成**：从图中或光标处的实例生成 wrapper 源码，支持四种模式 —— `Auto`、`Flatten`（内联展开）、`Compose`（保留实例、重建接线）、`Stub`（例化并原样引出端口）。生成结果先预览，写盘需要显式 "Save As" 确认。
-- **信号 / module 关系数据库**：将信号读写关系与 module 间端口连接固化为 JSON 文件，保存到每个工作区 `.vscode/rtlens/relations.json`，支持增量（只重算变动文件及其依赖）与全量刷新，可通过底部状态栏按钮一键更新。
+- **分类数据库**：把设计固化成一组可落盘、可 diff 的 JSON，按职责分类放在每个工作区 `.vscode/rtlens/` 下——`index.json`（模块定义 + 例化边）、`hierarchy.json`（例化图 + 显示元数据，组成树在新鲜时直接读它）、`graph.json`（各顶层默认连通图）、`relations.json`（信号读写 + module 间端口连接）。支持增量（只重算变动文件及其依赖）与全量刷新，由底部状态栏一个 `RTLens DB` 按钮一键更新；关闭自动更新时仅手动刷新或文件集合相关设置变化才重建。`index.json` / `graph.json` 是 artifact（可检视，不接线回读）。
 
 ## 视图
 
@@ -36,7 +36,7 @@
 |------|------|
 | `HDL: Refresh Index` | 重建工作区索引 |
 
-| `HDL: Refresh Signal/Module Database` | 刷新信号/module 关系数据库（.vscode/rtlens/relations.json），支持增量或全量 |
+| `HDL: Refresh Signal/Module Database` | 刷新分类数据库（`.vscode/rtlens/` 下的 `index.json` / `hierarchy.json` / `graph.json` / `relations.json`），支持增量或全量 |
 | `HDL: Show Connectivity Graph` | 打开选中实例的连接关系图 |
 | `HDL: Expand All in Composition` | 展开组成树的全部层次（组成视图标题栏按钮） |
 | `HDL: Collapse All in Composition` | 折叠组成树的全部层次（组成视图标题栏按钮） |
@@ -71,7 +71,7 @@
 | `hdl.connectView.enableSemanticHighlighting` | `true` | 启用语义高亮（实例名、端口名、声明信号等） |
 | `hdl.connectView.databasePaths` | `[]` | 额外参与索引与数据库的路径或文件；相对路径按各工作区文件夹解析，绝对路径原样使用。目录按 `files` 递归扫描，文件直接索引 |
 | `hdl.connectView.databasePathsOnly` | `false` | 勾选后只扫描 `databasePaths` 指定的路径与文件，跳过当前打开的工作区；不勾选则在配置项之外同时扫描工作区 |
-| `hdl.connectView.autoUpdateDatabase` | `true` | 索引文件改动时自动增量更新关系数据库；关闭后仅由手动刷新命令、或 `files` / `includeDirs` / `exclude` / `databasePaths` / `databasePathsOnly` 变化时重建 |
+| `hdl.connectView.autoUpdateDatabase` | `true` | 索引文件改动时自动增量更新分类数据库（`.vscode/rtlens/` 下的 `index.json` / `hierarchy.json` / `graph.json` / `relations.json`）；关闭后仅由手动刷新命令、或 `files` / `includeDirs` / `exclude` / `databasePaths` / `databasePathsOnly` 变化时重建 |
 
 ## 快速开始
 
@@ -79,7 +79,7 @@
 2. 在编辑器中把光标放到某个 module 或实例上，按 `Ctrl+Alt+G` 打开连接关系图。
 3. 或在 **Composition** 视图里点击某行跳到源码，再用命令面板的 `HDL: Show Connectivity Graph` / `HDL: Generate Wrapper Module`。
 4. 若默认排除规则不适用，调整 `hdl.connectView.files` / `hdl.connectView.exclude` 后执行 `HDL: Refresh Index`。
-5. 信号/module 关系数据库保存在工作区的 `.vscode/rtlens/relations.json`，底部状态栏的 `RTLens DB` 按钮可手动刷新（增量或全量）。默认（`hdl.connectView.autoUpdateDatabase` 开启）会在索引文件改动后自动增量更新；激活时只读取，不重写。关闭该设置后，只有手动刷新、或文件集合相关配置（`files` / `includeDirs` / `exclude` / `databasePaths` / `databasePathsOnly`）变化时才会重建。
+5. 分类数据库保存在工作区的 `.vscode/rtlens/`（`index.json` / `hierarchy.json` / `graph.json` / `relations.json`），底部状态栏的 `RTLens DB` 按钮可手动刷新（增量或全量）。默认（`hdl.connectView.autoUpdateDatabase` 开启）会在索引文件改动后自动增量更新；激活时只读取，不重写。关闭该设置后，只有手动刷新、或文件集合相关配置（`files` / `includeDirs` / `exclude` / `databasePaths` / `databasePathsOnly`）变化时才会重建。
 
 ## 开发
 
