@@ -98,6 +98,19 @@ export function hashText(text: string): string {
   return `${a.toString(16).padStart(8, '0')}${b.toString(16).padStart(8, '0')}${text.length.toString(16)}`;
 }
 
+/**
+ * Fingerprint of a set of source files, used to tell whether a derived
+ * database (hierarchy / graph / index) still matches the workspace.
+ *
+ * It is order-independent (the inputs are sorted) and only folds the
+ * workspace-relative path and the content hash, so moving the workspace
+ * elsewhere does not invalidate a database that is otherwise current.
+ */
+export function sourceFingerprint(files: { rel: string; hash: string }[]): string {
+  const parts = files.map((f) => `${f.rel}:${f.hash}`).sort();
+  return hashText(parts.join('\n'));
+}
+
 function compareConnection(x: ModuleConnection, y: ModuleConnection): number {
   return (
     x.instance.localeCompare(y.instance) ||
