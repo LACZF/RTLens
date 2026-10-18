@@ -32,6 +32,9 @@ function instanceLocalAt(mod: ModuleDef, line: number, character: number | undef
   return inst.genPrefix ? `${inst.genPrefix}.${inst.name}` : inst.name;
 }
 
+/** Rows per `children` message; wider levels are split, and the last chunk (`more: false`) triggers the render. */
+const ROW_CHUNK = 2000;
+
 /** Row payload sent to the webview. */
 export interface CompRow {
   path: string;
@@ -223,7 +226,24 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     const nodes = this.pending;
     this.pending = [];
     for (const node of nodes) {
-      void this.view.webview.postMessage({ type: 'children', parentPath: node.path, rows: this.childRows(node) });
+      this.postChildren(node.path, this.childRows(node));
+    }
+  }
+
+  /** Stream one level's rows, splitting an oversized level into chunks. */
+  private postChildren(parentPath: string, rows: CompRow[]): void {
+    if (!this.view) return;
+    if (rows.length <= ROW_CHUNK) {
+      void this.view.webview.postMessage({ type: 'children', parentPath, rows, more: false });
+      return;
+    }
+    for (let i = 0; i < rows.length; i += ROW_CHUNK) {
+      void this.view.webview.postMessage({
+        type: i === 0 ? 'children' : 'childrenMore',
+        parentPath,
+        rows: rows.slice(i, i + ROW_CHUNK),
+        more: i + ROW_CHUNK < rows.length,
+      });
     }
   }
 
@@ -349,7 +369,7 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
         const node = this.cachedRoot ? findByPath(this.cachedRoot, msg.path) : undefined;
         if (node && this.expander && node.children === undefined && this.expander.childCount(node) > 0) {
           this.expander.expandLevel(node);
-          void view.webview.postMessage({ type: 'children', parentPath: node.path, rows: this.childRows(node) });
+          this.postChildren(node.path, this.childRows(node));
         }
         return;
       }
@@ -542,8 +562,9 @@ header { position:sticky; top:0; padding:6px 8px; background:var(--vscode-sideBa
  * The whole webview script, kept as a string so tests can run the real thing
  * against a stub DOM instead of a copy. It expects `#q`, `#mod`, `#file`,
  * `#empty` and `#list`, gets `{type:'rows', rootModule, rootPath, rows}` on a
- * rebuild, `{type:'children', parentPath, rows}` with one more level the reader
- * opened, `{type:'revealPath', path}` to scroll to a row,
+ * rebuild, `{type:'children', parentPath, rows, more}` with one more level the
+ * reader opened (a wide level arrives as further `{type:'childrenMore', ...}`
+ * chunks until `more` is false), `{type:'revealPath', path}` to scroll to a row,
  * `{type:'highlightPath', path}` to mark the current module's row (revealing
  * it), and `{type:'setExpanded', expanded}` from the title button to open or
  * fold every row; it posts `{type:'open', path}` when a row is clicked,
@@ -566,6 +587,9 @@ export const SCRIPT = String.raw`
   // row is opened, so a row can show a disclosure triangle before its children
   // are known; the collapsed set then only switches once the level is loaded.
   var loaded = {};
+  // Last row inserted for a parent, so a streamed level's later chunks (and not
+  // just its first) land right after the row already on screen.
+  var lastInserted = {};
   var lastRoot = '';
   var selected = '';
   var reportedExpanded;
@@ -858,29 +882,44 @@ export const SCRIPT = String.raw`
       else collapseAll();
       return;
     }
-    if (m.type === 'children') {
-      // One more level arrived. Rows are flat pre-order, so a parent's children
-      // go right after the parent; opening the level reveals them, and each new
-      // child starts collapsed so the tree still opens one level at a time.
+    if (m.type === 'children' || m.type === 'childrenMore') {
+      // One more level (or one more chunk of it) arrived. Rows are flat
+      // pre-order, so a parent's children go right after the parent - or right
+      // after the previous chunk of this same level. The final chunk renders;
+      // intermediate chunks only grow the list, so a huge level costs one
+      // render, not one per chunk.
       var add = m.rows || [];
       if (add.length) {
         var at = -1;
-        for (var ci = 0; ci < rows.length; ci++) {
-          if (rows[ci].path === m.parentPath) { at = ci; break; }
+        if (m.type === 'children') {
+          for (var ci = 0; ci < rows.length; ci++) {
+            if (rows[ci].path === m.parentPath) { at = ci; break; }
+          }
+        } else {
+          var prev = lastInserted[m.parentPath];
+          if (prev) {
+            for (var pi = 0; pi < rows.length; pi++) {
+              if (rows[pi].path === prev) { at = pi; break; }
+            }
+          }
         }
         if (at >= 0) Array.prototype.splice.apply(rows, [at + 1, 0].concat(add));
         else rows = rows.concat(add);
         for (var ai = 0; ai < add.length; ai++) {
-          if (add[ai].childCount > 0) collapsed[add[ai].path] = true;
+          var ar = add[ai];
+          byPath[ar.path] = ar;
+          if (ar.childCount > 0) collapsed[ar.path] = true;
         }
-        index();
+        loaded[m.parentPath] = true;
+        lastInserted[m.parentPath] = add[add.length - 1].path;
       }
       delete collapsed[m.parentPath];
-      render();
+      if (!m.more) render();
       return;
     }
     if (m.type !== 'rows') return;
     rows = m.rows || [];
+    lastInserted = {};
     modEl.textContent = m.rootModule || '';
     fileEl.textContent = m.file || '';
     index();

@@ -408,3 +408,17 @@ test('composition webview: opening an unloaded level asks the host, then splices
   );
   assert.equal(ui.posted.filter((m) => m.type === 'expand').length, 2, 'no extra expand message');
 });
+
+test('composition webview: a level streamed in chunks renders once, in order', () => {
+  const ui = start([row('top', '', '', 'top', 0, 4)]);
+  ui.message({ type: 'children', parentPath: 'top', rows: [row('top.a', 'top', 'a', 'leaf', 1, 0)], more: true });
+  assert.equal(drawn(ui.list).length, 1, 'the first chunk alone does not render');
+  ui.message({ type: 'childrenMore', parentPath: 'top', rows: [row('top.b', 'top', 'b', 'leaf', 1, 0)], more: true });
+  assert.equal(drawn(ui.list).length, 1, 'a middle chunk alone does not render');
+  ui.message({ type: 'childrenMore', parentPath: 'top', rows: [row('top.c', 'top', 'c', 'leaf', 1, 0)], more: false });
+  assert.deepEqual(
+    drawn(ui.list).map(rowText),
+    ['top', 'a : leaf', 'b : leaf', 'c : leaf'],
+    'the final chunk renders the whole level, chunks in order',
+  );
+});
