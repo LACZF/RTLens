@@ -26,6 +26,8 @@ Makefile
 DESIGN.md
 .gitignore
 .vscodeignore
+# Local agent tooling state (git-ignored via .git/info/exclude); never ship it.
+.omo/**
 *.vsix
 **/*.ts
 **/.DS_Store
