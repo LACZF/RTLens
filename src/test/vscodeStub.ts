@@ -337,7 +337,14 @@ const api: Record<string, any> = {
     findFiles: async () => [] as Uri[],
     asRelativePath: (p: string) => p,
     fs: {
-      readFile: async () => new Uint8Array(),
+      readFile: async (uri: any) => {
+        const fs = await import('fs');
+        const p = typeof uri === 'string' ? uri : uri.fsPath;
+        if (p.includes('.vscode/rtlens/')) {
+          return new Uint8Array(fs.readFileSync(p));
+        }
+        return new Uint8Array();
+      },
       stat: async () => ({ type: 1, size: 0 }),
     },
   },

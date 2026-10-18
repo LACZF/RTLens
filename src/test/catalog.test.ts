@@ -96,14 +96,14 @@ test('catalog: a later service loads what the first one wrote', async () => {
   first.dispose();
 
   const second = new mod.CatalogService(svc as never, { appendLine() {} } as never);
-  second.load();
-  assert.equal(second.stats().hierarchy.modules, 2, 'the on-disk databases are picked up on load');
+  await second.load();
+  assert.equal(second.stats().index.files, 2, 'the on-disk databases are picked up on load');
   second.dispose();
 });
 
 test('catalog: the provider offers a fresh hierarchy database, then withholds it after an edit', async () => {
   const { svc, catalog } = await setup();
-  catalog.load();
+  await catalog.load();
   svc.watchDocument(documentFor(PARENT, PARENT_SRC) as never);
   await wait(0);
 
@@ -124,7 +124,7 @@ test('catalog: the provider offers a fresh hierarchy database, then withholds it
 
 test('catalog: load() alone does not write, and auto-update fires after an index change', async () => {
   const { catalog, svc } = await setup();
-  catalog.load();
+  await catalog.load();
   assert.ok(!fs.existsSync(HIERARCHY_FILE), 'load() alone does not write');
 
   svc.watchDocument(documentFor(PARENT, PARENT_SRC) as never);

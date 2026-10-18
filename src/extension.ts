@@ -126,19 +126,17 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   // --- index lifecycle ---------------------------------------------------
-  void svc.ensureReady().then(() => {
+  void (async () => {
+    await svc.ensureReady();
     syncEditor(vscode.window.activeTextEditor);
-    database.load();
-    catalog.load();
+    await database.load();
+    await catalog.load();
     const stats = svc.stats;
     log.appendLine(
       `indexed ${stats.modules} module(s) in ${stats.files} file(s) in ${stats.parseMs} ms` +
         (stats.unresolved ? `, ${stats.unresolved} unresolved instance(s)` : ''),
     );
-    // Missing modules are reported by the Problems view, which refreshes on the
-    // same event - a toast on every activation only repeated (and disagreed
-    // with) what the tree already shows.
-  });
+  })();
 
   // --- commands ----------------------------------------------------------
   // Commands receive their arguments from the manifest, so the handlers take

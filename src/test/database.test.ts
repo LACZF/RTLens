@@ -95,7 +95,7 @@ test('database: a later service loads what the first one wrote', async () => {
   first.dispose();
 
   const second = new mod.DatabaseService(svc as never, { appendLine() {} } as never);
-  second.load();
+  await second.load();
   assert.equal(second.stats().modules, 2, 'the on-disk database is picked up on load');
   second.dispose();
 });
@@ -125,7 +125,7 @@ test('database: pickRefreshMode returns the chosen mode', async () => {
 
 test('database: auto-update writes the database after an index change', async () => {
   const { db, svc } = await setup();
-  db.load();
+  await db.load();
   assert.ok(!fs.existsSync(DB_FILE_ON_DISK), 'load() alone does not write');
 
   // A watched document that is not yet synced ingests and fires onDidChange.
@@ -162,4 +162,23 @@ test('database: auto-update is skipped when disabled, but a file-set change forc
   await wait(100);
   db.dispose();
   assert.ok(fs.existsSync(DB_FILE_ON_DISK), 'an explicit schedule still rebuilds it');
+});
+
+// The status-bar button is the only acknowledgement the click gets until the
+// rebuild finishes, so it has to flip to a spinner synchronously on entry and
+// settle back to the resting label through the `finally` path - a refresh that
+// throws must not leave the spinner stuck either.
+test('database: the status bar announces a running refresh and settles afterwards', async () => {
+  const { db } = await setup();
+  const bars = (vscode as unknown as { __statusBars: { text: string }[] }).__statusBars;
+  const bar = bars[bars.length - 1];
+  assert.match(bar.text, /build DB/, 'the resting label before the click');
+
+  const pending = db.refresh('full');
+  assert.match(bar.text, /sync~spin/, 'the button spins while the refresh runs');
+
+  await pending;
+  assert.doesNotMatch(bar.text, /sync~spin/, 'the spinner is cleared once the refresh finishes');
+  assert.match(bar.text, /RTLens DB/, 'the button shows the built database');
+  db.dispose();
 });

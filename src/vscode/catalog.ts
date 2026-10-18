@@ -69,9 +69,10 @@ function dbPath(folder: vscode.Uri, name: string): string {
   return path.join(folder.fsPath, DB_DIR, name);
 }
 
-function readJson<T>(folder: vscode.Uri, name: string, parse: (text: string) => T | undefined): T | undefined {
+async function readJson<T>(folder: vscode.Uri, name: string, parse: (text: string) => T | undefined): Promise<T | undefined> {
   try {
-    return parse(fs.readFileSync(dbPath(folder, name), 'utf8'));
+    const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(dbPath(folder, name)));
+    return parse(Buffer.from(bytes).toString('utf8'));
   } catch {
     return undefined;
   }
@@ -115,13 +116,13 @@ export class CatalogService implements vscode.Disposable {
   }
 
   /** Read the databases already on disk and check them against the sources. */
-  load(): void {
+  async load(): Promise<void> {
     this.dbs.clear();
     for (const folder of vscode.workspace.workspaceFolders ?? []) {
       const fingerprint = sourceFingerprint(collectInputs(this.svc, folder.uri));
-      const index = readJson(folder.uri, INDEX_DB_FILE, parseIndexDatabase);
-      const hierarchy = readJson(folder.uri, HIERARCHY_DB_FILE, parseHierarchyDatabase);
-      const graph = readJson(folder.uri, GRAPH_DB_FILE, parseGraphDatabase);
+      const index = await readJson(folder.uri, INDEX_DB_FILE, parseIndexDatabase);
+      const hierarchy = await readJson(folder.uri, HIERARCHY_DB_FILE, parseHierarchyDatabase);
+      const graph = await readJson(folder.uri, GRAPH_DB_FILE, parseGraphDatabase);
       const fresh =
         !!index && index.source === fingerprint &&
         !!hierarchy && hierarchy.source === fingerprint &&

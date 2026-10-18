@@ -43,9 +43,10 @@ export function databasePath(folder: vscode.Uri): string {
   return path.join(folder.fsPath, DB_DIR, DB_FILE);
 }
 
-export function readDatabase(folder: vscode.Uri): RelationDatabase | undefined {
+export async function readDatabase(folder: vscode.Uri): Promise<RelationDatabase | undefined> {
   try {
-    return parseDatabase(fs.readFileSync(databasePath(folder), 'utf8'));
+    const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(databasePath(folder)));
+    return parseDatabase(Buffer.from(bytes).toString('utf8'));
   } catch {
     return undefined;
   }
@@ -128,10 +129,10 @@ export class DatabaseService implements vscode.Disposable {
   }
 
   /** Read the databases already on disk. Never writes. */
-  load(): void {
+  async load(): Promise<void> {
     this.databases.clear();
     for (const folder of vscode.workspace.workspaceFolders ?? []) {
-      const db = readDatabase(folder.uri);
+      const db = await readDatabase(folder.uri);
       if (db) {
         this.databases.set(folder.uri.fsPath, db);
       }
@@ -187,33 +188,45 @@ export class DatabaseService implements vscode.Disposable {
 
   /** Recompute and write the databases for every workspace folder. */
   async refresh(mode: RefreshMode): Promise<RefreshSummary> {
-    await this.svc.ensureReady();
-    const folders = vscode.workspace.workspaceFolders ?? [];
-    const started = Date.now();
-    const summary: RefreshSummary = { folders: folders.length, files: 0, changed: 0, removed: 0, reused: 0, ms: 0 };
+    // Synchronous on entry: the click has to be acknowledged before the first
+    // await, or a fast refresh flashes nothing and a slow one shows a dead
+    // button. `finally` restores the resting label even when a folder throws.
+    this.status.text = '$(sync~spin) RTLens: refreshing database…';
+    try {
+      await this.svc.ensureReady();
+      const folders = vscode.workspace.workspaceFolders ?? [];
+      const started = Date.now();
+      const summary: RefreshSummary = { folders: folders.length, files: 0, changed: 0, removed: 0, reused: 0, ms: 0 };
 
-    for (const folder of folders) {
-      const inputs = collectInputs(this.svc, folder.uri);
-      const previous = this.databases.get(folder.uri.fsPath) ?? readDatabase(folder.uri);
-      const result = updateDatabase(
-        this.svc.index,
-        previous,
-        inputs,
-        mode,
-        new Date().toISOString(),
+      for (const folder of folders) {
+        const inputs = collectInputs(this.svc, folder.uri);
+        const previous = this.databases.get(folder.uri.fsPath) ?? (await readDatabase(folder.uri));
+        const result = updateDatabase(
+          this.svc.index,
+          previous,
+          inputs,
+          mode,
+          new Date().toISOString(),
+        );
+        writeDatabase(folder.uri, result.db);
+        this.databases.set(folder.uri.fsPath, result.db);
+        this.addTo(summary, result, inputs.length);
+        // A per-folder turn: `collectInputs` and `updateDatabase` are
+        // synchronous, so without a yield a multi-folder refresh blocks the
+        // host message loop - the spinner cannot repaint and the refresh
+        // command's follow-up RPCs queue behind the whole run.
+        await new Promise((r) => setImmediate(r));
+      }
+
+      summary.ms = Date.now() - started;
+      this.log.appendLine(
+        `[db] ${mode} refresh: ${summary.files} file(s) over ${summary.folders} folder(s), ` +
+          `${summary.changed} recomputed, ${summary.reused} reused, ${summary.removed} removed in ${summary.ms}ms`,
       );
-      writeDatabase(folder.uri, result.db);
-      this.databases.set(folder.uri.fsPath, result.db);
-      this.addTo(summary, result, inputs.length);
+      return summary;
+    } finally {
+      this.render();
     }
-
-    summary.ms = Date.now() - started;
-    this.render();
-    this.log.appendLine(
-      `[db] ${mode} refresh: ${summary.files} file(s) over ${summary.folders} folder(s), ` +
-        `${summary.changed} recomputed, ${summary.reused} reused, ${summary.removed} removed in ${summary.ms}ms`,
-    );
-    return summary;
   }
 
   private addTo(target: RefreshSummary, result: UpdateResult, files: number): void {
