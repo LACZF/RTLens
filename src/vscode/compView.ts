@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 import type { IndexService } from './indexService';
 import type { HierarchyNode, ModuleDef } from '../core/ast';
 import type { Range } from '../core/lexer';
-import { childOnPath, findByPath, type HierarchyBuilder } from '../core/hierarchy';
+import { childOnPath, findByPath, type HierarchyExpander } from '../core/hierarchy';
 
 /** Whether `(line, character)` sits inside `range`. */
 function inRange(range: Range, line: number, character: number): boolean {
@@ -74,7 +74,7 @@ export interface CompPayload {
 export class CompositionViewProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
   /** Lazy builder for the tree; `cachedRoot`'s levels are pulled through it. */
-  private expander?: HierarchyBuilder;
+  private expander?: HierarchyExpander;
   private cachedRoot?: HierarchyNode;
   private cachedRootModule?: string;
   private cachedFile?: string;
@@ -162,7 +162,7 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     if (this.cachedRoot && this.cachedRootModule === moduleName && this.cachedFile === fromFile) {
       return;
     }
-    this.expander = this.svc.compositionExpander();
+    this.expander = this.svc.compositionExpander(fromFile);
     this.cachedRoot = this.expander.root(moduleName, fromFile);
     this.cachedRootModule = moduleName;
     this.cachedFile = fromFile;
@@ -251,7 +251,7 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     // A caller hands us a fully built tree (e.g. reveal in Composition); we keep
     // it whole by handing the builder only the root's identity for later
     // refreshes.
-    this.expander = this.svc.compositionExpander();
+    this.expander = this.svc.compositionExpander(node?.file);
     this.cachedRoot = node;
     this.cachedRootModule = moduleName ?? node?.moduleName;
     this.cachedFile = node?.file;
@@ -326,7 +326,7 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     // The previously materialised frontier is re-opened so the view does not
     // collapse on every edit.
     const expanded = this.cachedRoot ? materializedPaths(this.cachedRoot) : new Set<string>();
-    this.expander = this.svc.compositionExpander();
+    this.expander = this.svc.compositionExpander(this.cachedFile);
     this.cachedRoot = this.expander.root(this.cachedRootModule, this.cachedFile);
     if (this.cachedRoot) {
       this.rematerialize(expanded);
