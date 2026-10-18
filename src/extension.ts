@@ -24,6 +24,7 @@ import { CompositionViewProvider } from './vscode/compView';
 import { GraphPanel } from './vscode/graphPanel';
 import { runGenerateWrapper } from './vscode/generate';
 import { DatabaseService, pickRefreshMode } from './vscode/database';
+import { CatalogService } from './vscode/catalog';
 import type { HierarchyNode, Range } from './core/ast';
 import { findByPath } from './core/hierarchy';
 import { basename } from './core/index';
@@ -49,8 +50,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // The signal/module relation database and its status-bar refresh button.
   const database = new DatabaseService(svc, log);
+  // The classified catalog (index / hierarchy / graph); shares the same button.
+  const catalog = new CatalogService(svc, log);
   const wordHighlighter = new WordHighlighter();
-  context.subscriptions.push(database, wordHighlighter);
+  context.subscriptions.push(database, catalog, wordHighlighter);
 
   // --- views -------------------------------------------------------------
   const compositionTree = new CompositionTreeProvider(svc);
@@ -126,6 +129,7 @@ export function activate(context: vscode.ExtensionContext): void {
   void svc.ensureReady().then(() => {
     syncEditor(vscode.window.activeTextEditor);
     database.load();
+    catalog.load();
     const stats = svc.stats;
     log.appendLine(
       `indexed ${stats.modules} module(s) in ${stats.files} file(s) in ${stats.parseMs} ms` +
@@ -157,12 +161,13 @@ export function activate(context: vscode.ExtensionContext): void {
     if (!mode) {
       return;
     }
-    const summary = await vscode.window.withProgress(
+    const [relations, catalogSummary] = await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Window, title: `HDL: ${mode} database refresh` },
-      () => database.refresh(mode),
+      () => Promise.all([database.refresh(mode), catalog.refresh(mode)]),
     );
     void vscode.window.setStatusBarMessage(
-      `HDL: ${mode} database refresh · ${summary.changed} recomputed, ${summary.reused} reused, ${summary.removed} removed`,
+      `HDL: ${mode} database refresh · relations ${relations.changed} recomputed, ${relations.reused} reused; ` +
+        `catalog ${catalogSummary.modules} modules, ${catalogSummary.instances} instances, ${catalogSummary.tops} graphs`,
       4000,
     );
   });
@@ -332,6 +337,7 @@ export function activate(context: vscode.ExtensionContext): void {
         await vscode.commands.executeCommand('hdl.connectView.refreshIndex');
         if (fileSetChanged) {
           database.scheduleAutoRefresh(0);
+          catalog.scheduleAutoRefresh(0);
         }
       })();
     }),
