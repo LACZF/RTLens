@@ -155,19 +155,28 @@ export function activate(context: vscode.ExtensionContext): void {
   });
 
   reg('hdl.connectView.refreshDatabase', async () => {
-    const mode = await pickRefreshMode();
-    if (!mode) {
-      return;
+    // A rejected promise from a command handler vanishes into the output of
+    // the command palette: the user clicks, nothing happens, and the reason
+    // (a full disk, a corrupt database file) is never shown. Surface it.
+    try {
+      const mode = await pickRefreshMode();
+      if (!mode) {
+        return;
+      }
+      const [relations, catalogSummary] = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Window, title: `HDL: ${mode} database refresh` },
+        () => Promise.all([database.refresh(mode), catalog.refresh(mode)]),
+      );
+      void vscode.window.setStatusBarMessage(
+        `HDL: ${mode} database refresh · relations ${relations.changed} recomputed, ${relations.reused} reused; ` +
+          `catalog ${catalogSummary.modules} modules, ${catalogSummary.instances} instances, ${catalogSummary.tops} graphs`,
+        4000,
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log.appendLine(`[db] refresh command failed: ${msg}`);
+      void vscode.window.showErrorMessage(`RTLens database refresh failed: ${msg}`);
     }
-    const [relations, catalogSummary] = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Window, title: `HDL: ${mode} database refresh` },
-      () => Promise.all([database.refresh(mode), catalog.refresh(mode)]),
-    );
-    void vscode.window.setStatusBarMessage(
-      `HDL: ${mode} database refresh · relations ${relations.changed} recomputed, ${relations.reused} reused; ` +
-        `catalog ${catalogSummary.modules} modules, ${catalogSummary.instances} instances, ${catalogSummary.tops} graphs`,
-      4000,
-    );
   });
 
   reg('hdl.connectView.showGraph', async (item?: CompositionItem) => {
