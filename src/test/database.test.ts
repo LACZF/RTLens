@@ -148,6 +148,30 @@ test('database: the activation scan alone does not write the database', async ()
   db.dispose();
 });
 
+// The fingerprint decides both "is the database still fresh" and "which files
+// have to be recomputed", so it has to describe what the index holds. Reading
+// every file back off disk costs a syscall per file - a few thousand files is
+// the difference between an instant click and a frozen extension host - and can
+// disagree with the index the database is built from (an unsaved buffer, or a
+// change the watcher has not reported yet).
+test('database: the fingerprint follows the indexed text, not bytes that moved behind it', async () => {
+  const { mod, svc } = await setup();
+  const inputs = () => mod.collectInputs(svc, vscode.Uri.file(TEMP));
+  const hashOf = (file: string) => inputs().find((i) => i.file === file)!.hash;
+
+  const before = hashOf(PARENT);
+  await svc.upsertPublic(PARENT);
+  // The file changes on disk without the watcher ever reporting it.
+  fs.writeFileSync(PARENT, PARENT_SRC.replace('u ', 'u3 '));
+
+  assert.equal(
+    hashOf(PARENT),
+    before,
+    'the hash follows what the index holds, so an unnoticed disk change does not move the fingerprint',
+  );
+  assert.notEqual(hashOf(CHILD), undefined, 'the untouched sibling is still collected');
+});
+
 test('database: auto-update is skipped when disabled, but a file-set change forces it', async () => {
   const { db, svc } = await setup({ autoUpdateDatabase: false });
   db.load();

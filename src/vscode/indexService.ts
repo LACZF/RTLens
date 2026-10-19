@@ -428,6 +428,16 @@ export class IndexService implements vscode.Disposable {
 
   // ------------------------------------------------------------------ queries
 
+  /**
+   * Text as the index holds it, so consumers hash the very bytes the index was
+   * built from instead of re-reading the file. Falls back to disk only for a
+   * file that was indexed without ever being synced (added directly to the
+   * index, or dropped from `synced` by a refresh).
+   */
+  indexedText(file: string): string | undefined {
+    return this.synced.get(file) ?? this.textSync(file);
+  }
+
   /** Current text of a file: the editor buffer when open, else disk. */
   textSync(file: string): string | undefined {
     const open = vscode.workspace.textDocuments.find((d) => d.uri.scheme === 'file' && d.fileName === file);
