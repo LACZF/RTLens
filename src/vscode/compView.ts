@@ -1,3 +1,4 @@
+import * as path from 'path';
 import * as vscode from 'vscode';
 
 import type { IndexService } from './indexService';
@@ -11,6 +12,12 @@ function inRange(range: Range, line: number, character: number): boolean {
   if (line === range.start.line && character < range.start.character) return false;
   if (line === range.end.line && character > range.end.character) return false;
   return true;
+}
+
+/** Whether `file` lives under directory `dir` (equal paths are not "under"). */
+function isUnder(file: string, dir: string): boolean {
+  const rel = path.relative(dir, file);
+  return rel !== '' && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
 }
 
 /**
@@ -62,6 +69,12 @@ export interface CompPayload {
   rows: CompRow[];
 }
 
+/** A parsed filter list: literal module names plus resolved file/directory paths. */
+interface CompositionFilter {
+  names: Set<string>;
+  paths: string[];
+}
+
 /**
  * Composition view.
  *
@@ -83,6 +96,8 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
   private pending: HierarchyNode[] = [];
   /** The last defined file `setContext` saw: a move to another file is an open (and folds the other branches). */
   private lastContextFile: string | undefined;
+  /** Parsed `composition.filterModules`, rebuilt when the config is reread (a fresh array). */
+  private filterCache?: { source: string[]; value: CompositionFilter };
 
   constructor(private readonly svc: IndexService) {
     this.svc.onDidChange(() => {
@@ -471,17 +486,72 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     return rows;
   }
 
+  /**
+   * Parse the configured filter entries.
+   *
+   * An entry naming an indexed module filters that module; every other entry
+   * is a path - a file, or a directory whose modules are all filtered. Module
+   * names win when a name and a path collide, which keeps the original
+   * name-only configuration working. Relative paths resolve against each
+   * workspace folder, like `hdl.connectView.databasePaths`; absolute paths are
+   * used as written. Cached until the config is reread (which hands over a
+   * fresh array), so drawing rows does no string work.
+   */
+  private compositionFilter(): CompositionFilter {
+    const source = this.svc.config.compositionFilterModules;
+    if (this.filterCache && this.filterCache.source === source) {
+      return this.filterCache.value;
+    }
+    const known = new Set(this.svc.index.moduleNames());
+    const roots = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
+    const names = new Set<string>();
+    const paths: string[] = [];
+    for (const entry of source) {
+      if (known.has(entry)) {
+        names.add(entry);
+        continue;
+      }
+      if (path.isAbsolute(entry)) {
+        paths.push(path.resolve(entry));
+      } else if (roots.length === 0) {
+        paths.push(path.resolve(entry));
+      } else {
+        for (const root of roots) {
+          paths.push(path.resolve(root, entry));
+        }
+      }
+    }
+    const value = { names, paths };
+    this.filterCache = { source, value };
+    return value;
+  }
+
+  /**
+   * Whether `def` is filtered out: by module name, by its defining file, or by
+   * a directory containing that file. An unresolved module is never filtered.
+   */
+  private filtered(def: ModuleDef | undefined): boolean {
+    if (!def) return false;
+    const filter = this.compositionFilter();
+    if (filter.names.has(def.name)) return true;
+    for (const entry of filter.paths) {
+      if (def.file === entry || isUnder(def.file, entry)) return true;
+    }
+    return false;
+  }
+
   /** Mode 2 (hide) drops a filtered instance and everything below it. */
   private dropped(node: HierarchyNode): boolean {
-    const filter = this.svc.config.compositionFilterModules;
-    return filter.length > 0 && this.svc.config.compositionFilterMode === 2 && filter.indexOf(node.moduleName) >= 0;
+    if (this.svc.config.compositionFilterModules.length === 0) return false;
+    if (this.svc.config.compositionFilterMode !== 2) return false;
+    return this.filtered(this.svc.index.resolveModule(node.moduleName, node.file));
   }
 
   /** Mode 1 (prune) keeps a filtered instance but hides its whole subtree. */
   private pruned(node: HierarchyNode): boolean {
-    const filter = this.svc.config.compositionFilterModules;
-    if (filter.length === 0 || this.svc.config.compositionFilterMode !== 1) return false;
-    if (filter.indexOf(node.moduleName) < 0) return false;
+    if (this.svc.config.compositionFilterModules.length === 0) return false;
+    if (this.svc.config.compositionFilterMode !== 1) return false;
+    if (!this.filtered(this.svc.index.resolveModule(node.moduleName, node.file))) return false;
     return this.directCount(node) > 0;
   }
 

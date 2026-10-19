@@ -150,7 +150,7 @@
             "type": "string"
           },
           "default": [],
-          "markdownDescription": "Module names to filter out of the Composition tree (left sidebar hierarchy). Matching is by the instantiated module name; see `#hdl.connectView.composition.filterMode#` for what gets hidden."
+          "markdownDescription": "Entries to filter out of the Composition tree (left sidebar hierarchy): a module name selects that module, a file path selects every module defined in that file, and a directory path selects every module defined under it (recursively). Relative paths resolve against each workspace folder; absolute paths are used as written. A name wins when it collides with a path. See `#hdl.connectView.composition.filterMode#` for what gets hidden."
         },
         "hdl.connectView.composition.filterMode": {
           "type": "number",
@@ -164,7 +164,7 @@
           ],
           "minimum": 1,
           "default": 1,
-          "description": "How the Composition tree hides the modules listed in hdl.connectView.composition.filterModules. 1 = keep the filtered instances but hide their submodules; 2 = hide the filtered instances and their submodules."
+          "description": "How the Composition tree hides the modules selected by hdl.connectView.composition.filterModules (by module name, file, or directory). 1 = keep the filtered instances but hide their submodules; 2 = hide the filtered instances and their submodules."
         },
         "hdl.connectView.wordHighlight": {
           "type": "boolean",

@@ -466,6 +466,91 @@ test('composition webview: an empty filter list leaves the tree untouched', asyn
   );
 });
 
+// `a` (with child `leaf_a`) lives in rtl/a.v, `b` in rtl/sub/b.v, and `top`
+// instantiates all of them from top/top.v: a path filter selects modules by
+// their defining file, not by the file that instantiates them.
+const FILTER_TREE: [string, string][] = [
+  [
+    '/w/rtl/a.v',
+    'module leaf_a (input wire x); endmodule\n' +
+      'module a (input wire x); leaf_a u_la (.x(x)); endmodule\n',
+  ],
+  ['/w/rtl/sub/b.v', 'module b (input wire x); endmodule\n'],
+  [
+    '/w/top/top.v',
+    'module top (input wire x); a u_a (.x(x)); b u_b (.x(x)); leaf_a u_la2 (.x(x)); endmodule\n',
+  ],
+];
+
+async function treeFilteredRows(filterMode: number, filterModules: string[]) {
+  const space = vscode.workspace as unknown as {
+    workspaceFolders?: { uri: { fsPath: string }; name: string; index: number }[];
+  };
+  const previous = space.workspaceFolders;
+  space.workspaceFolders = [{ uri: vscode.Uri.file('/w'), name: 'w', index: 0 }];
+  try {
+    const svc = await svcWith({
+      topModules: ['top'],
+      'composition.filterModules': filterModules,
+      'composition.filterMode': filterMode,
+    });
+    for (const [file, src] of FILTER_TREE) svc.index.addFile(file, src);
+    const { CompositionViewProvider } = await import('../vscode/compView');
+    const provider = new CompositionViewProvider(svc);
+    const posted: { type?: string; rows?: { path: string; badge: string; childCount: number }[] }[] = [];
+    provider.resolveWebviewView({
+      webview: {
+        options: {},
+        html: '',
+        onDidReceiveMessage: () => ({ dispose() {} }),
+        postMessage: async (m: { type?: string; rows?: { path: string; badge: string; childCount: number }[] }) => {
+          posted.push(m);
+        },
+      },
+    } as unknown as import('vscode').WebviewView);
+    provider.setContext('/w/top/top.v', 0);
+    provider.setExpandedAll(true);
+    return [...posted].reverse().find((m) => m.type === 'rows')!.rows!;
+  } finally {
+    space.workspaceFolders = previous;
+  }
+}
+
+test('composition webview: a filter file path hides every module defined in it', async () => {
+  const rows = await treeFilteredRows(2, ['rtl/a.v']);
+  assert.deepEqual(
+    rows.map((r) => r.path),
+    ['top', 'top.u_b'],
+    '`a` and `leaf_a` are defined in rtl/a.v, so their instances go; `b` stays',
+  );
+});
+
+test('composition webview: a filter directory path hides every module under it', async () => {
+  const rows = await treeFilteredRows(2, ['rtl']);
+  assert.deepEqual(rows.map((r) => r.path), ['top'], 'a, leaf_a and b all live under rtl/');
+});
+
+test('composition webview: an absolute filter path skips workspace resolution', async () => {
+  const rows = await treeFilteredRows(2, ['/w/rtl/sub']);
+  assert.deepEqual(
+    rows.map((r) => r.path),
+    ['top', 'top.u_a', 'top.u_a.u_la', 'top.u_la2'],
+    'only `b`, defined under rtl/sub, is filtered',
+  );
+});
+
+test('composition webview: mode 1 prunes a module selected by file path', async () => {
+  const rows = await treeFilteredRows(1, ['rtl/a.v']);
+  assert.deepEqual(
+    rows.map((r) => r.path),
+    ['top', 'top.u_a', 'top.u_b', 'top.u_la2'],
+    'the `a` instance stays; its child `u_la` is hidden',
+  );
+  const pruned = rows.find((r) => r.path === 'top.u_a')!;
+  assert.equal(pruned.childCount, 0, 'the filtered instance is drawn as a leaf');
+  assert.ok(pruned.badge.includes('filtered'), 'it is marked as filtered');
+});
+
 test('composition webview: follows the editor by highlighting the current module without moving the root', async () => {
   const src =
     'module leaf (input wire a, output wire s); assign s = a; endmodule\n' +
