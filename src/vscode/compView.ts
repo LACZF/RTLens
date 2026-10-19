@@ -81,6 +81,8 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
   private payload: CompPayload = { rootModule: '', rootPath: '', file: '', rows: [] };
   /** Levels materialised since the last full post, whose child rows are still owed to the webview. */
   private pending: HierarchyNode[] = [];
+  /** The last defined file `setContext` saw: a move to another file is an open (and folds the other branches). */
+  private lastContextFile: string | undefined;
 
   constructor(private readonly svc: IndexService) {
     this.svc.onDidChange(() => {
@@ -105,8 +107,15 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
    * module name being instantiated, or one of the port connections wired to it
    * (`.busy(busy)`) - the row for that *instance* (`u_ctrl`, `u_dpath`) is
    * highlighted; anywhere else in the module the module's own row is.
+   *
+   * Moving to another defined file counts as an open: the reveal that follows
+   * folds every branch the reader expanded elsewhere (the webview gets
+   * `collapseOthers` on the highlight). Cursor moves inside one file, and a
+   * non-HDL editor (`undefined`), leave the expansion alone.
    */
   setContext(file: string | undefined, line: number | undefined, character?: number): void {
+    const fileOpened = file !== undefined && file !== this.lastContextFile;
+    if (file !== undefined) this.lastContextFile = file;
     const mod = file
       ? this.svc.moduleAt(file, line ?? 0) ?? this.svc.index.modulesInFile(file)[0]
       : undefined;
@@ -125,24 +134,24 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
           modulePath = design.path;
         }
       }
-      this.show(modulePath, local);
+      this.show(modulePath, local, fileOpened);
       return;
     }
     if (!file || !mod) return;
     // The module is already drawn: move the highlight without a reverse walk.
     const here = this.locateMaterialized(mod.name);
     if (here) {
-      this.show(here, local);
+      this.show(here, local, fileOpened);
       return;
     }
     const design = this.svc.containingPath(mod.name, file);
     if (design) {
       this.ensureRoot(design.top, this.svc.index.resolveModule(design.top)?.file);
-      this.show(design.path, local);
+      this.show(design.path, local, fileOpened);
       return;
     }
     this.ensureRoot(mod.name, file);
-    this.show(mod.name, local);
+    this.show(mod.name, local, fileOpened);
   }
 
   /** Path of the first materialised row whose module is `name`, root included. */
@@ -184,8 +193,12 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
    * cursor sits) from the lazy builder. The host materialises first and streams
    * the new `children` before the highlight, so the webview only ever draws
    * rows it has.
+   *
+   * `collapseOthers` rides the highlight only for a file open/switch: the
+   * webview then folds every branch except the path down to this row, so the
+   * just-opened module is the only expanded spine on screen.
    */
-  private show(modulePath: string | undefined, local: string | undefined): void {
+  private show(modulePath: string | undefined, local: string | undefined, collapseOthers = false): void {
     const root = this.cachedRoot;
     if (!root) return;
     let target = '';
@@ -203,7 +216,11 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
       }
     }
     this.flushChildren();
-    void this.view?.webview.postMessage({ type: 'highlightPath', path: target });
+    void this.view?.webview.postMessage({
+      type: 'highlightPath',
+      path: target,
+      ...(collapseOthers && target ? { collapseOthers: true } : {}),
+    });
   }
 
   /**
@@ -580,8 +597,10 @@ header { position:sticky; top:0; padding:6px 8px; background:var(--vscode-sideBa
  * rebuild, `{type:'children', parentPath, rows, more}` with one more level the
  * reader opened (a wide level arrives as further `{type:'childrenMore', ...}`
  * chunks until `more` is false), `{type:'revealPath', path}` to scroll to a row,
- * `{type:'highlightPath', path}` to mark the current module's row (revealing
- * it), and `{type:'setExpanded', expanded}` from the title button to open or
+ * `{type:'highlightPath', path, collapseOthers?}` to mark the current module's
+ * row (revealing it; `collapseOthers` from the host on a file open/switch also
+ * folds every branch outside that path), and `{type:'setExpanded', expanded}`
+ * from the title button to open or
  * fold every row; it posts `{type:'open', path}` when a row is clicked,
  * `{type:'expand', path}` when a row's level is not loaded yet, and
  * `{type:'expandState', expanded}` so the host can swap the title button.
@@ -707,12 +726,24 @@ export const SCRIPT = String.raw`
 
   // Every row with children collapsed means the whole tree is folded, so the
   // title button offers "expand all"; a single open row flips it to "collapse".
-  function collapseAll() {
+  function foldEveryBranch() {
     collapsed = {};
     for (var i = 0; i < rows.length; i++) {
       if (rows[i].childCount > 0) collapsed[rows[i].path] = true;
     }
+  }
+
+  function collapseAll() {
+    foldEveryBranch();
     render();
+  }
+
+  // A file was opened/switched: the reader's other expanded branches fold,
+  // and only the path down to the revealed row stays open.
+  function collapseExcept(path) {
+    foldEveryBranch();
+    expandAncestors(path);
+    delete collapsed[path];
   }
 
   function anyCollapsed() {
@@ -875,15 +906,21 @@ export const SCRIPT = String.raw`
     if (m.type === 'highlightPath') {
       // The current module's row: mark it, open the path down to it and scroll.
       var next = m.path || '';
+      // A different file just opened: fold every branch except the path down
+      // to the revealed row. The stutter guard below must not swallow this -
+      // the target can already be selected from an earlier reveal.
+      var foldOthers = !!m.collapseOthers && !!next;
       // Cursor moves inside one module fire this repeatedly; if the row is
       // already drawn and marked, redrawing a wide expanded level every time
       // would stutter, so only the scroll is repeated.
-      if (next === selected && els[next]) {
+      if (next === selected && els[next] && !foldOthers) {
         els[next].scrollIntoView({ block: 'center' });
         return;
       }
       selected = next;
-      if (selected) {
+      if (foldOthers) {
+        collapseExcept(selected);
+      } else if (selected) {
         expandAncestors(selected);
         delete collapsed[selected];
       }

@@ -422,3 +422,65 @@ test('composition webview: a level streamed in chunks renders once, in order', (
     'the final chunk renders the whole level, chunks in order',
   );
 });
+
+test('composition webview: a file open folds every branch outside the revealed path', () => {
+  // top -> a -> {b -> d, c}: the fold must hide d while keeping the path to c open.
+  const rows = [
+    row('top', '', '', 'top', 0, 1),
+    row('top.a', 'top', 'a', 'mid', 1, 2),
+    row('top.a.b', 'top.a', 'b', 'mid', 2, 1),
+    row('top.a.b.d', 'top.a.b', 'd', 'leaf', 3, 0),
+    row('top.a.c', 'top.a', 'c', 'leaf', 2, 0),
+  ];
+  const ui = start(rows);
+  fire(chevron(drawn(ui.list)[0]), 'click'); // expand top
+  fire(chevron(drawn(ui.list)[1]), 'click'); // expand top.a
+  fire(chevron(drawn(ui.list)[2]), 'click'); // expand top.a.b
+  assert.deepEqual(
+    drawn(ui.list).map(rowText),
+    ['top', 'a : mid', 'b : mid', 'd : leaf', 'c : leaf'],
+    'both branches are open before the file opens',
+  );
+
+  ui.message({ type: 'highlightPath', path: 'top.a.c', collapseOthers: true });
+  assert.deepEqual(
+    drawn(ui.list).map(rowText),
+    ['top', 'a : mid', 'b : mid', 'c : leaf'],
+    'only the path to the revealed row stays open; the other branch folds away',
+  );
+  const sel = drawn(ui.list).filter((r) => r.classList.contains('sel'));
+  assert.equal(sel.length, 1, 'exactly the revealed row is selected');
+  assert.equal(rowText(sel[0]), 'c : leaf');
+
+  // The target can already be selected (the cursor re-entered the same
+  // module); the fold must still run instead of taking the stutter shortcut.
+  fire(chevron(drawn(ui.list)[2]), 'click'); // expand top.a.b again
+  ui.message({ type: 'highlightPath', path: 'top.a.c', collapseOthers: true });
+  assert.deepEqual(
+    drawn(ui.list).map(rowText),
+    ['top', 'a : mid', 'b : mid', 'c : leaf'],
+    're-revealing the already selected row still folds the other branches',
+  );
+});
+
+test('composition webview: a highlight without a file open keeps manually expanded branches', () => {
+  const rows = [
+    row('top', '', '', 'top', 0, 1),
+    row('top.a', 'top', 'a', 'mid', 1, 2),
+    row('top.a.b', 'top.a', 'b', 'mid', 2, 1),
+    row('top.a.b.d', 'top.a.b', 'd', 'leaf', 3, 0),
+    row('top.a.c', 'top.a', 'c', 'leaf', 2, 0),
+  ];
+  const ui = start(rows);
+  fire(chevron(drawn(ui.list)[0]), 'click');
+  fire(chevron(drawn(ui.list)[1]), 'click');
+  fire(chevron(drawn(ui.list)[2]), 'click');
+
+  ui.message({ type: 'highlightPath', path: 'top.a.c' });
+  assert.deepEqual(
+    drawn(ui.list).map(rowText),
+    ['top', 'a : mid', 'b : mid', 'd : leaf', 'c : leaf'],
+    'a cursor-move highlight opens the path without folding what the reader expanded',
+  );
+  assert.ok(drawn(ui.list)[4].classList.contains('sel'), 'the revealed row is selected');
+});

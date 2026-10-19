@@ -540,6 +540,63 @@ test('composition webview: follows the editor by highlighting the current module
   assert.equal(pinnedPosted[pinnedPosted.length - 1].path, 'top', 'the root module highlights itself');
 });
 
+test('composition webview: opening a different file carries the fold flag, same-file moves do not', async () => {
+  const svc = await svcWith();
+  svc.index.addFile('/w/top.v', 'module top (input wire i, output wire o);\n  leaf u (.a(i), .s(o));\nendmodule\n');
+  svc.index.addFile('/w/leaf.v', 'module leaf (input wire a, output wire s); assign s = a; endmodule\n');
+  const { CompositionViewProvider } = await import('../vscode/compView');
+  const provider = new CompositionViewProvider(svc);
+
+  const posted: { type?: string; path?: string; collapseOthers?: boolean }[] = [];
+  provider.resolveWebviewView({
+    webview: {
+      options: {},
+      html: '',
+      onDidReceiveMessage: () => ({ dispose() {} }),
+      postMessage: async (m: { type?: string; path?: string; collapseOthers?: boolean }) => {
+        posted.push(m);
+      },
+    },
+  } as unknown as import('vscode').WebviewView);
+  const last = () => posted[posted.length - 1];
+  const foldFlags = () =>
+    posted.filter((m) => m.type === 'highlightPath').map((m) => !!m.collapseOthers);
+
+  // The first file opens the tree: an open, so the flag rides along (a fresh
+  // tree has nothing folded away yet, making the flag a no-op).
+  provider.setContext('/w/top.v', 0, 0);
+  assert.deepEqual([last().path, last().collapseOthers], ['top', true]);
+
+  // Moving the cursor inside that file (onto the instantiation) must not fold.
+  const inst = svc.index.resolveModule('top')!.instances[0]!;
+  provider.setContext('/w/top.v', inst.nameRange.start.line, inst.nameRange.start.character);
+  assert.deepEqual(
+    [last().path, last().collapseOthers],
+    ['top.u', undefined],
+    'a same-file cursor move carries no fold flag',
+  );
+
+  // Switching to the instance's file folds again.
+  provider.setContext('/w/leaf.v', 0, 0);
+  assert.deepEqual(
+    [last().path, last().collapseOthers],
+    ['top.u', true],
+    'a file switch carries the fold flag',
+  );
+
+  // A non-HDL editor reveals nothing and does not reset the marker: coming
+  // back to the same file is still a cursor move, not a new open.
+  provider.setContext(undefined, undefined);
+  provider.setContext('/w/leaf.v', 0, 4);
+  assert.deepEqual(
+    [last().path, last().collapseOthers],
+    ['top.u', undefined],
+    'returning from a non-HDL editor is not a switch',
+  );
+
+  assert.deepEqual(foldFlags(), [true, false, true, false]);
+});
+
 test('composition webview: points at an instantiation or its connections to highlight the instance row', async () => {
   // Mirrors the real chip_top fixture: `datapath #(...)` puts the instantiated
   // module name and the instance name on different lines, and the port
