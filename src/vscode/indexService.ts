@@ -133,7 +133,7 @@ export class IndexService implements vscode.Disposable {
         const found = await vscode.workspace.findFiles(
           new vscode.RelativePattern(vscode.Uri.file(dir), scanGlob(this.configValue)),
           this.configValue.exclude.length ? `{${this.configValue.exclude.join(',')}}` : null,
-          20000,
+          undefined,
         );
         uris.push(...found);
       }
@@ -153,8 +153,11 @@ export class IndexService implements vscode.Disposable {
         }
         this.ingestFile(file);
         parsed++;
-        // Yield periodically so the workbench stays responsive.
-        if (parsed % 200 === 0) {
+        // Yield periodically so the workbench stays responsive. A microtask
+        // does not count: it only runs once the stack is already empty, so a
+        // scheduler that hands control back at every file still starves the
+        // host's message loop for the whole scan.
+        if (parsed % 80 === 0) {
           await new Promise((r) => setImmediate(r));
         }
       }
