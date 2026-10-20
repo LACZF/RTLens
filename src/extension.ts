@@ -317,13 +317,17 @@ export function activate(context: vscode.ExtensionContext): void {
       const node = 'node' in item ? item.node : undefined;
       const target = node ? node.moduleNameRange ?? node.nameRange : undefined;
       const line = target?.start.line ?? ('line' in item ? item.line : 0) ?? 0;
-      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(item.file));
-      const editor = await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One, preview: true });
+      const uri = vscode.Uri.file(item.file);
+      let editor = vscode.window.visibleTextEditors.find((e) => e.document.uri.toString() === uri.toString());
+      if (!editor) {
+        const doc = await vscode.workspace.openTextDocument(uri);
+        editor = await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One, preview: true });
+      }
       const position = new vscode.Position(line, 0);
       editor.selection = new vscode.Selection(position, position);
       editor.revealRange(
         target ? range(target) : new vscode.Range(position, position),
-        vscode.TextEditorRevealType.InCenter,
+        vscode.TextEditorRevealType.InCenterIfOutsideViewport,
       );
     },
   );
