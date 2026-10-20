@@ -899,7 +899,8 @@ header { position:sticky; top:0; padding:6px 8px; background:var(--vscode-sideBa
  * from the title button to open or
  * fold every row; it posts `{type:'open', path}` when a row is clicked,
  * `{type:'expand', path}` when a row's level is not loaded yet, and
- * `{type:'expandState', expanded}` so the host can swap the title button.
+ * `{type:'expandState', expanded}` (true while any branch is open) so the
+ * host can swap the title button.
  */
 export const SCRIPT = String.raw`
 (function () {
@@ -1029,6 +1030,13 @@ export const SCRIPT = String.raw`
     }
   }
 
+  function anyOpen() {
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].childCount > 0 && !collapsed[rows[i].path]) return true;
+    }
+    return false;
+  }
+
   function collapseAll() {
     foldEveryBranch();
     render();
@@ -1042,18 +1050,13 @@ export const SCRIPT = String.raw`
     delete collapsed[path];
   }
 
-  function anyCollapsed() {
-    for (var i = 0; i < rows.length; i++) {
-      if (rows[i].childCount > 0 && collapsed[rows[i].path]) return true;
-    }
-    return false;
-  }
-
-  // Tell the host which way the title button should read. Only a change is
-  // sent: rendering runs on every cursor move, and the state rarely moves.
+  // Tell the host which way the title button should read: a single open branch
+  // offers "collapse all"; only a fully folded tree offers "expand all". Only
+  // a change is sent: rendering runs on every cursor move, and the state
+  // rarely moves.
   function reportExpanded() {
     if (!rows.length) return;
-    var expanded = !anyCollapsed();
+    var expanded = anyOpen();
     if (expanded !== reportedExpanded) {
       reportedExpanded = expanded;
       vscode.postMessage({ type: 'expandState', expanded: expanded });

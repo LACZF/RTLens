@@ -262,19 +262,21 @@ test('composition webview: the title button expands and collapses every level', 
   assert.equal(drawn(ui.list).length, 1, 'collapse-all folds the whole tree back to the root');
 });
 
-test('composition webview: it reports whether the whole tree is expanded', () => {
+test('composition webview: any open branch flips the title button to collapse-all', () => {
   const ui = start(ROWS);
   const states = () => ui.posted.filter((m) => m.type === 'expandState').map((m) => m.expanded);
 
-  assert.deepEqual(states(), [false], 'a new tree reports itself fully collapsed');
+  // The root opens its first level on load, so a branch is already open.
+  assert.deepEqual(states(), [true], 'a fresh tree reports its open root level');
 
   ui.message({ type: 'setExpanded', expanded: true });
-  assert.deepEqual(states(), [false, true], 'expand-all reports itself fully expanded');
+  assert.deepEqual(states(), [true], 'expand-all changes nothing visible to the button, so no report is sent');
 
-  // Opening a single level by hand leaves the rest folded: still not "expanded".
   ui.message({ type: 'setExpanded', expanded: false });
+  assert.deepEqual(states(), [true, false], 'collapse-all folds every branch and the button offers expand-all');
+
   fire(chevron(drawn(ui.list)[0]), 'click');
-  assert.deepEqual(states(), [false, true, false], 'a partial expansion does not flip the button');
+  assert.deepEqual(states(), [true, false, true], 'a single open branch flips the button back to collapse-all');
 });
 
 test('composition webview: a reveal opens the path down to the row and scrolls to it', () => {
