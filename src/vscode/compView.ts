@@ -645,6 +645,7 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     const root = this.cachedRoot;
     if (!root || this.dropped(root)) {
       this.payload = { rootModule: this.cachedRootModule ?? '', rootPath: '', file: this.cachedFile ?? '', rows: [] };
+      this.pending = [];
       return;
     }
     const rows: CompRow[] = [];
@@ -658,6 +659,9 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
       file: root.file ?? this.cachedFile ?? '',
       rows,
     };
+    // A full rebuild posts every materialised level via 'rows'; any levels
+    // still queued for incremental 'children' messages would duplicate them.
+    this.pending = [];
   }
 
   private pushRows(parent: HierarchyNode, rows: CompRow[]): void {
