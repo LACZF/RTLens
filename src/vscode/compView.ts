@@ -718,6 +718,10 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
         }
       });
     }
+    if (this.cachedRoot) {
+      this.rebuild();
+      this.post();
+    }
     return cache.value;
   }
 
