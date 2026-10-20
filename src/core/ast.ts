@@ -434,6 +434,10 @@ export interface HierarchyNode {
   moduleNameRange?: Range;
   /** Instance statement range in the parent file. */
   range?: Range;
+  /** File that defines `moduleName` (not the instantiation site). */
+  defFile?: string;
+  /** Direct child count known without materialising the level. */
+  childCountHint?: number;
   /** Port connections of this instance (present when the node came from an InstanceSite). */
   connections?: PortDecl[];
   parentPath?: string;

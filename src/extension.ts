@@ -14,7 +14,6 @@ import {
 } from './vscode/providers';
 import { HdlSemanticTokensProvider } from './vscode/semantic';
 import {
-  CompositionTreeProvider,
   ProblemsTreeProvider,
   type CompositionItem,
   type ProblemsItem,
@@ -56,7 +55,6 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(database, catalog, wordHighlighter);
 
   // --- views -------------------------------------------------------------
-  const compositionTree = new CompositionTreeProvider(svc);
   const composition = new CompositionViewProvider(svc);
   const nets = new NetsViewProvider(svc);
   const problems = new ProblemsTreeProvider(svc);
@@ -85,7 +83,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.languages.registerHoverProvider(selector, new HdlHoverProvider(svc)),
     vscode.languages.registerReferenceProvider(selector, new HdlReferenceProvider(svc)),
     vscode.languages.registerRenameProvider(selector, new HdlRenameProvider(svc)),
-    vscode.languages.registerDocumentSymbolProvider(selector, new HdlDocumentSymbolProvider(svc)),
+    vscode.languages.registerDocumentSymbolProvider(selector, new HdlDocumentSymbolProvider()),
     vscode.languages.registerWorkspaceSymbolProvider(new HdlWorkspaceSymbolProvider(svc)),
   );
 
@@ -95,14 +93,14 @@ export function activate(context: vscode.ExtensionContext): void {
       nets.setContext(undefined, undefined);
       // Without a configured top this is a no-op; with one it still roots the
       // composition tree even when the active editor is not HDL.
-      composition.setContext(undefined, undefined);
+      composition.followEditor(undefined, undefined);
       return;
     }
     // The nets view resolves the module around the line itself, so it does not
     // need the cursor to be on an instance.
     nets.setContext(editor.document.fileName, editor.selection.active.line);
     // The composition tree follows the active module unless a top is configured.
-    composition.setContext(
+    composition.followEditor(
       editor.document.fileName,
       editor.selection.active.line,
       editor.selection.active.character,
@@ -126,17 +124,37 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   // --- index lifecycle ---------------------------------------------------
-  void (async () => {
-    await svc.ensureReady();
-    syncEditor(vscode.window.activeTextEditor);
-    await database.load();
-    await catalog.load();
-    const stats = svc.stats;
-    log.appendLine(
-      `indexed ${stats.modules} module(s) in ${stats.files} file(s) in ${stats.parseMs} ms` +
-        (stats.unresolved ? `, ${stats.unresolved} unresolved instance(s)` : ''),
-    );
-  })();
+  // Activation does not scan. The first feature that needs the index starts
+  // the scan; once it lands, the relation/catalog databases load and their
+  // auto-update starts. Composition paints from its own on-disk store.
+  let databasesLoaded = false;
+  context.subscriptions.push(
+    svc.onDidChangeState((state) => {
+      if (state !== 'ready') {
+        return;
+      }
+      const stats = svc.stats;
+      log.appendLine(
+        `indexed ${stats.modules} module(s) in ${stats.files} file(s) in ${stats.parseMs} ms` +
+          (stats.unresolved ? `, ${stats.unresolved} unresolved instance(s)` : ''),
+      );
+      if (databasesLoaded) {
+        return;
+      }
+      databasesLoaded = true;
+      void (async () => {
+        const started = Date.now();
+        await database.load();
+        await catalog.load();
+        log.appendLine(`[db] loaded existing databases in ${Date.now() - started}ms`);
+      })();
+    }),
+    catalog.onDidChangeDatabase(() => void composition.refresh()),
+  );
+
+  // Let activation return first: composition reads and parses the active
+  // buffer, and doing that inline delays every other extension's activation.
+  setTimeout(() => syncEditor(vscode.window.activeTextEditor), 0);
 
   // --- commands ----------------------------------------------------------
   // Commands receive their arguments from the manifest, so the handlers take
@@ -149,7 +167,7 @@ export function activate(context: vscode.ExtensionContext): void {
       { location: vscode.ProgressLocation.Window, title: 'HDL: reindexing workspace' },
       () => svc.refresh(),
     );
-    composition.refresh();
+    await composition.refresh();
     problems.refresh();
     syncEditor(vscode.window.activeTextEditor);
   });
@@ -224,13 +242,7 @@ export function activate(context: vscode.ExtensionContext): void {
     if (!target) {
       return;
     }
-    const item = expandTo(target.fsPath, svc, compositionTree);
-    if (item) {
-      // Webview view cannot be revealed via TreeView.reveal; re-root it at the
-      // module and scroll to the row.
-      composition.setRoot(compositionTree.hierarchyRoot, compositionTree.root);
-      composition.reveal(item.node.path);
-    }
+    await composition.revealFile(target.fsPath);
   });
 
   reg('hdl.connectView.copyInstancePath', async (item?: CompositionItem) => {
@@ -412,24 +424,6 @@ function editorSelection(svc: IndexService): { node: HierarchyNode; root: Hierar
 function editorNodes(svc: IndexService): HierarchyNode[] {
   const node = editorNode(svc);
   return node ? [node] : [];
-}
-
-/** Expand the composition view around the module that owns `file`. */
-function expandTo(
-  file: string,
-  svc: IndexService,
-  composition: CompositionTreeProvider,
-): CompositionItem | undefined {
-  const def = svc.index.allModules().find((m) => m.file === file);
-  if (!def) {
-    return;
-  }
-  const result = svc.compositionHierarchy(def.name, def.file);
-  if (!result) {
-    return;
-  }
-  composition.setRoot(result.root, def.name);
-  return composition.modelFor(result.root.path);
 }
 
 /**

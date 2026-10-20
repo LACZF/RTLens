@@ -9,7 +9,7 @@ import { test, after } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { Module } from 'node:module';
 
-import { vscode } from './vscodeStub';
+import { vscode, documentFor } from './vscodeStub';
 
 // The stub has to be installed before indexService (and views) ask for the
 // `vscode` module.
@@ -23,6 +23,8 @@ const workspace = vscode.workspace as unknown as {
   getConfiguration: (s: string) => { get: (k: string, fb: unknown) => unknown };
 };
 
+const settle = () => new Promise((r) => setTimeout(r, 0));
+
 /** IndexService whose config reads `customKeys` literally. */
 async function svcWith(customKeys: Record<string, unknown> = {}) {
   const { IndexService } = await import('../vscode/indexService');
@@ -30,6 +32,12 @@ async function svcWith(customKeys: Record<string, unknown> = {}) {
   workspace.getConfiguration = () => ({
     get: (key: string, fallback: unknown) => (key in customKeys ? customKeys[key] : fallback),
   });
+  const space = vscode.workspace as unknown as {
+    workspaceFolders?: { uri: { fsPath: string }; name: string; index: number }[];
+  };
+  if (!space.workspaceFolders) {
+    space.workspaceFolders = [{ uri: vscode.Uri.file('/w'), name: 'w', index: 0 }];
+  }
   try {
     return new IndexService(vscode.window.createOutputChannel('test'));
   } finally {
@@ -142,7 +150,7 @@ test('composition webview: a row click jumps to its instance, not line 0', async
   const root = buildHierarchy(svc.index, 'top')!.root;
 
   const provider = new CompositionViewProvider(svc);
-  provider.setRoot(root, 'top');
+  await provider.setRoot(root, 'top');
 
   let onMsg: ((m: unknown) => void) | undefined;
   provider.resolveWebviewView({
@@ -204,8 +212,8 @@ test('composition webview: the title button expands/collapses all and reflects i
     },
   } as unknown as import('vscode').WebviewView);
 
-  provider.setExpandedAll(false);
-  provider.setExpandedAll(true);
+  await provider.setExpandedAll(false);
+  await provider.setExpandedAll(true);
   assert.deepEqual(
     posted.filter((m) => m.type === 'setExpanded').map((m) => m.expanded),
     [false, true],
@@ -233,6 +241,34 @@ test('composition webview: the title button expands/collapses all and reflects i
   ]);
 });
 
+test('composition webview: the initial root arrives with its first level', async () => {
+  const svc = await svcWith({ topModules: ['top'] });
+  svc.index.addFile(
+    '/w/top.v',
+    'module sub (input wire a, output wire s); assign s = a; endmodule\n' +
+      'module top (input wire i, output wire o); sub u (.a(i), .s(o)); endmodule\n',
+  );
+  const { CompositionViewProvider } = await import('../vscode/compView');
+  const provider = new CompositionViewProvider(svc);
+
+  const posted: { type?: string; rows?: { path: string; childCount: number }[] }[] = [];
+  provider.resolveWebviewView({
+    webview: {
+      options: {},
+      html: '',
+      onDidReceiveMessage: () => ({ dispose() {} }),
+      postMessage: async (m: { type?: string; rows?: { path: string; childCount: number }[] }) => {
+        posted.push(m);
+      },
+    },
+  } as unknown as import('vscode').WebviewView);
+
+  await provider.setContext('/w/top.v', 0);
+  const rows = [...posted].reverse().find((m) => m.type === 'rows')?.rows ?? [];
+  assert.deepEqual(rows.map((r) => r.path), ['top', 'top.u'], 'the root level is loaded before the first paint');
+  assert.equal(rows[0].childCount, 1, 'the root knows it has a child');
+});
+
 test('composition webview: refresh rebuilds from the reindexed hierarchy, down to nested children', async () => {
   const svc = await svcWith({ topModules: ['top'] });
   svc.index.addFile('/w/top.v', 'module top (input wire i, output wire o); endmodule\n');
@@ -257,7 +293,7 @@ test('composition webview: refresh rebuilds from the reindexed hierarchy, down t
   const lastRows = () =>
     [...posted].reverse().find((m) => m.type === 'rows')?.rows ?? [];
 
-  provider.setContext('/w/top.v', 0);
+  await provider.setContext('/w/top.v', 0);
   assert.deepEqual(lastRows().map((r) => r.path), ['top'], 'the tree starts as a single module');
 
   // The workspace gains a submodule: `top` now instantiates `sub`, which
@@ -268,19 +304,24 @@ test('composition webview: refresh rebuilds from the reindexed hierarchy, down t
     'module sub (input wire a, output wire s); leaf l (.a(a), .s(s)); endmodule\n' +
     'module top (input wire i, output wire o); sub u (.a(i), .s(o)); endmodule\n',
   );
-  provider.refresh();
-  // Refresh re-sends only the open levels (the root here), but the reindexed
-  // root now advertises its child - the design is not materialised up front.
-  assert.deepEqual(lastRows().map((r) => r.path), ['top'], 'refresh still sends only the open levels');
+  await provider.refresh();
+  // A refresh re-sends the root level and reopens it, so its (new) child
+  // arrives with the root; nothing deeper is materialised up front.
+  assert.deepEqual(
+    lastRows().map((r) => r.path),
+    ['top', 'top.u'],
+    'refresh sends the root and its first level',
+  );
   assert.equal(lastRows()[0].childCount, 1, 'the reindexed root knows it now has a child');
 
-  // Opening `top`, then `top.u`, streams one level at a time from the new index.
+  // Opening `top.u` streams the next level from the new index.
   onMsg!({ type: 'expand', path: 'top' });
   onMsg!({ type: 'expand', path: 'top.u' });
+  await settle();
   const children = posted.filter((m) => m.type === 'children');
   assert.deepEqual(
     children.map((m) => (m.rows ?? []).map((r) => r.path)),
-    [['top.u'], ['top.u.l']],
+    [['top.u.l']],
     'each opened level arrives nested down to the leaves',
   );
 });
@@ -298,7 +339,7 @@ test('composition webview: rows are delivered after the webview reports ready', 
 
   // The tree is rooted while the sidebar is still closed: activation runs
   // `syncEditor` as soon as the scan finishes, long before the view is opened.
-  provider.setContext('/w/top.v', 0, 0);
+  await provider.setContext('/w/top.v', 0, 0);
 
   const delivered: { type?: string; rows?: { path: string }[] }[] = [];
   let ready = false;
@@ -325,6 +366,7 @@ test('composition webview: rows are delivered after the webview reports ready', 
   // here on arrives - the script asks for the tree at that point.
   ready = true;
   onMsg!({ type: 'ready' });
+  await settle();
 
   const rows = delivered.filter((m) => m.type === 'rows');
   assert.equal(rows.length, 1, 'exactly one rebuild is delivered once the webview can receive it');
@@ -343,7 +385,7 @@ test('composition webview: reindexing keeps the tree on screen', async () => {
   svc.index.addFile('/w/top.v', 'module top (input wire i, output wire o); endmodule\n');
   const { CompositionViewProvider } = await import('../vscode/compView');
   const provider = new CompositionViewProvider(svc);
-  provider.setContext('/w/top.v', 0, 0);
+  await provider.setContext('/w/top.v', 0, 0);
 
   const posted: { type?: string; rows?: { path: string }[] }[] = [];
   let onMsg: ((m: unknown) => void) | undefined;
@@ -361,6 +403,7 @@ test('composition webview: reindexing keeps the tree on screen', async () => {
     },
   } as unknown as import('vscode').WebviewView);
   onMsg!({ type: 'ready' });
+  await settle();
 
   const rowPaths = () =>
     posted.filter((m) => m.type === 'rows').map((m) => (m.rows ?? []).map((r) => r.path));
@@ -430,10 +473,10 @@ async function filteredRows(filterMode: number, filterModules: string[] = ['a'])
       },
     },
   } as unknown as import('vscode').WebviewView);
-  provider.setContext('/w/t.v', 0);
+  await provider.setContext('/w/t.v', 0);
   // Expand all so the whole (limit-bounded) tree is materialised and sent,
   // then read its rows.
-  provider.setExpandedAll(true);
+  await provider.setExpandedAll(true);
   return [...posted].reverse().find((m) => m.type === 'rows')!.rows!;
 }
 
@@ -508,8 +551,8 @@ async function treeFilteredRows(filterMode: number, filterModules: string[]) {
         },
       },
     } as unknown as import('vscode').WebviewView);
-    provider.setContext('/w/top/top.v', 0);
-    provider.setExpandedAll(true);
+    await provider.setContext('/w/top/top.v', 0);
+    await provider.setExpandedAll(true);
     return [...posted].reverse().find((m) => m.type === 'rows')!.rows!;
   } finally {
     space.workspaceFolders = previous;
@@ -573,7 +616,7 @@ test('composition webview: follows the editor by highlighting the current module
   } as unknown as import('vscode').WebviewView);
 
   // Active module `top`: the design-top row is highlighted.
-  provider.setContext('/w/h.v', 1);
+  await provider.setContext('/w/h.v', 1);
   assert.equal(provider.root, 'top', 'the tree roots at the design top, not the cursor module');
   assert.deepEqual(
     [posted[posted.length - 1].type, posted[posted.length - 1].path],
@@ -582,7 +625,7 @@ test('composition webview: follows the editor by highlighting the current module
 
   // Move to `leaf`: the root stays put, the highlight follows down to its row.
   const before = posted.length;
-  provider.setContext('/w/h.v', 0);
+  await provider.setContext('/w/h.v', 0);
   assert.equal(provider.root, 'top', 'moving inside the design does not move the root');
   const moved = posted.slice(before);
   assert.equal(moved.filter((m) => m.type === 'rows').length, 0, 'no rebuild when only the highlight changes');
@@ -595,7 +638,7 @@ test('composition webview: follows the editor by highlighting the current module
   // A fresh tree opened directly on the nested module roots at the design top
   // (found upward from the cursor module) rather than at that module.
   const fresh = new CompositionViewProvider(svc);
-  fresh.setContext('/w/h.v', 0);
+  await fresh.setContext('/w/h.v', 0);
   assert.equal(fresh.root, 'top', 'a fresh tree roots at the design top of the cursor module');
 
   // A configured top pins the root; the highlight is located inside the full design.
@@ -614,14 +657,14 @@ test('composition webview: follows the editor by highlighting the current module
     },
   } as unknown as import('vscode').WebviewView);
 
-  pinned.setContext('/w/h.v', 0);
+  await pinned.setContext('/w/h.v', 0);
   assert.equal(pinned.root, 'top', 'a configured top stays the root');
   assert.equal(
     pinnedPosted[pinnedPosted.length - 1].path,
     'top.u',
     'the highlight is located by module name inside the configured top',
   );
-  pinned.setContext('/w/h.v', 1);
+  await pinned.setContext('/w/h.v', 1);
   assert.equal(pinnedPosted[pinnedPosted.length - 1].path, 'top', 'the root module highlights itself');
 });
 
@@ -649,12 +692,12 @@ test('composition webview: opening a different file carries the fold flag, same-
 
   // The first file opens the tree: an open, so the flag rides along (a fresh
   // tree has nothing folded away yet, making the flag a no-op).
-  provider.setContext('/w/top.v', 0, 0);
+  await provider.setContext('/w/top.v', 0, 0);
   assert.deepEqual([last().path, last().collapseOthers], ['top', true]);
 
   // Moving the cursor inside that file (onto the instantiation) must not fold.
   const inst = svc.index.resolveModule('top')!.instances[0]!;
-  provider.setContext('/w/top.v', inst.nameRange.start.line, inst.nameRange.start.character);
+  await provider.setContext('/w/top.v', inst.nameRange.start.line, inst.nameRange.start.character);
   assert.deepEqual(
     [last().path, last().collapseOthers],
     ['top.u', undefined],
@@ -662,7 +705,7 @@ test('composition webview: opening a different file carries the fold flag, same-
   );
 
   // Switching to the instance's file folds again.
-  provider.setContext('/w/leaf.v', 0, 0);
+  await provider.setContext('/w/leaf.v', 0, 0);
   assert.deepEqual(
     [last().path, last().collapseOthers],
     ['top.u', true],
@@ -671,8 +714,8 @@ test('composition webview: opening a different file carries the fold flag, same-
 
   // A non-HDL editor reveals nothing and does not reset the marker: coming
   // back to the same file is still a cursor move, not a new open.
-  provider.setContext(undefined, undefined);
-  provider.setContext('/w/leaf.v', 0, 4);
+  await provider.setContext(undefined, undefined);
+  await provider.setContext('/w/leaf.v', 0, 4);
   assert.deepEqual(
     [last().path, last().collapseOthers],
     ['top.u', undefined],
@@ -727,27 +770,27 @@ test('composition webview: points at an instantiation or its connections to high
   const at = (r: { start: { line: number; character: number } }) => [r.start.line, r.start.character] as const;
 
   // Cursor on the instance name / module name: that instance row.
-  provider.setContext('/w/chip_top.v', ...at(ctrl.nameRange));
+  await provider.setContext('/w/chip_top.v', ...at(ctrl.nameRange));
   assert.equal(lastPath(), 'chip_top.u_ctrl', 'pointing at u_ctrl highlights its row');
-  provider.setContext('/w/chip_top.v', ...at(ctrl.moduleNameRange));
+  await provider.setContext('/w/chip_top.v', ...at(ctrl.moduleNameRange));
   assert.equal(lastPath(), 'chip_top.u_ctrl', 'pointing at the module name of the instantiation too');
 
   // Cursor on a port connection: still the same instance row, even though the
   // connection sits several lines below the instance name.
-  provider.setContext('/w/chip_top.v', ...at(busy.range));
+  await provider.setContext('/w/chip_top.v', ...at(busy.range));
   assert.equal(lastPath(), 'chip_top.u_ctrl', 'the .busy(busy) connection tracks to u_ctrl');
 
   // The parameterized instantiation follows from its module name, its instance
   // name, and its connections alike.
-  provider.setContext('/w/chip_top.v', ...at(dpath.moduleNameRange));
+  await provider.setContext('/w/chip_top.v', ...at(dpath.moduleNameRange));
   assert.equal(lastPath(), 'chip_top.u_dpath', 'pointing at the module name a few lines above the name');
-  provider.setContext('/w/chip_top.v', ...at(dpath.nameRange));
+  await provider.setContext('/w/chip_top.v', ...at(dpath.nameRange));
   assert.equal(lastPath(), 'chip_top.u_dpath', 'pointing at u_dpath highlights its row');
-  provider.setContext('/w/chip_top.v', ...at(a.range));
+  await provider.setContext('/w/chip_top.v', ...at(a.range));
   assert.equal(lastPath(), 'chip_top.u_dpath', 'the .a(operand_a) connection tracks to u_dpath');
 
   // Cursor in the module but off any instantiation: the module row.
-  provider.setContext('/w/chip_top.v', mod.nameRange.start.line, 0);
+  await provider.setContext('/w/chip_top.v', mod.nameRange.start.line, 0);
   assert.equal(lastPath(), 'chip_top', 'off an instantiation, the module itself is highlighted');
 });
 
@@ -818,8 +861,8 @@ test('composition: a cut subtree is marked, not shown as a leaf', async () => {
   svc.index.addFile('/w/cyc.v', 'module a (); a u (); endmodule\n');
   const root = buildHierarchy(svc.index, 'a', { maxDepth: 0, maxInstances: 0 })!.root;
   const provider = new CompositionViewProvider(svc);
-  provider.setRoot(root, 'a');
-  const row = provider.modelFor('a.u')!;
+  await provider.setRoot(root, 'a');
+  const row = (await provider.modelFor('a.u'))!;
   assert.equal(row.truncated, true, 'the recursive instance is flagged');
   assert.match(row.badge, /cycle/, 'and its badge says why it has no children');
 });
@@ -853,6 +896,27 @@ test('composition: the graph child page follows defaultChildLimit', async () => 
   assert.equal(instanceCount(), 40, 'the next child page reveals 13 more again');
 
   GraphPanel.disposeAll();
+});
+
+test('composition webview: a hidden view does not parse the active buffer', async () => {
+  const svc = await svcWith();
+  const { CompositionViewProvider } = await import('../vscode/compView');
+  const source = 'module top (input wire a, output wire b); assign b = a; endmodule\n';
+  const doc = documentFor('/w/hidden.v', source);
+  let reads = 0;
+  doc.getText = () => {
+    reads++;
+    return source;
+  };
+  vscode.workspace.textDocuments.push(doc);
+  try {
+    const provider = new CompositionViewProvider(svc);
+    provider.followEditor(doc.fileName, 0, 0);
+    await settle();
+    assert.equal(reads, 0, 'the hidden view keeps only the editor context, without parsing');
+  } finally {
+    vscode.workspace.textDocuments.pop();
+  }
 });
 
 after(() => vscode.__webviews && ((vscode as unknown as { __webviews: unknown[] }).__webviews.length = 0));

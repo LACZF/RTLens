@@ -4,7 +4,14 @@ import * as vscode from 'vscode';
 import type { IndexService } from './indexService';
 import type { HierarchyNode, ModuleDef } from '../core/ast';
 import type { Range } from '../core/lexer';
-import { childOnPath, findByPath, type HierarchyExpander } from '../core/hierarchy';
+import { childOnPath, findByPath } from '../core/hierarchy';
+import { parseSource } from '../core/parser';
+import { CompositionStore } from './compositionStore';
+import {
+  DbCompositionSource,
+  IndexCompositionSource,
+  type CompositionSource,
+} from './compositionSource';
 
 /** Whether `(line, character)` sits inside `range`. */
 function inRange(range: Range, line: number, character: number): boolean {
@@ -86,8 +93,18 @@ interface CompositionFilter {
  */
 export class CompositionViewProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
-  /** Lazy builder for the tree; `cachedRoot`'s levels are pulled through it. */
-  private expander?: HierarchyExpander;
+  /**
+   * Whether the webview is actually visible. Activation happens from commands,
+   * the status bar, or the activity-bar icon, and the view stays hidden in the
+   * first two cases. Parsing the active buffer for an invisible tree is pure
+   * extension-host work (a large file can take seconds); remember the context
+   * instead and apply it when the user opens the view.
+   */
+  private visible = false;
+  /** Latest editor context seen while hidden, applied on first visibility. */
+  private pendingContext?: { file: string | undefined; line: number | undefined; character: number | undefined };
+  private source?: CompositionSource;
+  private sourceFolder?: string;
   private cachedRoot?: HierarchyNode;
   private cachedRootModule?: string;
   private cachedFile?: string;
@@ -96,20 +113,38 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
   private pending: HierarchyNode[] = [];
   /** The last defined file `setContext` saw: a move to another file is an open (and folds the other branches). */
   private lastContextFile: string | undefined;
+  /** Bumped per context request so a slow parse cannot overwrite a newer cursor position. */
+  private contextGen = 0;
+  /** Parsed modules of the last file, reused across cursor moves. */
+  private fileCache?: { file: string; version: number; modules: ModuleDef[] };
   /** Parsed `composition.filterModules`, rebuilt when the config is reread (a fresh array). */
   private filterCache?: { source: string[]; value: CompositionFilter };
+  private readonly prompted = new Set<string>();
 
   constructor(private readonly svc: IndexService) {
     this.svc.onDidChange(() => {
-      if (this.svc.state === 'ready') {
-        this.refresh();
+      if (this.svc.state === 'ready' && this.source?.kind === 'index') {
+        void this.refresh();
       }
     });
     this.svc.onDidChangeState((s) => {
-      if (s === 'ready') {
-        this.refresh();
+      if (s === 'ready' && (!this.source || this.source.kind === 'index')) {
+        void this.refresh();
       }
     });
+  }
+
+  /**
+   * Follow the editor, but do not parse while the view is hidden. The extension
+   * calls this on activation, cursor moves, and editor switches; `setContext`
+   * stays the direct entry point for an already-visible tree.
+   */
+  followEditor(file: string | undefined, line: number | undefined, character?: number): void {
+    this.pendingContext = { file, line, character };
+    if (file !== undefined) this.lastContextFile = file;
+    if (this.visible) {
+      void this.setContext(file, line, character);
+    }
   }
 
   /**
@@ -117,64 +152,175 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
    * (a configured top, else the top that contains the current module) and keep
    * that root while moving around inside it, revealing and highlighting the row
    * under the cursor.
-   *
-   * When the cursor sits anywhere on an instantiation - its instance name, the
-   * module name being instantiated, or one of the port connections wired to it
-   * (`.busy(busy)`) - the row for that *instance* (`u_ctrl`, `u_dpath`) is
-   * highlighted; anywhere else in the module the module's own row is.
-   *
-   * Moving to another defined file counts as an open: the reveal that follows
-   * folds every branch the reader expanded elsewhere (the webview gets
-   * `collapseOthers` on the highlight). Cursor moves inside one file, and a
-   * non-HDL editor (`undefined`), leave the expansion alone.
    */
-  setContext(file: string | undefined, line: number | undefined, character?: number): void {
+  async setContext(file: string | undefined, line: number | undefined, character?: number): Promise<void> {
     const fileOpened = file !== undefined && file !== this.lastContextFile;
     if (file !== undefined) this.lastContextFile = file;
-    const mod = file
-      ? this.svc.moduleAt(file, line ?? 0) ?? this.svc.index.modulesInFile(file)[0]
-      : undefined;
+    const gen = ++this.contextGen;
+    const mod = file ? await this.moduleAt(file, line ?? 0) : undefined;
+    if (gen !== this.contextGen) return;
+    await this.ensureSource(file);
+    if (gen !== this.contextGen) return;
+    await this.prepareFilter();
+    if (gen !== this.contextGen) return;
+    const source = this.source;
+    if (!source) {
+      this.clear();
+      return;
+    }
     const local = mod && line !== undefined ? instanceLocalAt(mod, line, character) : undefined;
     const tops = this.svc.config.topModules;
     if (tops.length) {
-      const def = tops.map((name) => this.svc.index.resolveModule(name)).find((d) => d !== undefined);
-      if (!def) return;
-      this.ensureRoot(def.name, def.file);
-      // A configured top pins the root; the cursor's module is located inside it
-      // only when its own chain ends at that same top.
+      const top = await this.firstTop(tops);
+      if (!top || gen !== this.contextGen) return;
+      await this.ensureRoot(top, await source.topFile(top));
+      if (gen !== this.contextGen) return;
       let modulePath = mod ? this.locateMaterialized(mod.name) : undefined;
       if (mod && file && !modulePath) {
-        const design = this.svc.containingPath(mod.name, file);
-        if (design && design.top === def.name) {
-          modulePath = design.path;
+        const design = await source.locate(mod.name, file);
+        if (gen !== this.contextGen) return;
+        if (design && design.top === top) {
+          modulePath = design.path.join('.');
         }
       }
-      this.show(modulePath, local, fileOpened);
+      await this.show(modulePath, local, fileOpened);
       return;
     }
     if (!file || !mod) return;
-    // The module is already drawn: move the highlight without a reverse walk.
     const here = this.locateMaterialized(mod.name);
     if (here) {
-      this.show(here, local, fileOpened);
+      await this.show(here, local, fileOpened);
       return;
     }
-    const design = this.svc.containingPath(mod.name, file);
+    const design = await source.locate(mod.name, file);
+    if (gen !== this.contextGen) return;
     if (design) {
-      this.ensureRoot(design.top, this.svc.index.resolveModule(design.top)?.file);
-      this.show(design.path, local, fileOpened);
+      await this.ensureRoot(design.top, design.topFile ?? (await source.topFile(design.top)));
+      await this.show(design.path.join('.'), local, fileOpened);
       return;
     }
-    this.ensureRoot(mod.name, file);
-    this.show(mod.name, local, fileOpened);
+    await this.ensureRoot(mod.name, file);
+    await this.show(mod.name, local, fileOpened);
   }
 
-  /** Path of the first materialised row whose module is `name`, root included. */
+  /** Parse the active file (buffer text when open, disk otherwise) and find the module at `line`. */
+  private async moduleAt(file: string, line: number): Promise<ModuleDef | undefined> {
+    const modules = await this.fileModules(file);
+    let parsed: ModuleDef | undefined;
+    if (modules && modules.length) {
+      let lo = 0;
+      let hi = modules.length - 1;
+      let at = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (modules[mid].range.start.line <= line) {
+          at = mid;
+          lo = mid + 1;
+        } else {
+          hi = mid - 1;
+        }
+      }
+      if (at >= 0 && modules[at].range.end.line >= line) {
+        parsed = modules[at];
+      }
+      return parsed ?? modules[0];
+    }
+    return this.svc.moduleAt(file, line) ?? this.svc.index.modulesInFile(file)[0];
+  }
+
+  private async fileModules(file: string): Promise<ModuleDef[] | undefined> {
+    const doc = vscode.workspace.textDocuments.find((d) => d.uri.scheme === 'file' && d.fileName === file);
+    if (doc) {
+      if (this.fileCache?.file === file && this.fileCache.version === doc.version) {
+        return this.fileCache.modules;
+      }
+      const modules = parseSource(file, doc.getText()).modules;
+      this.fileCache = { file, version: doc.version, modules };
+      return modules;
+    }
+    try {
+      const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(file));
+      const modules = parseSource(file, Buffer.from(bytes).toString('utf8')).modules;
+      this.fileCache = { file, version: -1, modules };
+      return modules;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private folderFor(file?: string): string | undefined {
+    if (file) {
+      const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(file));
+      if (folder) {
+        return folder.uri.fsPath;
+      }
+    }
+    return (vscode.workspace.workspaceFolders ?? [])[0]?.uri.fsPath;
+  }
+
+  private async ensureSource(file?: string): Promise<void> {
+    const folder = this.folderFor(file) ?? this.folderFor(undefined);
+    if (!folder) {
+      this.source = undefined;
+      this.sourceFolder = undefined;
+      return;
+    }
+    if (this.source && this.sourceFolder === folder) {
+      return;
+    }
+    const limits = {
+      maxDepth: this.svc.config.compositionMaxDepth,
+      maxInstances: this.svc.config.compositionMaxInstances,
+    };
+    const store = CompositionStore.open(folder);
+    this.sourceFolder = folder;
+    this.filterCache = undefined;
+    if (store) {
+      this.source = new DbCompositionSource(store, limits);
+      return;
+    }
+    if (this.svc.index.allFiles().length > 0) {
+      this.source = new IndexCompositionSource(this.svc, limits);
+      return;
+    }
+    this.source = undefined;
+    this.promptBuild(folder);
+  }
+
+  private promptBuild(folder: string): void {
+    if (this.prompted.has(folder)) {
+      return;
+    }
+    this.prompted.add(folder);
+    void vscode.window
+      .showInformationMessage(
+        'RTLens: no composition database found for this workspace. Build it to enable the composition view.',
+        'Build Database',
+      )
+      .then((pick) => {
+        if (pick) {
+          void vscode.commands.executeCommand('hdl.connectView.refreshDatabase');
+        }
+      });
+  }
+
+  private async firstTop(tops: readonly string[]): Promise<string | undefined> {
+    const source = this.source;
+    if (!source) {
+      return undefined;
+    }
+    for (const name of tops) {
+      if (await source.hasModule(name)) {
+        return name;
+      }
+    }
+    return undefined;
+  }
+
   private locateMaterialized(name: string): string | undefined {
     const root = this.cachedRoot;
     if (!root) return undefined;
     if (root.moduleName === name) return root.path;
-    // Index-pointer BFS to avoid `queue.shift()`'s O(n): this runs every cursor move.
     const queue: HierarchyNode[] = [root];
     for (let head = 0; head < queue.length; head++) {
       for (const child of queue[head].children ?? []) {
@@ -185,45 +331,45 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     return undefined;
   }
 
-  /**
-   * Point the tree at a root without moving it: only a different design (a new
-   * path/file) rebuilds, so moving the cursor inside one design keeps the
-   * materialised levels and the reader's collapse state.
-   */
-  private ensureRoot(moduleName: string, fromFile?: string): void {
+  /** Point the tree at a root without moving it; the root level is always loaded. */
+  private async ensureRoot(moduleName: string, fromFile?: string): Promise<void> {
+    const source = this.source;
+    if (!source) {
+      return;
+    }
     if (this.cachedRoot && this.cachedRootModule === moduleName && this.cachedFile === fromFile) {
       return;
     }
-    this.expander = this.svc.compositionExpander(fromFile);
-    this.cachedRoot = this.expander.root(moduleName, fromFile);
+    const root = await source.root(moduleName);
+    this.cachedRoot = root;
     this.cachedRootModule = moduleName;
     this.cachedFile = fromFile;
+    this.pending = [];
+    if (root) {
+      await source.expand(root);
+    }
     this.rebuild();
     this.post();
   }
 
   /**
    * Reveal and highlight the row for a cursor in `modulePath`, pulling the
-   * levels above it (and the instance `local` under it when that is where the
-   * cursor sits) from the lazy builder. The host materialises first and streams
-   * the new `children` before the highlight, so the webview only ever draws
-   * rows it has.
-   *
-   * `collapseOthers` rides the highlight only for a file open/switch: the
-   * webview then folds every branch except the path down to this row, so the
-   * just-opened module is the only expanded spine on screen.
+   * levels above it (and the instance `local` under it) from the source.
    */
-  private show(modulePath: string | undefined, local: string | undefined, collapseOthers = false): void {
+  private async show(modulePath: string | undefined, local: string | undefined, collapseOthers = false): Promise<void> {
     const root = this.cachedRoot;
     if (!root) return;
+    const gen = this.contextGen;
     let target = '';
     if (modulePath) {
-      this.materializeTo(modulePath);
+      await this.materializeTo(modulePath);
+      if (gen !== this.contextGen) return;
       if (findByPath(root, modulePath)) {
         target = modulePath;
         if (local) {
           const full = `${modulePath}.${local}`;
-          this.materializeTo(full);
+          await this.materializeTo(full);
+          if (gen !== this.contextGen) return;
           if (findByPath(root, full)) {
             target = full;
           }
@@ -238,26 +384,26 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  /**
-   * Expand every node on the path down to `target`. Only unexpanded nodes are
-   * materialised (one level each); the nodes that gained children are queued so
-   * their rows can be streamed to the webview.
-   */
-  private materializeTo(target: string): void {
+  /** Expand every node on the path down to `target`, one level at a time. */
+  private async materializeTo(target: string): Promise<void> {
     const root = this.cachedRoot;
-    const expander = this.expander;
-    if (!root || !expander) return;
+    const source = this.source;
+    if (!root || !source) return;
     let node: HierarchyNode | undefined = root;
     while (node && node.path !== target) {
       if (node.children === undefined) {
-        if (expander.childCount(node) === 0) break;
-        expander.expandLevel(node);
+        if (this.childCount(node) === 0) break;
+        await source.expand(node);
         this.pending.push(node);
       }
       const next = childOnPath(node, target);
       if (!next) break;
       node = next;
     }
+  }
+
+  private childCount(node: HierarchyNode): number {
+    return node.children !== undefined ? node.children.length : node.childCountHint ?? 0;
   }
 
   /** Send the child rows of every level materialised since the last flush. */
@@ -287,11 +433,9 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  setRoot(node: HierarchyNode | undefined, moduleName?: string): void {
-    // A caller hands us a fully built tree (e.g. reveal in Composition); we keep
-    // it whole by handing the builder only the root's identity for later
-    // refreshes.
-    this.expander = this.svc.compositionExpander(node?.file);
+  async setRoot(node: HierarchyNode | undefined, moduleName?: string): Promise<void> {
+    await this.ensureSource(node?.file ?? this.lastContextFile);
+    await this.prepareFilter();
     this.cachedRoot = node;
     this.cachedRootModule = moduleName ?? node?.moduleName;
     this.cachedFile = node?.file;
@@ -307,50 +451,53 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     return this.cachedRoot;
   }
 
-  modelFor(path: string): CompRow | undefined {
+  async modelFor(path: string): Promise<CompRow | undefined> {
     const root = this.cachedRoot;
     if (!root) return undefined;
     if (!findByPath(root, path)) return undefined;
-    this.materializeTo(path);
+    await this.materializeTo(path);
     this.rebuild();
     this.post();
-    const row = this.payload.rows.find((r) => r.path === path);
-    return row;
+    return this.payload.rows.find((r) => r.path === path);
   }
 
   /** Scroll the webview to `path`, expanding the rows above it. */
-  reveal(path: string): void {
-    this.materializeTo(path);
+  async reveal(path: string): Promise<void> {
+    await this.materializeTo(path);
     this.flushChildren();
     void this.view?.webview.postMessage({ type: 'revealPath', path });
   }
 
+  /** Re-root at the first branch of `file` (the reveal-in-composition command). */
+  async revealFile(file: string): Promise<void> {
+    await this.setContext(file, 0, undefined);
+  }
+
   /**
-   * Expand or collapse every row in the instance hierarchy. Expanding is the
-   * host's job (it owns the tree): it materialises the whole design, bounded by
-   * the Composition limits, then tells the webview. Collapsing is client-side.
+   * Expand or collapse every row. Expanding materialises the whole design,
+   * bounded by the Composition limits.
    */
-  setExpandedAll(expanded: boolean): void {
+  async setExpandedAll(expanded: boolean): Promise<void> {
     if (!expanded) {
       void this.view?.webview.postMessage({ type: 'setExpanded', expanded: false });
       return;
     }
-    this.expandAll();
+    await this.prepareFilter();
+    await this.expandAll();
     this.rebuild();
     this.post();
     void this.view?.webview.postMessage({ type: 'setExpanded', expanded: true });
   }
 
-  /** Materialise every level the limits allow, for Expand all. */
-  private expandAll(): void {
+  private async expandAll(): Promise<void> {
     const root = this.cachedRoot;
-    const expander = this.expander;
-    if (!root || !expander) return;
+    const source = this.source;
+    if (!root || !source) return;
     const stack: HierarchyNode[] = [root];
     while (stack.length > 0) {
       const node = stack.pop()!;
-      if (node.children === undefined && expander.childCount(node) > 0) {
-        expander.expandLevel(node);
+      if (node.children === undefined && this.childCount(node) > 0) {
+        await source.expand(node);
       }
       for (const child of node.children ?? []) {
         stack.push(child);
@@ -358,33 +505,48 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  refresh(): void {
-    if (!this.cachedRootModule) return;
-    // Re-derive the tree from the (possibly reindexed) workspace. Reusing the
-    // cached `HierarchyNode` would keep the old children, so a module added
-    // since the last build - and everything below it - would never show up.
-    // The previously materialised frontier is re-opened so the view does not
-    // collapse on every edit.
-    const expanded = this.cachedRoot ? materializedPaths(this.cachedRoot) : new Set<string>();
-    this.expander = this.svc.compositionExpander(this.cachedFile);
-    this.cachedRoot = this.expander.root(this.cachedRootModule, this.cachedFile);
-    if (this.cachedRoot) {
-      this.rematerialize(expanded);
+  /** Re-derive the tree from the current source (index rebuild or DB generation swap). */
+  async refresh(): Promise<void> {
+    if (!this.cachedRootModule) {
+      if (this.view) {
+        await this.ready();
+      }
+      return;
     }
+    const expanded = this.cachedRoot ? materializedPaths(this.cachedRoot) : new Set<string>();
+    await this.source?.reload();
+    await this.prepareFilter();
+    const source = this.source;
+    if (!source) {
+      this.clear();
+      return;
+    }
+    const root = await source.root(this.cachedRootModule);
+    this.pending = [];
+    if (!root) {
+      // A reindex can briefly not know the module: keep the last tree on
+      // screen instead of blanking the view during the scan.
+      this.rebuild();
+      this.post();
+      return;
+    }
+    this.cachedRoot = root;
+    await source.expand(root);
+    await this.rematerialize(expanded);
     this.rebuild();
     this.post();
   }
 
   /** Re-open every previously materialised path on the freshly built root. */
-  private rematerialize(expanded: Set<string>): void {
+  private async rematerialize(expanded: Set<string>): Promise<void> {
     const root = this.cachedRoot;
-    const expander = this.expander;
-    if (!root || !expander) return;
+    const source = this.source;
+    if (!root || !source) return;
     const stack: HierarchyNode[] = [root];
     while (stack.length > 0) {
       const node = stack.pop()!;
-      if (node.children === undefined && expanded.has(node.path) && expander.childCount(node) > 0) {
-        expander.expandLevel(node);
+      if (node.children === undefined && expanded.has(node.path) && this.childCount(node) > 0) {
+        await source.expand(node);
       }
       for (const child of node.children ?? []) {
         stack.push(child);
@@ -392,49 +554,89 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private clear(): void {
+    this.cachedRoot = undefined;
+    this.cachedRootModule = undefined;
+    this.cachedFile = undefined;
+    this.pending = [];
+    this.payload = { rootModule: '', rootPath: '', file: '', rows: [] };
+    this.post();
+  }
+
+  private async ready(): Promise<void> {
+    const pending = this.pendingContext;
+    if (pending?.file !== undefined) {
+      await this.setContext(pending.file, pending.line, pending.character);
+      return;
+    }
+    if (this.cachedRoot) {
+      this.rebuild();
+      this.post();
+      return;
+    }
+    await this.ensureSource(this.lastContextFile);
+    await this.prepareFilter();
+    const source = this.source;
+    if (!source) {
+      this.rebuild();
+      this.post();
+      return;
+    }
+    const top = await source.defaultTop(this.svc.config.topModules);
+    if (!top) {
+      this.rebuild();
+      this.post();
+      return;
+    }
+    await this.ensureRoot(top.name, top.file);
+  }
+
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
+    this.visible = view.visible;
+    view.onDidChangeVisibility?.(() => {
+      this.visible = view.visible;
+      if (this.visible) {
+        const pending = this.pendingContext;
+        if (pending?.file !== undefined) {
+          void this.setContext(pending.file, pending.line, pending.character);
+        }
+      }
+    });
     view.webview.options = { enableScripts: true };
     view.webview.html = html();
     view.webview.onDidReceiveMessage((msg: { type?: string; path?: string; expanded?: boolean }) => {
-      // The document drops everything VS Code posted before its `message`
-      // listener existed, so it asks for the tree once it can receive - the
-      // only reliable first delivery, and the re-arm after the webview was
-      // torn down and rebuilt on a show.
-      if (msg?.type === 'ready') {
-        this.rebuild();
-        this.post();
-        return;
-      }
-      // The webview reports whether the whole tree is expanded so the title
-      // button can show Expand all or Collapse all.
-      if (msg?.type === 'expandState') {
-        void vscode.commands.executeCommand('setContext', 'hdl.compositionExpanded', !!msg.expanded);
-        return;
-      }
-      // The webview opens a chevron on a level it has not seen yet: materialise
-      // just that one level and stream the child rows back.
-      if (msg?.type === 'expand' && msg.path) {
-        const node = this.cachedRoot ? findByPath(this.cachedRoot, msg.path) : undefined;
-        if (node && this.expander && node.children === undefined && this.expander.childCount(node) > 0) {
-          this.expander.expandLevel(node);
-          this.postChildren(node.path, this.childRows(node));
-        }
-        return;
-      }
-      if (msg?.type !== 'open' || !msg.path) {
-        return;
-      }
-      // Resolve the row's own node so the jump lands on the instantiation site
-      // (its name range in the parent file), not line 0 of the root file.
+      void this.handleMessage(msg);
+    });
+  }
+
+  private async handleMessage(msg: { type?: string; path?: string; expanded?: boolean }): Promise<void> {
+    if (msg?.type === 'ready') {
+      await this.ready();
+      return;
+    }
+    if (msg?.type === 'expandState') {
+      void vscode.commands.executeCommand('setContext', 'hdl.compositionExpanded', !!msg.expanded);
+      return;
+    }
+    if (msg?.type === 'expand' && msg.path) {
       const node = this.cachedRoot ? findByPath(this.cachedRoot, msg.path) : undefined;
-      if (!node) {
-        return;
+      if (node && this.source && node.children === undefined && this.childCount(node) > 0) {
+        await this.source.expand(node);
+        this.postChildren(node.path, this.childRows(node));
       }
-      void vscode.commands.executeCommand('hdl.connectView.revealInstance', {
-        file: node.file ?? this.cachedFile,
-        node,
-      });
+      return;
+    }
+    if (msg?.type !== 'open' || !msg.path) {
+      return;
+    }
+    const node = this.cachedRoot ? findByPath(this.cachedRoot, msg.path) : undefined;
+    if (!node) {
+      return;
+    }
+    void vscode.commands.executeCommand('hdl.connectView.revealInstance', {
+      file: node.file ?? this.cachedFile,
+      node,
     });
   }
 
@@ -447,7 +649,6 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     }
     const rows: CompRow[] = [];
     rows.push(this.rowFor(root, true));
-    // An unloaded level has no rows below it yet; the webview asks for them.
     if (root.children !== undefined) {
       this.pushRows(root, rows);
     }
@@ -459,13 +660,6 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     };
   }
 
-  /**
-   * Append the materialised subtree under `parent` in pre-order.
-   *
-   * Iterative on purpose: the Composition tree lifts the depth cap, so a chain
-   * of distinct modules must not overflow the call stack. Children are pushed
-   * in reverse so the flat rows keep their parent-before-child order.
-   */
   private pushRows(parent: HierarchyNode, rows: CompRow[]): void {
     const stack: HierarchyNode[] = [];
     const seed = parent.children ?? [];
@@ -479,7 +673,6 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  /** The direct child rows of an expanded node, for a `children` message. */
   private childRows(node: HierarchyNode): CompRow[] {
     const rows: CompRow[] = [];
     this.pushRows(node, rows);
@@ -487,22 +680,44 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Parse the configured filter entries.
-   *
-   * An entry naming an indexed module filters that module; every other entry
-   * is a path - a file, or a directory whose modules are all filtered. Module
-   * names win when a name and a path collide, which keeps the original
-   * name-only configuration working. Relative paths resolve against each
-   * workspace folder, like `hdl.connectView.databasePaths`; absolute paths are
-   * used as written. Cached until the config is reread (which hands over a
-   * fresh array), so drawing rows does no string work.
+   * Resolve filter names before a build so the first paint is already
+   * filtered; `compositionFilter` only starts this when a build still races it.
+   */
+  private async prepareFilter(): Promise<void> {
+    const source = this.svc.config.compositionFilterModules;
+    if (source.length === 0 || !this.source) return;
+    if (this.filterCache && this.filterCache.source === source) return;
+    const names = await this.source.knownModules(source);
+    this.filterCache = { source, value: this.buildFilter(source, names) };
+  }
+
+  /**
+   * Parse the configured filter entries. A name wins over a path; the name set
+   * arrives from the source asynchronously (one shard lookup per entry) and is
+   * resolved once per config array.
    */
   private compositionFilter(): CompositionFilter {
     const source = this.svc.config.compositionFilterModules;
     if (this.filterCache && this.filterCache.source === source) {
       return this.filterCache.value;
     }
-    const known = new Set(this.svc.index.moduleNames());
+    const cache = { source, value: this.buildFilter(source, new Set<string>()) };
+    this.filterCache = cache;
+    const resolver = this.source;
+    if (source.length && resolver) {
+      void resolver.knownModules(source).then((names) => {
+        if (this.filterCache !== cache) return;
+        this.filterCache = { source, value: this.buildFilter(source, names) };
+        if (this.cachedRoot) {
+          this.rebuild();
+          this.post();
+        }
+      });
+    }
+    return cache.value;
+  }
+
+  private buildFilter(source: string[], known: Set<string>): CompositionFilter {
     const roots = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
     const names = new Set<string>();
     const paths: string[] = [];
@@ -521,21 +736,18 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
         }
       }
     }
-    const value = { names, paths };
-    this.filterCache = { source, value };
-    return value;
+    return { names, paths };
   }
 
-  /**
-   * Whether `def` is filtered out: by module name, by its defining file, or by
-   * a directory containing that file. An unresolved module is never filtered.
-   */
-  private filtered(def: ModuleDef | undefined): boolean {
-    if (!def) return false;
+  /** Whether `node` is filtered out by name, by its definition file, or by a directory. */
+  private filtered(node: HierarchyNode | undefined): boolean {
+    if (!node) return false;
     const filter = this.compositionFilter();
-    if (filter.names.has(def.name)) return true;
+    if (filter.names.has(node.moduleName)) return true;
+    const file = node.defFile ?? node.file;
+    if (!file) return false;
     for (const entry of filter.paths) {
-      if (def.file === entry || isUnder(def.file, entry)) return true;
+      if (file === entry || isUnder(file, entry)) return true;
     }
     return false;
   }
@@ -544,23 +756,23 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
   private dropped(node: HierarchyNode): boolean {
     if (this.svc.config.compositionFilterModules.length === 0) return false;
     if (this.svc.config.compositionFilterMode !== 2) return false;
-    return this.filtered(this.svc.index.resolveModule(node.moduleName, node.file));
+    return this.filtered(node);
   }
 
   /** Mode 1 (prune) keeps a filtered instance but hides its whole subtree. */
   private pruned(node: HierarchyNode): boolean {
     if (this.svc.config.compositionFilterModules.length === 0) return false;
     if (this.svc.config.compositionFilterMode !== 1) return false;
-    if (!this.filtered(this.svc.index.resolveModule(node.moduleName, node.file))) return false;
+    if (!this.filtered(node)) return false;
     return this.directCount(node) > 0;
   }
 
   private directCount(node: HierarchyNode): number {
-    return node.children !== undefined ? node.children.length : this.expander?.childCount(node) ?? 0;
+    return this.childCount(node);
   }
 
   private rowFor(node: HierarchyNode, isRoot: boolean): CompRow {
-    const def = this.svc.index.resolveModule(node.moduleName, node.file);
+    const unresolved = !!node.unresolved;
     const prospective = this.directCount(node);
     const pruned = this.pruned(node);
     const depthCut =
@@ -572,7 +784,7 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     const paramCount = node.params ? Object.keys(node.params).length : 0;
     if (paramCount) parts.push(`${paramCount} param${paramCount === 1 ? '' : 's'}`);
     if (node.truncated || depthCut) parts.push(node.cycle ? 'cycle' : 'truncated');
-    if (!def) parts.push('module not found');
+    if (unresolved) parts.push('module not found');
     if (pruned) parts.push('filtered');
     return {
       path: node.path,
@@ -582,11 +794,11 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
       label: isRoot ? node.moduleName : node.instName,
       note: isRoot ? (node.file ? this.svc.relFile(node.file) : '') : `${node.instName} : ${node.moduleName}`,
       badge: parts.join(' · '),
-      icon: def ? 'symbol-module' : 'warning',
+      icon: unresolved ? 'warning' : 'symbol-module',
       childCount: pruned ? 0 : prospective,
       depth: node.depth,
       file: node.file,
-      unresolved: !def,
+      unresolved,
       truncated: !!node.truncated,
     };
   }
@@ -1045,12 +1257,13 @@ export const SCRIPT = String.raw`
     modEl.textContent = m.rootModule || '';
     fileEl.textContent = m.file || '';
     index();
-    // A new root starts fully collapsed: the tree opens one level at a time.
+    // A new root opens on its first level: the root stays expanded (the host
+    // already sent its children), while deeper levels stay folded.
     if (m.rootPath !== lastRoot) {
       lastRoot = m.rootPath;
       collapsed = {};
       for (var ri = 0; ri < rows.length; ri++) {
-        if (rows[ri].childCount > 0) collapsed[rows[ri].path] = true;
+        if (rows[ri].path !== m.rootPath && rows[ri].childCount > 0) collapsed[rows[ri].path] = true;
       }
     }
     render();

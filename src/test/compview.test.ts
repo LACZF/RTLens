@@ -169,29 +169,30 @@ const ROWS = [
   row('top.u_top', 'top', 'u_top', 'leaf', 1, 0),
 ];
 
-test('composition webview: every level starts collapsed', () => {
+test('composition webview: the root opens its first level, deeper levels stay collapsed', () => {
   const ui = start(ROWS);
   const rows = drawn(ui.list);
-  assert.equal(rows.length, 1, 'only the root is shown until it is expanded');
-  assert.equal(chevron(rows[0]).textContent, '\u25B6', 'a collapsed row shows a right-pointing chevron');
+  assert.deepEqual(
+    rows.map(rowText),
+    ['top', 'u_mid : mid', 'u_top : leaf'],
+    'the root level is on screen, its children stay folded',
+  );
+  assert.equal(chevron(rows[0]).textContent, '\u25BC', 'an open root shows a down-pointing chevron');
+  assert.equal(chevron(rows[1]).textContent, '\u25B6', 'a deeper row starts collapsed');
 });
 
 test('composition webview: clicking a chevron expands one level at a time', () => {
   const ui = start(ROWS);
 
-  fire(chevron(drawn(ui.list)[0]), 'click');
-  let rows = drawn(ui.list);
+  fire(chevron(drawn(ui.list)[1]), 'click');
+  const rows = drawn(ui.list);
+  assert.equal(rows.length, 4, 'expanding the child reveals its own child');
   assert.deepEqual(
     rows.map(rowText),
-    ['top', 'u_mid : mid', 'u_top : leaf'],
-    'expanding the root reveals its direct children only',
+    ['top', 'u_mid : mid', 'u_a : leaf', 'u_top : leaf'],
+    'only that level opens; the sibling stays a leaf',
   );
-  assert.equal(chevron(rows[0]).textContent, '\u25BC', 'an expanded row shows a down chevron');
-
-  fire(chevron(rows[1]), 'click');
-  rows = drawn(ui.list);
-  assert.equal(rows.length, 4, 'expanding the child reveals its own child');
-  assert.ok(rows.some((r) => rowText(r) === 'u_a : leaf'));
+  assert.equal(chevron(rows[1]).textContent, '\u25BC', 'an expanded row shows a down chevron');
 });
 
 test('composition webview: a search keeps matches plus their ancestors and opens them', () => {
@@ -238,7 +239,6 @@ test('composition webview: a space separated query with an unmatched token hides
 
 test('composition webview: clicking a row asks the host to reveal it', () => {
   const ui = start(ROWS);
-  fire(chevron(drawn(ui.list)[0]), 'click');
   fire(drawn(ui.list)[2], 'click');
   // The webview also reports its expand state; only the row click is a request.
   assert.deepEqual(
@@ -249,7 +249,7 @@ test('composition webview: clicking a row asks the host to reveal it', () => {
 
 test('composition webview: the title button expands and collapses every level', () => {
   const ui = start(ROWS);
-  assert.equal(drawn(ui.list).length, 1, 'a new tree starts fully collapsed');
+  assert.equal(drawn(ui.list).length, 3, 'a new tree opens the root level');
 
   ui.message({ type: 'setExpanded', expanded: true });
   assert.deepEqual(
@@ -279,7 +279,7 @@ test('composition webview: it reports whether the whole tree is expanded', () =>
 
 test('composition webview: a reveal opens the path down to the row and scrolls to it', () => {
   const ui = start(ROWS);
-  assert.equal(drawn(ui.list).length, 1);
+  assert.equal(drawn(ui.list).length, 3);
   ui.message({ type: 'revealPath', path: 'top.u_mid.u_a' });
   const rows = drawn(ui.list);
   assert.ok(rows.some((r) => rowText(r) === 'u_a : leaf'), 'the revealed row is now visible');
@@ -288,7 +288,7 @@ test('composition webview: a reveal opens the path down to the row and scrolls t
 
 test('composition webview: a highlight marks only the current module row and scrolls to it', () => {
   const ui = start(ROWS);
-  assert.equal(drawn(ui.list).length, 1);
+  assert.equal(drawn(ui.list).length, 3);
 
   ui.message({ type: 'highlightPath', path: 'top.u_mid.u_a' });
   let rows = drawn(ui.list);
@@ -323,7 +323,6 @@ test('composition webview: collapsing an ancestor hides its whole subtree, grand
     row('top.a.c', 'top.a', 'c', 'leaf', 2, 0),
   ];
   const ui = start(rows);
-  fire(chevron(drawn(ui.list)[0]), 'click'); // expand top
   fire(chevron(drawn(ui.list)[1]), 'click'); // expand top.a
   fire(chevron(drawn(ui.list)[2]), 'click'); // expand top.a.b
   assert.deepEqual(
@@ -344,50 +343,34 @@ test('composition webview: thousands of siblings expand and collapse in one clic
   const wide = [row('top', '', '', 'top', 0, 4000)];
   for (let i = 0; i < 4000; i++) wide.push(row(`top.u${i}`, 'top', `u${i}`, 'leaf', 1, 0));
   const ui = start(wide);
-  assert.equal(drawn(ui.list).length, 1, 'the wide level starts collapsed');
+  assert.equal(drawn(ui.list).length, 4001, 'the wide level opens under the root');
 
   fire(chevron(drawn(ui.list)[0]), 'click');
-  assert.equal(drawn(ui.list).length, 4001, 'one click lists every instance, with no paging');
+  assert.equal(drawn(ui.list).length, 1, 'one click folds them all away');
 
   fire(chevron(drawn(ui.list)[0]), 'click');
-  assert.equal(drawn(ui.list).length, 1, 'and one click folds them all away again');
+  assert.equal(drawn(ui.list).length, 4001, 'and one click lists every instance again, with no paging');
 });
 
 test('composition webview: opening an unloaded level asks the host, then splices the level in', () => {
-  // Only the root row is present; its level has not been streamed yet.
-  const ui = start([row('top', '', '', 'top', 0, 3)]);
-  assert.equal(drawn(ui.list).length, 1);
+  // The root level arrived with its direct children; the next level has not
+  // been streamed yet.
+  const ui = start([
+    row('top', '', '', 'top', 0, 2),
+    row('top.u_mid', 'top', 'u_mid', 'mid', 1, 1),
+    row('top.u_top', 'top', 'u_top', 'leaf', 1, 0),
+  ]);
+  assert.equal(drawn(ui.list).length, 3);
 
-  fire(chevron(drawn(ui.list)[0]), 'click');
-  assert.deepEqual(
-    ui.posted.filter((m) => m.type === 'expand'),
-    [{ type: 'expand', path: 'top' }],
-    'an unloaded level is requested from the host',
-  );
-  assert.equal(drawn(ui.list).length, 1, 'nothing is drawn until the children arrive');
-
-  // The host streams one level; it is spliced right after the parent, open.
-  ui.message({
-    type: 'children',
-    parentPath: 'top',
-    rows: [
-      row('top.u_mid', 'top', 'u_mid', 'mid', 1, 1),
-      row('top.u_top', 'top', 'u_top', 'leaf', 1, 0),
-    ],
-  });
-  assert.deepEqual(
-    drawn(ui.list).map(rowText),
-    ['top', 'u_mid : mid', 'u_top : leaf'],
-    'the streamed children are inserted and the level opens',
-  );
-
-  // A nested level is requested the same way and lands under its own parent.
   fire(chevron(drawn(ui.list)[1]), 'click');
   assert.deepEqual(
-    ui.posted.filter((m) => m.type === 'expand').map((m) => m.path),
-    ['top', 'top.u_mid'],
-    'the next unloaded level is requested by its path',
+    ui.posted.filter((m) => m.type === 'expand'),
+    [{ type: 'expand', path: 'top.u_mid' }],
+    'an unloaded level is requested from the host',
   );
+  assert.equal(drawn(ui.list).length, 3, 'nothing is drawn until the children arrive');
+
+  // The host streams one level; it is spliced right after the parent, open.
   ui.message({
     type: 'children',
     parentPath: 'top.u_mid',
@@ -396,7 +379,7 @@ test('composition webview: opening an unloaded level asks the host, then splices
   assert.deepEqual(
     drawn(ui.list).map(rowText),
     ['top', 'u_mid : mid', 'u_a : leaf', 'u_top : leaf'],
-    'the nested level is inserted under its parent',
+    'the streamed children are inserted and the level opens',
   );
 
   // A level that is already loaded collapses locally, without asking again.
@@ -406,7 +389,7 @@ test('composition webview: opening an unloaded level asks the host, then splices
     ['top', 'u_mid : mid', 'u_top : leaf'],
     'a loaded level folds without another request',
   );
-  assert.equal(ui.posted.filter((m) => m.type === 'expand').length, 2, 'no extra expand message');
+  assert.equal(ui.posted.filter((m) => m.type === 'expand').length, 1, 'no extra expand message');
 });
 
 test('composition webview: a level streamed in chunks renders once, in order', () => {
@@ -433,7 +416,6 @@ test('composition webview: a file open folds every branch outside the revealed p
     row('top.a.c', 'top.a', 'c', 'leaf', 2, 0),
   ];
   const ui = start(rows);
-  fire(chevron(drawn(ui.list)[0]), 'click'); // expand top
   fire(chevron(drawn(ui.list)[1]), 'click'); // expand top.a
   fire(chevron(drawn(ui.list)[2]), 'click'); // expand top.a.b
   assert.deepEqual(
@@ -472,7 +454,6 @@ test('composition webview: a highlight without a file open keeps manually expand
     row('top.a.c', 'top.a', 'c', 'leaf', 2, 0),
   ];
   const ui = start(rows);
-  fire(chevron(drawn(ui.list)[0]), 'click');
   fire(chevron(drawn(ui.list)[1]), 'click');
   fire(chevron(drawn(ui.list)[2]), 'click');
 

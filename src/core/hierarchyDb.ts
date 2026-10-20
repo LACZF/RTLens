@@ -33,6 +33,10 @@ export interface HierarchyEdge {
   r: Range;
   /** Child module resolved in the index. */
   ok: boolean;
+  /** Defining file of `m`; lets the view filter by path without the index. */
+  df?: string;
+  /** Child count of `m`; lets the view draw its chevron without the index. */
+  cc?: number;
 }
 
 /** One reverse edge: this module is instantiated by that instance. */
@@ -127,6 +131,17 @@ export function buildHierarchyDatabase(
         r: inst.range,
         ok: !!child,
       });
+    }
+  }
+
+  // Hints the Composition view needs to answer "which file defines this" and
+  // "does this row have children" without touching the index. Filled after the
+  // module map is complete, so merged duplicate definitions are counted once.
+  for (const entry of Object.values(modules)) {
+    for (const edge of entry.children) {
+      const child = modules[edge.m];
+      edge.df = child?.file ?? '';
+      edge.cc = child?.children.length ?? 0;
     }
   }
 
@@ -337,6 +352,8 @@ export class HierarchyDbBuilder {
       nameRange: entry.nameRange,
       moduleNameRange: entry.nameRange,
       range: entry.range,
+      defFile: entry.file,
+      childCountHint: entry.children.length,
       unresolved: false,
     };
   }
@@ -392,6 +409,8 @@ export class HierarchyDbBuilder {
         nameRange: edge.nr,
         moduleNameRange: edge.mr,
         range: edge.r,
+        defFile: childEntry?.file,
+        childCountHint: childEntry?.children.length ?? 0,
         unresolved: !childEntry,
         cycle: onCycle,
         generate: edge.g || undefined,

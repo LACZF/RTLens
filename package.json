@@ -23,9 +23,7 @@
   "main": "./out/extension.js",
   "activationEvents": [
     "onLanguage:verilog",
-    "onLanguage:systemverilog",
-    "workspaceContains:**/*.v",
-    "workspaceContains:**/*.sv"
+    "onLanguage:systemverilog"
   ],
   "contributes": {
     "languages": [

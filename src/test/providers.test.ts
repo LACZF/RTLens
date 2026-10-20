@@ -51,11 +51,10 @@ before(async () => {
   context = { subscriptions: [] };
   extension.activate(context as never);
 
-  // Wait for the first scan; the index log says when it is done.
-  const top = documentFor(path.join(FIXTURES, 'lib/chip_top.v'), read(path.join(FIXTURES, 'lib/chip_top.v')));
-  const symbols = provider('symbols') as { provideDocumentSymbols(d: unknown): Promise<unknown[]> };
+  // Wait for the first scan; an index-backed provider says when it is done.
+  const symbols = provider('workspaceSymbols') as { provideWorkspaceSymbols(q: string): Promise<unknown[]> };
   for (let i = 0; i < 200; i++) {
-    const found = await symbols.provideDocumentSymbols(top);
+    const found = await symbols.provideWorkspaceSymbols('');
     if (found && found.length) return;
     await new Promise((r) => setTimeout(r, 25));
   }

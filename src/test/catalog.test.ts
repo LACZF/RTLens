@@ -1,11 +1,11 @@
 /**
- * The classified catalog: that a refresh writes the three files, that a later
- * service reads them back, and that the hierarchy provider reports fresh vs
- * stale so the Composition view knows when to fall back to the index.
+ * The classified catalog: that a refresh writes the three databases, that a
+ * later service reads them back, and that the Composition view's sharded
+ * hierarchy store is readable and announced when a new generation lands.
  *
  * Mirrors `database.test.ts`: the real `CatalogService` runs against a
  * throwaway workspace folder, so the paths under `.vscode/rtlens/` and the
- * fingerprint/fallback logic are exercised for real.
+ * fingerprint/generation logic are exercised for real.
  */
 import { test, after } from 'node:test';
 import * as assert from 'node:assert/strict';
@@ -14,6 +14,7 @@ import * as path from 'node:path';
 import { Module } from 'node:module';
 
 import { documentFor, vscode } from './vscodeStub';
+import { shardFile, shardOf } from '../core/hierarchyStore';
 
 const loader = Module as unknown as { _load: (request: string, ...rest: unknown[]) => unknown };
 const originalLoad = loader._load;
@@ -29,7 +30,8 @@ const PARENT_SRC = 'module top (input wire x, output wire y); leaf u (.a (x), .s
 
 const CATALOG_DIR = path.join(TEMP, '.vscode', 'rtlens');
 const INDEX_FILE = path.join(CATALOG_DIR, 'index.json');
-const HIERARCHY_FILE = path.join(CATALOG_DIR, 'hierarchy.json');
+const HIERARCHY_BASE = path.join(CATALOG_DIR, 'hierarchy');
+const HIERARCHY_FILE = path.join(HIERARCHY_BASE, 'current.json');
 const GRAPH_FILE = path.join(CATALOG_DIR, 'graph.json');
 
 const originalConfig = vscode.workspace.getConfiguration;
@@ -80,8 +82,12 @@ test('catalog: a refresh writes index/hierarchy/graph under .vscode/rtlens', asy
     assert.ok(fs.existsSync(file), `${path.basename(file)} is on disk`);
   }
   const hierarchy = JSON.parse(fs.readFileSync(HIERARCHY_FILE, 'utf8'));
-  assert.ok(hierarchy.source, 'the file records a source fingerprint');
-  assert.equal(hierarchy.modules['top'].children[0].m, 'leaf');
+  assert.equal(hierarchy.version, 3, 'the manifest records the store version');
+  assert.ok(hierarchy.source, 'the manifest records a source fingerprint');
+  const shard = JSON.parse(
+    fs.readFileSync(path.join(HIERARCHY_BASE, hierarchy.generation, shardFile(shardOf('top'))), 'utf8'),
+  );
+  assert.equal(shard.modules['top'].children[0].m, 'leaf');
 
   const stats = catalog.stats();
   assert.equal(stats.folders, 1);
@@ -101,23 +107,37 @@ test('catalog: a later service loads what the first one wrote', async () => {
   second.dispose();
 });
 
-test('catalog: the provider offers a fresh hierarchy database, then withholds it after an edit', async () => {
+test('catalog: the hierarchy store is readable and a new generation is announced', async () => {
   const { svc, catalog } = await setup();
   await catalog.load();
   svc.watchDocument(documentFor(PARENT, PARENT_SRC) as never);
   await wait(0);
 
-  assert.equal(svc.hierarchyDatabase?.(), undefined, 'nothing is on disk yet, so the view builds in memory');
+  const { CompositionStore } = await import('../vscode/compositionStore');
+  assert.equal(CompositionStore.open(TEMP), undefined, 'nothing is on disk yet, so the view builds in memory');
 
+  let changes = 0;
+  catalog.onDidChangeDatabase(() => changes++);
   await catalog.refresh('full');
-  const fresh = svc.hierarchyDatabase?.();
-  assert.ok(fresh, 'after a refresh the persisted database is offered');
-  assert.equal(fresh!.modules['top'].children[0].m, 'leaf');
+  const store = CompositionStore.open(TEMP)!;
+  assert.ok(store, 'after a refresh the persisted hierarchy is readable');
+  const top = (await store.module('top'))!;
+  assert.equal(top.children[0].m, 'leaf');
+  assert.equal(top.children[0].df, CHILD, 'the persisted edge names the child definition file');
+  assert.equal(top.children[0].cc, 0, 'the persisted edge carries the child count hint');
+  assert.equal(await store.topFile('top'), PARENT);
+  assert.deepEqual(await store.modulesAmong(['top', 'leaf', 'missing']), new Set(['top', 'leaf']));
+  assert.deepEqual(await store.firstParentChain('leaf'), { top: 'top', path: ['top', 'u'] });
+  assert.equal(changes, 1, 'the refresh announces the new generation');
+  const generation = store.generation;
 
-  // An index change marks the databases stale synchronously, before the
-  // debounced auto-refresh rewrites them.
+  // An index change is written as a new generation; an open reader stays
+  // pinned to the one it opened with until it reloads.
   svc.watchDocument(documentFor(CHILD, CHILD_SRC + '\n// touched\n') as never);
-  assert.equal(svc.hierarchyDatabase?.(), undefined, 'a stale database is withheld');
+  await wait(700);
+  assert.equal(store.generation, generation, 'a reader keeps its generation');
+  assert.notEqual(CompositionStore.open(TEMP)!.generation, generation, 'the auto-refresh wrote a new one');
+  assert.equal(changes, 2, 'the auto-refresh is announced too');
 
   catalog.dispose();
 });

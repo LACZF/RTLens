@@ -9,9 +9,7 @@ import {
   containingPath,
   findByPath,
   subtree,
-  type HierarchyExpander,
 } from '../core/hierarchy';
-import { buildHierarchyDatabase, HierarchyDbBuilder, type HierarchyDatabase } from '../core/hierarchyDb';
 import { buildGraph, type Graph, type GraphOptions } from '../core/graph';
 import type { HierarchyNode, ModuleDef } from '../core/ast';
 import type { HierarchyResult } from '../core/hierarchy';
@@ -32,12 +30,6 @@ const INCLUDE_EXT = /\.(v|sv|svh|vh|vlt)$/i;
  */
 export class IndexService implements vscode.Disposable {
   readonly index = new HdlIndex();
-
-  /**
-   * Installed by `CatalogService`: returns the fresh on-disk hierarchy database
-   * for a file's folder, or `undefined` to build in memory instead.
-   */
-  hierarchyDatabase?: (file?: string) => HierarchyDatabase | undefined;
 
   private readonly changeEmitter = new vscode.EventEmitter<void>();
   /** Fires after the index contents changed. */
@@ -523,26 +515,6 @@ export class IndexService implements vscode.Disposable {
       },
       fromFile,
     );
-  }
-
-  /**
-   * A lazy builder for the Composition view. It carries the same
-   * `hdl.connectView.composition.*` limits as {@link compositionHierarchy}, but
-   * materialises one level at a time, so a very large design costs only the
-   * rows the reader actually opens.
-   *
-   * The data comes from a hierarchy database: the fresh on-disk one when
-   * {@link hierarchyDatabase} supplies it, otherwise one built in memory from
-   * the index. Either way the same `HierarchyDbBuilder` walks it, so a stale
-   * file and the in-memory fallback produce identical rows.
-   */
-  compositionExpander(fromFile?: string): HierarchyExpander {
-    const db =
-      this.hierarchyDatabase?.(fromFile) ?? buildHierarchyDatabase(this.index, this.configValue.topModules);
-    return new HierarchyDbBuilder(db, {
-      maxDepth: this.configValue.compositionMaxDepth,
-      maxInstances: this.configValue.compositionMaxInstances,
-    });
   }
 
   /** Nearest design top for `moduleName` and the path down to it, no tree built. */

@@ -17,6 +17,7 @@ import { identifierProblem } from '../core/naming';
 import type { ModuleDef, PortDecl, VarDecl, ParamDecl, InstanceSite, AssignSite } from '../core/ast';
 import { typeWidth, rangeWidth } from '../core/fold';
 import { basename } from '../core/index';
+import { parseSource } from '../core/parser';
 
 export function pos(line: number, character: number): vscode.Position {
   return new vscode.Position(line, character);
@@ -388,12 +389,13 @@ export class HdlRenameProvider implements vscode.RenameProvider {
 // ---------------------------------------------------------------------------
 
 export class HdlDocumentSymbolProvider implements vscode.DocumentSymbolProvider {
-  constructor(private readonly svc: IndexService) {}
-
-  async provideDocumentSymbols(document: vscode.TextDocument): Promise<vscode.DocumentSymbol[]> {
-    await this.svc.ensureReady();
-    this.svc.syncOpenDocuments();
-    const mods = this.svc.index.modulesInFile(document.fileName);
+  provideDocumentSymbols(document: vscode.TextDocument): vscode.DocumentSymbol[] {
+    // The outline is requested for every restored editor at startup. Awaiting
+    // the workspace index here would turn that request into a full scan and
+    // block the extension host (and every other extension activating in it)
+    // before the user asks for anything. The buffer already holds everything
+    // an outline needs, so parse just this document.
+    const mods = parseSource(document.fileName, document.getText()).modules;
     const out: vscode.DocumentSymbol[] = [];
     for (const m of mods) {
       const children: vscode.DocumentSymbol[] = [];
