@@ -391,6 +391,9 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     if (!root || !source) return;
     let node: HierarchyNode | undefined = root;
     while (node && node.path !== target) {
+      // A level hidden by the filter is never expanded and never streamed:
+      // cursor-follow must not re-materialise a subtree the filter removed.
+      if (this.dropped(node) || this.pruned(node)) break;
       if (node.children === undefined) {
         if (this.childCount(node) === 0) break;
         await source.expand(node);
@@ -678,6 +681,9 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
   }
 
   private childRows(node: HierarchyNode): CompRow[] {
+    // An expand may race a config change: a level that is now hidden must not
+    // stream its children into the webview.
+    if (this.dropped(node) || this.pruned(node)) return [];
     const rows: CompRow[] = [];
     this.pushRows(node, rows);
     return rows;
