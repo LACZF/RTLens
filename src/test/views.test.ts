@@ -725,6 +725,56 @@ test('composition webview: opening a different file carries the fold flag, same-
   assert.deepEqual(foldFlags(), [true, false, true, false]);
 });
 
+test('composition webview: the editor-follow path carries the fold flag on a file open', async () => {
+  // The extension never calls setContext directly on editor events: every
+  // active-editor switch and cursor move arrives through followEditor. The
+  // fold flag has to survive that path, or the tree never folds in the real
+  // app no matter how well setContext itself behaves.
+  const svc = await svcWith();
+  svc.index.addFile('/w/top.v', 'module top (input wire i, output wire o);\n  leaf u (.a(i), .s(o));\nendmodule\n');
+  svc.index.addFile('/w/leaf.v', 'module leaf (input wire a, output wire s); assign s = a; endmodule\n');
+  const { CompositionViewProvider } = await import('../vscode/compView');
+  const provider = new CompositionViewProvider(svc);
+
+  const posted: { type?: string; path?: string; collapseOthers?: boolean }[] = [];
+  provider.resolveWebviewView({
+    visible: true,
+    webview: {
+      options: {},
+      html: '',
+      onDidReceiveMessage: () => ({ dispose() {} }),
+      postMessage: async (m: { type?: string; path?: string; collapseOthers?: boolean }) => {
+        posted.push(m);
+      },
+    },
+  } as unknown as import('vscode').WebviewView);
+  const last = () => posted[posted.length - 1];
+
+  await provider.followEditor('/w/top.v', 0, 0);
+  assert.deepEqual(
+    [last().path, last().collapseOthers],
+    ['top', true],
+    'opening a file through followEditor carries the fold flag',
+  );
+
+  // Moving the cursor inside that file (onto the instantiation) must not fold.
+  const inst = svc.index.resolveModule('top')!.instances[0]!;
+  await provider.followEditor('/w/top.v', inst.nameRange.start.line, inst.nameRange.start.character);
+  assert.deepEqual(
+    [last().path, last().collapseOthers],
+    ['top.u', undefined],
+    'a same-file cursor move through followEditor carries no fold flag',
+  );
+
+  // Switching to the instance's file folds again.
+  await provider.followEditor('/w/leaf.v', 0, 0);
+  assert.deepEqual(
+    [last().path, last().collapseOthers],
+    ['top.u', true],
+    'switching files through followEditor carries the fold flag',
+  );
+});
+
 test('composition webview: points at an instantiation or its connections to highlight the instance row', async () => {
   // Mirrors the real chip_top fixture: `datapath #(...)` puts the instantiated
   // module name and the instance name on different lines, and the port

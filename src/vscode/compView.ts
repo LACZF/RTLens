@@ -138,12 +138,15 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
    * Follow the editor, but do not parse while the view is hidden. The extension
    * calls this on activation, cursor moves, and editor switches; `setContext`
    * stays the direct entry point for an already-visible tree.
+   *
+   * `setContext` alone owns `lastContextFile`: writing it here would make the
+   * switch look like a same-file cursor move inside `setContext`, so the fold
+   * flag on a file open would never fire on the editor path.
    */
-  followEditor(file: string | undefined, line: number | undefined, character?: number): void {
+  async followEditor(file: string | undefined, line: number | undefined, character?: number): Promise<void> {
     this.pendingContext = { file, line, character };
-    if (file !== undefined) this.lastContextFile = file;
     if (this.visible) {
-      void this.setContext(file, line, character);
+      await this.setContext(file, line, character);
     }
   }
 
