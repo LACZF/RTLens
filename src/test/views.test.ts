@@ -794,6 +794,53 @@ test('composition webview: points at an instantiation or its connections to high
   assert.equal(lastPath(), 'chip_top', 'off an instantiation, the module itself is highlighted');
 });
 
+test('composition webview: a deep cursor-follow streams one level per children message', async () => {
+  // The webview splices a 'children' payload directly after the parent row and
+  // the flush after a deep cursor-follow posts one message per materialised
+  // level, so every payload must hold exactly one level: a whole subtree here
+  // would splice the deeper rows once per ancestor and draw them duplicated.
+  const src = [
+    'module m0 (); m1 u (); endmodule',
+    'module m1 (); m2 u (); endmodule',
+    'module m2 (); m3 u (); endmodule',
+    'module m3 (); m4 u (); endmodule',
+    'module m4 (); endmodule',
+  ].join('\n');
+  const svc = await svcWith({ topModules: ['m0'] });
+  svc.index.addFile('/w/chain.v', src);
+  const { CompositionViewProvider } = await import('../vscode/compView');
+  const provider = new CompositionViewProvider(svc);
+
+  const posted: { type?: string; parentPath?: string; rows?: { path: string; parentPath: string }[] }[] = [];
+  provider.resolveWebviewView({
+    webview: {
+      options: {},
+      html: '',
+      onDidReceiveMessage: () => ({ dispose() {} }),
+      postMessage: async (m: (typeof posted)[number]) => {
+        posted.push(m);
+      },
+    },
+  } as unknown as import('vscode').WebviewView);
+
+  // The cursor sits in the leaf module, four instance levels below the root.
+  await provider.setContext('/w/chain.v', 4, 0);
+
+  const streamed = posted.filter((m) => m.type === 'children');
+  assert.ok(streamed.length >= 3, 'the walk down to the leaf streams each newly opened level');
+  for (const msg of streamed) {
+    for (const r of msg.rows ?? []) {
+      assert.equal(
+        r.parentPath,
+        msg.parentPath,
+        `children(${msg.parentPath}) must carry only its own level, got ${r.path}`,
+      );
+    }
+  }
+  const paths = streamed.flatMap((m) => (m.rows ?? []).map((r) => r.path));
+  assert.equal(new Set(paths).size, paths.length, 'no instance row is streamed twice');
+});
+
 test("composition: its depth and instance budget are its own settings, unlimited by default", async () => {
   const { findByPath } = await import('../core/hierarchy');
   const src = [

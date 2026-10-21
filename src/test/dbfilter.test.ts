@@ -286,6 +286,36 @@ test('mode 1: following the cursor below a pruned instance streams nothing', asy
   assert.ok(ui.posted.slice(mark).some((m) => m.type === 'highlightPath'), 'the reveal still ran');
 });
 
+test('mode 2: an expand answers a visible parent without its filtered child', async () => {
+  // The parent guard (childRows on a dropped node) is not enough here: `u_a`
+  // is visible and expanding it streams its level, but one of its children
+  // (`u_mid`, module `mid`) is filtered out - that child must be skipped while
+  // its sibling (`u_la`) still arrives.
+  setupSpace({ 'composition.filterModules': ['mid'], 'composition.filterMode': 2 });
+  const { IndexService } = await import('../vscode/indexService');
+  const svc = new IndexService(vscode.window.createOutputChannel('test') as never);
+  await svc.refresh();
+
+  const { CompositionViewProvider } = await import('../vscode/compView');
+  const provider = new CompositionViewProvider(svc);
+  const ui = attach(provider);
+  await provider.setContext(path.join(TEMP, 'top/top.v'), 0);
+  assert.deepEqual(ui.rowsPaths(), ['top', 'top.u_a', 'top.u_b', 'top.u_la2']);
+
+  const mark = ui.posted.length;
+  ui.send({ type: 'expand', path: 'top.u_a' });
+  await waitFor(
+    () => childrenAfter(ui.posted, mark).some((m) => m.parentPath === 'top.u_a'),
+    'the expand to be answered',
+  );
+  const answer = childrenAfter(ui.posted, mark).find((m) => m.parentPath === 'top.u_a')!;
+  assert.deepEqual(
+    (answer.rows ?? []).map((r) => r.path),
+    ['top.u_a.u_la'],
+    'the filtered `u_mid` is skipped, its visible sibling still streams',
+  );
+});
+
 test('mode 2: an expand that raced a config change does not stream a hidden level', async () => {
   setupSpace({ 'composition.filterModules': ['a'], 'composition.filterMode': 2 });
   const { IndexService } = await import('../vscode/indexService');

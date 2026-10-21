@@ -684,8 +684,15 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     // An expand may race a config change: a level that is now hidden must not
     // stream its children into the webview.
     if (this.dropped(node) || this.pruned(node)) return [];
+    // One level only: the webview splices a 'children' payload directly after
+    // its parent row, and a deep cursor-follow flushes one message per
+    // materialised level — a whole subtree here would re-splice the deeper
+    // rows once per ancestor and draw them duplicated.
     const rows: CompRow[] = [];
-    this.pushRows(node, rows);
+    for (const child of node.children ?? []) {
+      if (this.dropped(child)) continue;
+      rows.push(this.rowFor(child, false));
+    }
     return rows;
   }
 
