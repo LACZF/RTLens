@@ -395,6 +395,62 @@ test('trace module down: the top fans out to every child implementation', () => 
   assert.deepEqual(files, ['control.v', 'datapath.v']);
 });
 
+test('trace module down: a cursor on an instance traces the instantiated module', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'chip_top.v');
+  const src = fs.readFileSync(file, 'utf8');
+  // Cursor on `u_dpath`: the trace starts inside that instance, so it lands on
+  // the children of `datapath` and not on the children of `chip_top`.
+  const p = at(src, 'u_dpath', 1);
+
+  const down = traceModule(index, file, src, p.line, p.character, 'down')!;
+  assert.equal(down.name, 'datapath');
+  assert.equal(down.module, 'datapath');
+  const byLabel = Object.fromEntries(down.targets.map((t) => [t.label, t]));
+  assert.ok(byLabel['u_adder : adder'], "datapath's own child is reached");
+  assert.ok(byLabel['u_regfile : regfile']);
+  assert.equal(path.basename(byLabel['u_adder : adder'].file), 'adder.v');
+  assert.ok(!byLabel['u_ctrl : control'], "chip_top's own children are not offered");
+});
+
+test('trace module down: a cursor on the module type at an instantiation traces that module', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'chip_top.v');
+  const src = fs.readFileSync(file, 'utf8');
+  // Cursor on the `datapath` of `datapath #(...) u_dpath (...)`: the module the
+  // cursor names is the anchor, exactly as on an instance name.
+  const p = at(src, 'datapath #(', 1);
+
+  const down = traceModule(index, file, src, p.line, p.character, 'down')!;
+  assert.equal(down.name, 'datapath');
+  const files = down.targets.map((t) => path.basename(t.file)).sort();
+  assert.deepEqual(files, ['adder.v', 'regfile.v']);
+});
+
+test('trace module down: an instance of a leaf module has nothing below it', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'datapath.v');
+  const src = fs.readFileSync(file, 'utf8');
+  const p = at(src, 'u_adder', 1);
+
+  const down = traceModule(index, file, src, p.line, p.character, 'down')!;
+  assert.equal(down.name, 'adder');
+  assert.deepEqual(down.targets, [], 'adder is a leaf');
+});
+
+test('trace module down: an instance of a module that is not indexed has no target', () => {
+  const index = new HdlIndex();
+  const src = `module top (input wire a);
+  mystery u_m (.a(a));
+endmodule`;
+  index.addFile('/w/t.v', src);
+  const p = at(src, 'u_m', 1);
+
+  const down = traceModule(index, '/w/t.v', src, p.line, p.character, 'down')!;
+  assert.equal(down.name, 'mystery', 'the unknown module is named');
+  assert.deepEqual(down.targets, [], 'an unindexed module has no children');
+});
+
 test('trace at: dispatches a module cursor to the module trace and a signal cursor to the signal trace', () => {
   const index = indexDir(FIXTURES);
   const file = path.join(FIXTURES, 'datapath.v');
@@ -410,6 +466,19 @@ test('trace at: dispatches a module cursor to the module trace and a signal curs
   const sig = traceAt(index, file, src, net.line, net.character, 'down')!;
   assert.equal(sig.name, 'alu_sum');
   assert.ok(sig.targets.some((t) => t.kind === 'child-connection'), 'signal cursor traces the signal');
+});
+
+test('trace at: an instance cursor traces the module the instance instantiates', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'chip_top.v');
+  const src = fs.readFileSync(file, 'utf8');
+  const p = at(src, 'u_dpath', 1);
+
+  const down = traceAt(index, file, src, p.line, p.character, 'down')!;
+  assert.equal(down.name, 'datapath');
+  assert.ok(down.targets.every((t) => t.kind === 'child-module'), 'the instance cursor is a module trace');
+  const files = down.targets.map((t) => path.basename(t.file)).sort();
+  assert.deepEqual(files, ['adder.v', 'regfile.v']);
 });
 
 test('trace module: a cursor on a signal is not a module trace', () => {
