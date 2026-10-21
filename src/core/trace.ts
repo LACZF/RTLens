@@ -88,7 +88,7 @@ export function traceAt(
     return undefined;
   }
   const kind = hit.resolution.ok ? hit.resolution.decl.kind : undefined;
-  if (kind === 'instance' || kind === 'module') {
+  if (kind === 'instance' || kind === 'module' || instanceAt(hit.mod, line, character)) {
     return moduleTrace(index, hit.mod, direction, line, character);
   }
   return signalFromHit(index, hit, line, character, direction);
@@ -400,7 +400,7 @@ export function traceModule(
     return undefined;
   }
   const kind = hit.resolution.ok ? hit.resolution.decl.kind : undefined;
-  if (kind !== 'instance' && kind !== 'module') {
+  if (kind !== 'instance' && kind !== 'module' && !instanceAt(hit.mod, line, character)) {
     return undefined;
   }
   return moduleTrace(index, hit.mod, direction, line, character);
@@ -448,6 +448,10 @@ function moduleTrace(
  * module header goes to the place that module is instantiated; a cursor on an
  * instantiation goes to the implementation of the module that holds it, and
  * the hop from there reaches the place that module is instantiated.
+ *
+ * A cursor inside an instantiation belongs to the instantiated module, so the
+ * trace is named after that module even though the hop lands on the level that
+ * holds the instantiation.
  */
 function moduleTraceUp(
   index: HdlIndex,
@@ -456,7 +460,8 @@ function moduleTraceUp(
   character: number,
 ): TraceResult {
   const targets: TraceStep[] = [];
-  if (instanceAt(mod, line, character)) {
+  const held = instanceAt(mod, line, character);
+  if (held) {
     add(targets, {
       file: mod.file,
       range: mod.nameRange,
@@ -464,16 +469,25 @@ function moduleTraceUp(
       label: mod.name,
       detail: `implemented in ${mod.file.split('/').pop() ?? mod.file}`,
     });
-  } else {
-    for (const { mod: parent, inst } of instancesOf(index, mod.name)) {
-      add(targets, {
-        file: parent.file,
-        range: inst.nameRange,
-        kind: 'parent-instance',
-        label: `${inst.name} : ${mod.name}`,
-        detail: `instantiated in ${parent.name}`,
-      });
-    }
+    const child = index.resolveModule(held.moduleName, mod.file);
+    const name = child?.name ?? held.moduleName;
+    return {
+      name,
+      module: name,
+      direction: 'up',
+      file: mod.file,
+      range: mod.nameRange,
+      targets,
+    };
+  }
+  for (const { mod: parent, inst } of instancesOf(index, mod.name)) {
+    add(targets, {
+      file: parent.file,
+      range: inst.nameRange,
+      kind: 'parent-instance',
+      label: `${inst.name} : ${mod.name}`,
+      detail: `instantiated in ${parent.name}`,
+    });
   }
   return {
     name: mod.name,
@@ -515,7 +529,7 @@ function moduleTraceDown(
     }
     return {
       name: child?.name ?? inst.moduleName,
-      module: child?.name ?? mod.name,
+      module: child?.name ?? inst.moduleName,
       direction: 'down',
       file: child?.file ?? mod.file,
       range: child?.nameRange ?? mod.nameRange,
@@ -555,7 +569,14 @@ function moduleTraceDown(
   };
 }
 
-/** The instantiation the cursor points at, if any: its name or its module type name. */
+/**
+ * The instantiation the cursor points at, if any.
+ *
+ * Three positions belong to an instantiation: the instance name, the module
+ * type it instantiates, and a signal the instance connects. All three count as
+ * the instantiated module rather than as the module that holds the
+ * instantiation.
+ */
 function instanceAt(
   mod: ModuleDef,
   line: number,
@@ -565,6 +586,28 @@ function instanceAt(
     if (pointIn(inst.nameRange, line, character) || pointIn(inst.moduleNameRange, line, character)) {
       return inst;
     }
+    for (const conn of inst.connections) {
+      if (connectedSignalAt(conn, line, character)) {
+        return inst;
+      }
+    }
   }
   return undefined;
+}
+
+/**
+ * The connected signal of a port connection the cursor points at.
+ *
+ * The reference has to name a net of the module that holds the instantiation:
+ * a hierarchical path reaches into another instance and stays with the signal
+ * trace. The implicit connection `.name` writes the port name over the net, so
+ * there the cursor is on a port name and not on a connected signal.
+ */
+function connectedSignalAt(conn: PortConn, line: number, character: number): boolean {
+  return conn.refs.some(
+    (r) =>
+      !r.fullPath.includes('.') &&
+      !samePos(r.range, conn.nameRange) &&
+      pointIn(r.range, line, character),
+  );
 }

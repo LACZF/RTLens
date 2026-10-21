@@ -379,11 +379,13 @@ test('trace module up: an instance name ascends to the implementation of the mod
   const file = path.join(FIXTURES, 'datapath.v');
   const src = fs.readFileSync(file, 'utf8');
   // Cursor on `u_adder`; the level above it is datapath, so the hop stops at
-  // the implementation of datapath.
+  // the implementation of datapath. The position itself belongs to the
+  // instantiated module, so the trace is named after adder.
   const p = at(src, 'u_adder (');
 
   const up = traceModule(index, file, src, p.line, p.character, 'up')!;
-  assert.equal(up.name, 'datapath');
+  assert.equal(up.name, 'adder');
+  assert.equal(up.module, 'adder');
   assert.equal(up.targets.length, 1);
   const step = up.targets[0];
   assert.equal(step.kind, 'module-definition');
@@ -416,15 +418,136 @@ test('trace module up: a cursor on the module type at an instantiation ascends t
   const file = path.join(FIXTURES, 'chip_top.v');
   const src = fs.readFileSync(file, 'utf8');
   // Cursor on the `datapath` of `datapath #(...) u_dpath (...)`: the level
-  // above it is the module that holds the instantiation.
+  // above it is the module that holds the instantiation, and the position
+  // itself belongs to the instantiated module.
   const p = at(src, 'datapath #(', 1);
 
   const up = traceModule(index, file, src, p.line, p.character, 'up')!;
-  assert.equal(up.name, 'chip_top');
+  assert.equal(up.name, 'datapath');
+  assert.equal(up.module, 'datapath');
   assert.equal(up.targets.length, 1);
   assert.equal(up.targets[0].kind, 'module-definition');
   assert.equal(up.targets[0].label, 'chip_top');
   assert.equal(path.basename(up.targets[0].file), 'chip_top.v');
+});
+
+test('trace module up: a connected signal at an instantiation ascends to the holding module', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'datapath.v');
+  const src = fs.readFileSync(file, 'utf8');
+  // Cursor on the `alu_sum` net that the adder instance connects: the
+  // position belongs to the instantiated module, so the hop leaves it and
+  // lands on the implementation of the module that holds the instantiation.
+  const p = at(src, '.sum   (alu_sum)', '.sum   ('.length);
+
+  const up = traceModule(index, file, src, p.line, p.character, 'up')!;
+  assert.equal(up.name, 'adder');
+  assert.equal(up.module, 'adder');
+  assert.equal(up.targets.length, 1);
+  const step = up.targets[0];
+  assert.equal(step.kind, 'module-definition');
+  assert.equal(step.label, 'datapath');
+  assert.equal(path.basename(step.file), 'datapath.v');
+  assert.equal(srcFileLine(step.file, step.range.start.line), 'module datapath #(');
+});
+
+test('trace module down: a connected signal at an instantiation jumps to the instantiated module', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'datapath.v');
+  const src = fs.readFileSync(file, 'utf8');
+  // The same connected net, traced down: it enters the instantiated module.
+  const p = at(src, '.sum   (alu_sum)', '.sum   ('.length);
+
+  const down = traceModule(index, file, src, p.line, p.character, 'down')!;
+  assert.equal(down.name, 'adder');
+  assert.equal(down.module, 'adder');
+  assert.equal(down.targets.length, 1);
+  assert.equal(down.targets[0].kind, 'child-module');
+  assert.equal(down.targets[0].label, 'u_adder : adder');
+  assert.equal(path.basename(down.targets[0].file), 'adder.v');
+});
+
+test('trace at: a connected signal at an instantiation is a module trace', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'datapath.v');
+  const src = fs.readFileSync(file, 'utf8');
+  // The connected net is a signal of this module, but the position sits inside
+  // the instantiation, so the trace follows the hierarchy.
+  const p = at(src, '.sum   (alu_sum)', '.sum   ('.length);
+
+  const down = traceAt(index, file, src, p.line, p.character, 'down')!;
+  assert.equal(down.name, 'adder');
+  assert.ok(
+    down.targets.every((t) => t.kind === 'child-module'),
+    'the connected net is an instantiation position',
+  );
+});
+
+test('trace at: a port name at a connection keeps the signal trace', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'datapath.v');
+  const src = fs.readFileSync(file, 'utf8');
+  // The cursor on the `sum` port name: it names the port of the child module
+  // and not a net of this one, so the trace crosses into the child's port.
+  const p = at(src, '.sum   (alu_sum)', 1);
+
+  const down = traceAt(index, file, src, p.line, p.character, 'down')!;
+  assert.ok(down.targets.some((t) => t.kind === 'child-port'), 'the port name still opens the child port');
+  assert.ok(
+    down.targets.every((t) => t.kind !== 'child-module'),
+    'the port name is not an instantiation position',
+  );
+});
+
+test('trace at: an implicit connection keeps the port name with the signal trace', () => {
+  const index = new HdlIndex();
+  const src = `module leaf (input wire i, output wire o);
+  assign o = i;
+endmodule
+
+module top (input wire a, output wire y);
+  wire n;
+  leaf u1 (.i, .o);
+  assign n = a;
+endmodule`;
+  index.addFile('/w/t.v', src);
+  // The implicit connection writes the port name over the net, so the cursor
+  // is on a port name and the trace crosses into the child's port.
+  const p = at(src, '.i,', 1);
+
+  const down = traceAt(index, '/w/t.v', src, p.line, p.character, 'down')!;
+  assert.ok(down.targets.some((t) => t.kind === 'child-port'), 'the implicit port opens the child port');
+  assert.ok(
+    down.targets.every((t) => t.kind !== 'child-module'),
+    'the implicit port is not an instantiation position',
+  );
+});
+
+test('trace at: a hierarchical connected net keeps the signal trace', () => {
+  const index = new HdlIndex();
+  const src = `module leaf (input wire i, output wire o);
+  assign o = i;
+endmodule
+
+module mid (input wire a, output wire y);
+  leaf u1 (.i(a), .o(y));
+endmodule
+
+module top (input wire a, output wire y);
+  mid u2 (.a(a), .y(y));
+  leaf u3 (.i(u2.y), .o(y));
+endmodule`;
+  index.addFile('/w/t.v', src);
+  // `u2.y` reaches into another instance: it is not a net of this module, so
+  // the position stays with the signal trace.
+  const p = at(src, '.i(u2.y)', '.i('.length);
+
+  const down = traceAt(index, '/w/t.v', src, p.line, p.character, 'down')!;
+  assert.ok(down.targets.some((t) => t.kind === 'child-port'), 'the hierarchical net opens the child port');
+  assert.ok(
+    down.targets.every((t) => t.kind !== 'child-module'),
+    'the hierarchical net is not an instantiation position',
+  );
 });
 
 test('trace module down: a module jumps to its children implementations', () => {
@@ -535,6 +658,7 @@ endmodule`;
 
   const down = traceModule(index, '/w/t.v', src, p.line, p.character, 'down')!;
   assert.equal(down.name, 'mystery', 'the unknown module is named');
+  assert.equal(down.module, 'mystery', 'the position still belongs to the instantiated module');
   assert.deepEqual(down.targets, [], 'an unindexed module has no children');
 });
 
