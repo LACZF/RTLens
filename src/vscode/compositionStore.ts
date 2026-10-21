@@ -18,7 +18,7 @@ import { DB_DIR } from './database';
 const SHARD_CACHE_LIMIT = 64;
 
 /**
- * Read-only view of one folder's v3 hierarchy.
+ * Read-only view of one folder's v4 hierarchy.
  *
  * Opening the store touches only `current.json`; each module is fetched from
  * its shard on demand. A store is pinned to the generation it opened with, so a

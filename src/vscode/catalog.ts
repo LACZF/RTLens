@@ -45,7 +45,7 @@ import type { IndexService } from './indexService';
  * signal/module `relations.json` (which `DatabaseService` owns).
  *
  * - `index.json`     - module definitions + instantiation edges (structural base; artifact)
- * - `hierarchy/`     - v3 sharded hierarchy; Composition reads one module at a time
+ * - `hierarchy/`     - v4 sharded hierarchy; Composition reads one module at a time
  * - `graph.json`     - default connectivity graph per top (artifact)
  *
  * Every folder gets its own copy under `<folder>/.vscode/rtlens/` so a

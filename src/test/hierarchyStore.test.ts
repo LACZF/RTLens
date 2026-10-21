@@ -117,10 +117,10 @@ test('hierarchy store: an unreadable or foreign manifest is rejected', () => {
   assert.equal(parseManifest(JSON.stringify({ ...JSON.parse(good), version: 2 })), undefined);
   assert.equal(parseManifest(JSON.stringify({ ...JSON.parse(good), generation: '../../etc' })), undefined);
   assert.equal(parseManifest(JSON.stringify({ ...JSON.parse(good), generation: '' })), undefined);
-  assert.equal(parseManifest(JSON.stringify({ version: 3, tops: [] })), undefined);
+  assert.equal(parseManifest(JSON.stringify({ version: HIERARCHY_STORE_VERSION, tops: [] })), undefined);
 
   const partial = parseManifest(
-    JSON.stringify({ version: 3, generation: 'g-x', tops: ['top', 7], counts: { modules: 1 } }),
+    JSON.stringify({ version: HIERARCHY_STORE_VERSION, generation: 'g-x', tops: ['top', 7], counts: { modules: 1 } }),
   )!;
   assert.deepEqual(partial.tops, ['top'], 'non-string tops are dropped');
   assert.deepEqual(partial.counts, { modules: 1, instances: 0 }, 'missing counts default to zero');
@@ -136,11 +136,11 @@ test('hierarchy store: a shard from another version or with a broken record is r
   assert.equal(
     parseShard(JSON.stringify({ ...JSON.parse(text), version: 2 })),
     undefined,
-    'a v2 shard is not mistaken for v3',
+    'a v2 shard is not mistaken for the current version',
   );
-  assert.equal(parseShard(JSON.stringify({ version: 3, modules: [] })), undefined);
+  assert.equal(parseShard(JSON.stringify({ version: HIERARCHY_STORE_VERSION, modules: [] })), undefined);
   assert.equal(
-    parseShard(JSON.stringify({ version: 3, modules: { top: { file: '/w/top.v' } } })),
+    parseShard(JSON.stringify({ version: HIERARCHY_STORE_VERSION, modules: { top: { file: '/w/top.v' } } })),
     undefined,
     'a record without children is unusable',
   );

@@ -1,9 +1,9 @@
 /**
- * Read-optimised hierarchy store (v3).
+ * Read-optimised hierarchy store (v4).
  *
  * The Composition view only ever needs one module record at a time: a root, a
  * level the reader opened, or the modules on a first-branch path. The v2
- * `hierarchy.json` forces a full parse before any of that is possible, so v3
+ * `hierarchy.json` forces a full parse before any of that is possible, so v4
  * splits the same model into fixed shards:
  *
  * ```
@@ -24,7 +24,7 @@
 
 import type { HierarchyDatabase, HierarchyEdge, HierarchyModule } from './hierarchyDb';
 
-export const HIERARCHY_STORE_VERSION = 3;
+export const HIERARCHY_STORE_VERSION = 4;
 /** Folder under `.vscode/rtlens/` that holds the manifest and generations. */
 export const HIERARCHY_DIR = 'hierarchy';
 /** Manifest name; it also names the generation the reader must use. */

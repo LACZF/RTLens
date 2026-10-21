@@ -14,7 +14,7 @@ import * as path from 'node:path';
 import { Module } from 'node:module';
 
 import { documentFor, vscode } from './vscodeStub';
-import { shardFile, shardOf } from '../core/hierarchyStore';
+import { HIERARCHY_STORE_VERSION, shardFile, shardOf } from '../core/hierarchyStore';
 
 const loader = Module as unknown as { _load: (request: string, ...rest: unknown[]) => unknown };
 const originalLoad = loader._load;
@@ -82,7 +82,7 @@ test('catalog: a refresh writes index/hierarchy/graph under .vscode/rtlens', asy
     assert.ok(fs.existsSync(file), `${path.basename(file)} is on disk`);
   }
   const hierarchy = JSON.parse(fs.readFileSync(HIERARCHY_FILE, 'utf8'));
-  assert.equal(hierarchy.version, 3, 'the manifest records the store version');
+  assert.equal(hierarchy.version, HIERARCHY_STORE_VERSION, 'the manifest records the store version');
   assert.ok(hierarchy.source, 'the manifest records a source fingerprint');
   const shard = JSON.parse(
     fs.readFileSync(path.join(HIERARCHY_BASE, hierarchy.generation, shardFile(shardOf('top'))), 'utf8'),
