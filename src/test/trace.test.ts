@@ -374,16 +374,57 @@ test('trace module up: a module jumps to the instance that instantiates it', () 
   assert.equal(srcFileLine(step.file, step.range.start.line), '  ) u_dpath (');
 });
 
-test('trace module up: an instance name ascends from the module it sits in', () => {
+test('trace module up: an instance name ascends to the implementation of the module it sits in', () => {
   const index = indexDir(FIXTURES);
   const file = path.join(FIXTURES, 'datapath.v');
   const src = fs.readFileSync(file, 'utf8');
-  // Cursor on `u_adder`; the containing module is datapath, so up is its parent.
+  // Cursor on `u_adder`; the level above it is datapath, so the hop stops at
+  // the implementation of datapath.
   const p = at(src, 'u_adder (');
 
   const up = traceModule(index, file, src, p.line, p.character, 'up')!;
   assert.equal(up.name, 'datapath');
-  assert.equal(up.targets[0].label, 'u_dpath : datapath');
+  assert.equal(up.targets.length, 1);
+  const step = up.targets[0];
+  assert.equal(step.kind, 'module-definition');
+  assert.equal(step.label, 'datapath');
+  assert.equal(path.basename(step.file), 'datapath.v');
+  assert.equal(srcFileLine(step.file, step.range.start.line), 'module datapath #(');
+});
+
+test('trace module up: the hop from the implementation reaches the instantiation of that module', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'datapath.v');
+  const src = fs.readFileSync(file, 'utf8');
+  // First hop: the instance in datapath lands on the implementation of datapath.
+  const inst = at(src, 'u_adder (');
+  const first = traceModule(index, file, src, inst.line, inst.character, 'up')!;
+  const step = first.targets[0];
+
+  // Second hop from that implementation: the place datapath is instantiated.
+  const parentSrc = fs.readFileSync(step.file, 'utf8');
+  const head = at(parentSrc, 'module datapath', 'module '.length);
+  const second = traceModule(index, step.file, parentSrc, head.line, head.character, 'up')!;
+  assert.equal(second.targets.length, 1);
+  assert.equal(second.targets[0].kind, 'parent-instance');
+  assert.equal(second.targets[0].label, 'u_dpath : datapath');
+  assert.equal(path.basename(second.targets[0].file), 'chip_top.v');
+});
+
+test('trace module up: a cursor on the module type at an instantiation ascends to the holding module', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'chip_top.v');
+  const src = fs.readFileSync(file, 'utf8');
+  // Cursor on the `datapath` of `datapath #(...) u_dpath (...)`: the level
+  // above it is the module that holds the instantiation.
+  const p = at(src, 'datapath #(', 1);
+
+  const up = traceModule(index, file, src, p.line, p.character, 'up')!;
+  assert.equal(up.name, 'chip_top');
+  assert.equal(up.targets.length, 1);
+  assert.equal(up.targets[0].kind, 'module-definition');
+  assert.equal(up.targets[0].label, 'chip_top');
+  assert.equal(path.basename(up.targets[0].file), 'chip_top.v');
 });
 
 test('trace module down: a module jumps to its children implementations', () => {

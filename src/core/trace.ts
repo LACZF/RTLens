@@ -427,7 +427,7 @@ function blankTrace(
   return moduleTrace(index, mod, direction, line, character);
 }
 
-/** Up = the instances that instantiate `mod`; down = the modules below the cursor. */
+/** Up = the level above the cursor; down = the modules below the cursor. */
 function moduleTrace(
   index: HdlIndex,
   mod: ModuleDef,
@@ -435,20 +435,45 @@ function moduleTrace(
   line: number,
   character: number,
 ): TraceResult {
-  return direction === 'up' ? moduleTraceUp(index, mod) : moduleTraceDown(index, mod, line, character);
+  return direction === 'up'
+    ? moduleTraceUp(index, mod, line, character)
+    : moduleTraceDown(index, mod, line, character);
 }
 
-/** Up: the instances that instantiate the module the cursor is in. */
-function moduleTraceUp(index: HdlIndex, mod: ModuleDef): TraceResult {
+/**
+ * Up: the level above the cursor.
+ *
+ * The climb visits both positions of every level it passes: the module's
+ * implementation and the place where the module is instantiated. A cursor on a
+ * module header goes to the place that module is instantiated; a cursor on an
+ * instantiation goes to the implementation of the module that holds it, and
+ * the hop from there reaches the place that module is instantiated.
+ */
+function moduleTraceUp(
+  index: HdlIndex,
+  mod: ModuleDef,
+  line: number,
+  character: number,
+): TraceResult {
   const targets: TraceStep[] = [];
-  for (const { mod: parent, inst } of instancesOf(index, mod.name)) {
+  if (instanceAt(mod, line, character)) {
     add(targets, {
-      file: parent.file,
-      range: inst.nameRange,
-      kind: 'parent-instance',
-      label: `${inst.name} : ${mod.name}`,
-      detail: `instantiated in ${parent.name}`,
+      file: mod.file,
+      range: mod.nameRange,
+      kind: 'module-definition',
+      label: mod.name,
+      detail: `implemented in ${mod.file.split('/').pop() ?? mod.file}`,
     });
+  } else {
+    for (const { mod: parent, inst } of instancesOf(index, mod.name)) {
+      add(targets, {
+        file: parent.file,
+        range: inst.nameRange,
+        kind: 'parent-instance',
+        label: `${inst.name} : ${mod.name}`,
+        detail: `instantiated in ${parent.name}`,
+      });
+    }
   }
   return {
     name: mod.name,
