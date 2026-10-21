@@ -1,4 +1,4 @@
-import type { InstanceSite, ModuleDef, PortConn, Range, RefSite } from './ast';
+import type { InstanceSite, ModuleDef, PortConn, Pos, Range, RefSite } from './ast';
 import type { HdlIndex } from './index';
 import { generateScopes, generateScopedName } from './index';
 import { instancesOf, resolveAt, type ResolvedDecl } from './resolve';
@@ -572,10 +572,11 @@ function moduleTraceDown(
 /**
  * The instantiation the cursor points at, if any.
  *
- * Three positions belong to an instantiation: the instance name, the module
- * type it instantiates, and a signal the instance connects. All three count as
- * the instantiated module rather than as the module that holds the
- * instantiation.
+ * Four positions belong to an instantiation: the instance name, the module type
+ * it instantiates, a signal the instance connects, and the rest of the
+ * statement - the parameter overrides and the text behind a connection. All of
+ * them count as the instantiated module rather than as the module that holds
+ * the instantiation.
  */
 function instanceAt(
   mod: ModuleDef,
@@ -586,13 +587,58 @@ function instanceAt(
     if (pointIn(inst.nameRange, line, character) || pointIn(inst.moduleNameRange, line, character)) {
       return inst;
     }
+  }
+  for (const inst of mod.instances) {
     for (const conn of inst.connections) {
       if (connectedSignalAt(conn, line, character)) {
         return inst;
       }
     }
   }
-  return undefined;
+  const owners = mod.instances.filter((inst) => statementPositionAt(inst, line, character));
+  if (owners.length === 0) {
+    return undefined;
+  }
+  // One statement can hold several instances (`mod u1 (...), u2 (...)`), so the
+  // cursor belongs to the last one that starts before it.
+  let owner = owners[0];
+  for (const inst of owners) {
+    if (positionBefore(inst.nameRange.start, line, character)) {
+      owner = inst;
+    }
+  }
+  return owner;
+}
+
+/**
+ * A position inside the instantiation statement that names no signal.
+ *
+ * The parameter overrides and the connections belong to the instantiated
+ * module, so a cursor that sits behind them - on a parameter name, on a value,
+ * on a comma - traces that module and not the module that holds the
+ * instantiation. A port name and a hierarchical path are left out: the first
+ * names a port of the child module, the second a net of another instance, and
+ * both keep the signal trace.
+ */
+function statementPositionAt(inst: InstanceSite, line: number, character: number): boolean {
+  if (!pointIn(inst.range, line, character)) {
+    return false;
+  }
+  for (const conn of inst.connections) {
+    if (pointIn(conn.nameRange, line, character)) {
+      return false;
+    }
+    for (const ref of conn.refs) {
+      if (ref.fullPath.includes('.') && pointIn(ref.range, line, character)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+function positionBefore(pos: Pos, line: number, character: number): boolean {
+  return pos.line < line || (pos.line === line && pos.character < character);
 }
 
 /**

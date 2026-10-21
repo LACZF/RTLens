@@ -550,6 +550,109 @@ endmodule`;
   );
 });
 
+test('trace at: a parameter override at an instantiation is a module trace', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'datapath.v');
+  const src = fs.readFileSync(file, 'utf8');
+  // The parameter override belongs to the instantiated module, so the cursor
+  // on the name of the override traces that module and not this one.
+  const p = at(src, '.WIDTH (WIDTH)', 1);
+
+  const down = traceAt(index, file, src, p.line, p.character, 'down')!;
+  assert.equal(down.name, 'adder');
+  assert.equal(down.module, 'adder');
+  assert.equal(down.targets.length, 1);
+  assert.equal(down.targets[0].kind, 'child-module');
+  assert.equal(down.targets[0].label, 'u_adder : adder');
+  assert.equal(path.basename(down.targets[0].file), 'adder.v');
+});
+
+test('trace module up: a parameter override ascends to the holding module', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'datapath.v');
+  const src = fs.readFileSync(file, 'utf8');
+  // The same parameter override, traced up: the hop leaves the instantiated
+  // module and lands on the implementation of the module that holds it.
+  const p = at(src, '.WIDTH (WIDTH)', 1);
+
+  const up = traceModule(index, file, src, p.line, p.character, 'up')!;
+  assert.equal(up.name, 'adder');
+  assert.equal(up.module, 'adder');
+  assert.equal(up.targets.length, 1);
+  assert.equal(up.targets[0].kind, 'module-definition');
+  assert.equal(up.targets[0].label, 'datapath');
+  assert.equal(path.basename(up.targets[0].file), 'datapath.v');
+});
+
+test('trace at: the text behind a connection is a module trace', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'datapath.v');
+  const src = fs.readFileSync(file, 'utf8');
+  // The cursor sits behind the connection, on the comma that follows it. No
+  // signal is named there, but the position still belongs to the instance.
+  const p = at(src, '.sum   (alu_sum)', '.sum   (alu_sum)'.length);
+
+  const down = traceAt(index, file, src, p.line, p.character, 'down')!;
+  assert.equal(down.name, 'adder');
+  assert.equal(down.module, 'adder');
+  assert.equal(down.targets.length, 1);
+  assert.equal(down.targets[0].kind, 'child-module');
+  assert.equal(down.targets[0].label, 'u_adder : adder');
+});
+
+test('trace at: a blank line inside an instantiation traces the instantiated module', () => {
+  const index = new HdlIndex();
+  const src = `module leaf (input wire i, output wire o);
+  assign o = i;
+endmodule
+
+module top (input wire a, output wire y);
+  wire n;
+  leaf u1 (
+    .i (n),
+
+    .o (y)
+  );
+  assign n = a;
+endmodule`;
+  index.addFile('/w/t.v', src);
+  // The blank line between two connections is inside the instantiation, so it
+  // traces the instantiated module and not the module that holds it.
+  const line = src.split('\n').findIndex((l, i) => i > 6 && l.trim() === '');
+
+  const down = traceAt(index, '/w/t.v', src, line, 0, 'down')!;
+  assert.equal(down.name, 'leaf');
+  assert.equal(down.module, 'leaf');
+  assert.equal(down.targets.length, 1);
+  assert.equal(down.targets[0].kind, 'child-module');
+  assert.equal(down.targets[0].label, 'u1 : leaf');
+});
+
+test('trace at: a statement with several instances traces the instance it sits in', () => {
+  const index = new HdlIndex();
+  const src = `module leaf (input wire i, output wire o);
+  assign o = i;
+endmodule
+
+module top (input wire a, output wire y);
+  wire n;
+  leaf u1 (.i(n), .o(y)),
+       u2 (.i(a), .o(y));
+  assign n = a;
+endmodule`;
+  index.addFile('/w/t.v', src);
+  // One statement can hold several instances. The cursor behind the first
+  // connection belongs to the first instance, the one behind the second
+  // connection to the second.
+  const first = at(src, '.i(n),', '.i(n),'.length);
+  const second = at(src, '.i(a),', '.i(a),'.length);
+
+  const downFirst = traceAt(index, '/w/t.v', src, first.line, first.character, 'down')!;
+  assert.equal(downFirst.targets[0].label, 'u1 : leaf');
+  const downSecond = traceAt(index, '/w/t.v', src, second.line, second.character, 'down')!;
+  assert.equal(downSecond.targets[0].label, 'u2 : leaf');
+});
+
 test('trace module down: a module jumps to its children implementations', () => {
   const index = indexDir(FIXTURES);
   const file = path.join(FIXTURES, 'datapath.v');
