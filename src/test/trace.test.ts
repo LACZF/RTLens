@@ -51,6 +51,35 @@ function ctx() {
   return { index, src: SRC };
 }
 
+// 0: module leaf (input wire i, output wire o);
+// 1:   assign o = i;
+// 2: (blank, inside leaf)
+// 3: endmodule
+// 4: (blank, between the two modules)
+// 5: module top (input wire a, output wire y);
+// 6:   wire n;
+// 7:    (whitespace only, inside top)
+// 8:   leaf u1 (.i(n), .o(y));
+// 9:   assign n = a;
+// 10: endmodule
+const BLANK_SRC = `module leaf (input wire i, output wire o);
+  assign o = i;
+
+endmodule
+
+module top (input wire a, output wire y);
+  wire n;
+   
+  leaf u1 (.i(n), .o(y));
+  assign n = a;
+endmodule`;
+
+function blankCtx() {
+  const index = new HdlIndex();
+  index.addFile('/w/t.v', BLANK_SRC);
+  return { index, src: BLANK_SRC };
+}
+
 /** Line/column index (0-based) of the first occurrence of `needle`. */
 function locate(text: string, needle: string): number {
   return text.indexOf(needle);
@@ -395,39 +424,39 @@ test('trace module down: the top fans out to every child implementation', () => 
   assert.deepEqual(files, ['control.v', 'datapath.v']);
 });
 
-test('trace module down: a cursor on an instance traces the instantiated module', () => {
+test('trace module down: a cursor on an instance jumps to the module implementation', () => {
   const index = indexDir(FIXTURES);
   const file = path.join(FIXTURES, 'chip_top.v');
   const src = fs.readFileSync(file, 'utf8');
-  // Cursor on `u_dpath`: the trace starts inside that instance, so it lands on
-  // the children of `datapath` and not on the children of `chip_top`.
+  // Cursor on `u_dpath`: the instance names exactly one module, so the trace
+  // lands on that module's definition and there is nothing to choose.
   const p = at(src, 'u_dpath', 1);
 
   const down = traceModule(index, file, src, p.line, p.character, 'down')!;
   assert.equal(down.name, 'datapath');
   assert.equal(down.module, 'datapath');
-  const byLabel = Object.fromEntries(down.targets.map((t) => [t.label, t]));
-  assert.ok(byLabel['u_adder : adder'], "datapath's own child is reached");
-  assert.ok(byLabel['u_regfile : regfile']);
-  assert.equal(path.basename(byLabel['u_adder : adder'].file), 'adder.v');
-  assert.ok(!byLabel['u_ctrl : control'], "chip_top's own children are not offered");
+  assert.equal(down.targets.length, 1, 'one instance points at one module');
+  const step = down.targets[0];
+  assert.equal(step.kind, 'child-module');
+  assert.equal(step.label, 'u_dpath : datapath');
+  assert.equal(path.basename(step.file), 'datapath.v');
 });
 
-test('trace module down: a cursor on the module type at an instantiation traces that module', () => {
+test('trace module down: a cursor on the module type at an instantiation jumps to that module', () => {
   const index = indexDir(FIXTURES);
   const file = path.join(FIXTURES, 'chip_top.v');
   const src = fs.readFileSync(file, 'utf8');
   // Cursor on the `datapath` of `datapath #(...) u_dpath (...)`: the module the
-  // cursor names is the anchor, exactly as on an instance name.
+  // cursor names is the one the trace lands on, exactly as on an instance name.
   const p = at(src, 'datapath #(', 1);
 
   const down = traceModule(index, file, src, p.line, p.character, 'down')!;
   assert.equal(down.name, 'datapath');
-  const files = down.targets.map((t) => path.basename(t.file)).sort();
-  assert.deepEqual(files, ['adder.v', 'regfile.v']);
+  assert.equal(down.targets.length, 1);
+  assert.equal(path.basename(down.targets[0].file), 'datapath.v');
 });
 
-test('trace module down: an instance of a leaf module has nothing below it', () => {
+test('trace module down: an instance of a leaf module jumps to its definition', () => {
   const index = indexDir(FIXTURES);
   const file = path.join(FIXTURES, 'datapath.v');
   const src = fs.readFileSync(file, 'utf8');
@@ -435,7 +464,24 @@ test('trace module down: an instance of a leaf module has nothing below it', () 
 
   const down = traceModule(index, file, src, p.line, p.character, 'down')!;
   assert.equal(down.name, 'adder');
-  assert.deepEqual(down.targets, [], 'adder is a leaf');
+  assert.equal(down.targets.length, 1);
+  assert.equal(path.basename(down.targets[0].file), 'adder.v');
+});
+
+test('trace module down: a leaf module lands on its own definition', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'adder.v');
+  const src = fs.readFileSync(file, 'utf8');
+  // `adder` instantiates nothing, so there is no child to choose.
+  const p = at(src, 'module adder', 'module '.length);
+
+  const down = traceModule(index, file, src, p.line, p.character, 'down')!;
+  assert.equal(down.name, 'adder');
+  assert.equal(down.targets.length, 1);
+  const step = down.targets[0];
+  assert.equal(step.kind, 'module-definition');
+  assert.equal(step.label, 'adder');
+  assert.equal(path.basename(step.file), 'adder.v');
 });
 
 test('trace module down: an instance of a module that is not indexed has no target', () => {
@@ -477,8 +523,8 @@ test('trace at: an instance cursor traces the module the instance instantiates',
   const down = traceAt(index, file, src, p.line, p.character, 'down')!;
   assert.equal(down.name, 'datapath');
   assert.ok(down.targets.every((t) => t.kind === 'child-module'), 'the instance cursor is a module trace');
-  const files = down.targets.map((t) => path.basename(t.file)).sort();
-  assert.deepEqual(files, ['adder.v', 'regfile.v']);
+  assert.equal(down.targets.length, 1, 'the instance names one module, so nothing is offered');
+  assert.equal(path.basename(down.targets[0].file), 'datapath.v');
 });
 
 test('trace module: a cursor on a signal is not a module trace', () => {
@@ -488,6 +534,59 @@ test('trace module: a cursor on a signal is not a module trace', () => {
   const p = at(src, 'wire [WIDTH-1:0] alu_sum', 'wire [WIDTH-1:0] '.length);
   assert.equal(traceModule(index, file, src, p.line, p.character, 'up'), undefined);
   assert.equal(traceModule(index, file, src, p.line, p.character, 'down'), undefined);
+});
+
+test('trace at: a cursor on an empty line traces the module it sits in', () => {
+  const { index, src } = blankCtx();
+  // Line 7 holds nothing but spaces, inside `top`.
+  const down = traceAt(index, '/w/t.v', src, 7, 1, 'down')!;
+  assert.equal(down.name, 'top');
+  assert.equal(down.module, 'top');
+  assert.deepEqual(down.targets.map((t) => t.label), ['u1 : leaf']);
+});
+
+test('trace at: a cursor on an empty line traces up to the instances of that module', () => {
+  const { index, src } = blankCtx();
+  // Line 2 is empty, inside `leaf`, which `top` instantiates.
+  const up = traceAt(index, '/w/t.v', src, 2, 0, 'up')!;
+  assert.equal(up.name, 'leaf');
+  assert.equal(up.targets[0].label, 'u1 : leaf');
+});
+
+test('trace at: a blank line outside every module traces nothing', () => {
+  const { index, src } = blankCtx();
+  // Line 4 sits between the two modules, so it belongs to neither.
+  assert.equal(traceAt(index, '/w/t.v', src, 4, 0, 'up'), undefined);
+  assert.equal(traceAt(index, '/w/t.v', src, 4, 0, 'down'), undefined);
+});
+
+test('trace at: a blank line traces the current module, not an instantiated one', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'chip_top.v');
+  const src = fs.readFileSync(file, 'utf8');
+  // The empty line after the port list: the current module is chip_top, so the
+  // children are chip_top's own and not the ones of the module it instantiates.
+  const down = traceAt(index, file, src, 12, 0, 'down')!;
+  assert.equal(down.name, 'chip_top');
+  const files = down.targets.map((t) => path.basename(t.file)).sort();
+  assert.deepEqual(files, ['control.v', 'datapath.v']);
+});
+
+test('trace module: a blank cursor traces the module it sits in', () => {
+  const { index, src } = blankCtx();
+  const down = traceModule(index, '/w/t.v', src, 7, 1, 'down')!;
+  assert.equal(down.name, 'top');
+  assert.deepEqual(down.targets.map((t) => t.label), ['u1 : leaf']);
+});
+
+test('trace at: a blank line in a leaf module lands on the module definition', () => {
+  const { index, src } = blankCtx();
+  // Line 2 is empty, inside `leaf`, which instantiates nothing.
+  const down = traceAt(index, '/w/t.v', src, 2, 0, 'down')!;
+  assert.equal(down.name, 'leaf');
+  assert.equal(down.targets.length, 1);
+  assert.equal(down.targets[0].kind, 'module-definition');
+  assert.equal(down.targets[0].label, 'leaf');
 });
 
 /** The text of a 0-based line in a file under the fixture directory. */

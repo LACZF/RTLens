@@ -38,7 +38,9 @@ export type TraceStepKind =
   /** A module traces up to the instance that instantiates its parent context? */
   | 'parent-instance'
   /** A module traces down to a child module's definition. */
-  | 'child-module';
+  | 'child-module'
+  /** A module trace lands on the module's own definition. */
+  | 'module-definition';
 
 export interface TraceStep {
   file: string;
@@ -76,7 +78,13 @@ export function traceAt(
   direction: TraceDirection,
 ): TraceResult | undefined {
   const hit = resolveAt(index, file, source, line, character);
-  if (!hit || !hit.mod) {
+  if (!hit) {
+    // No symbol under the cursor: an empty line or the space between two
+    // tokens names neither a signal nor a module, so the trace follows the
+    // module the cursor sits in.
+    return blankTrace(index, file, line, character, direction);
+  }
+  if (!hit.mod) {
     return undefined;
   }
   const kind = hit.resolution.ok ? hit.resolution.decl.kind : undefined;
@@ -385,7 +393,10 @@ export function traceModule(
   direction: TraceDirection,
 ): TraceResult | undefined {
   const hit = resolveAt(index, file, source, line, character);
-  if (!hit || !hit.mod) {
+  if (!hit) {
+    return blankTrace(index, file, line, character, direction);
+  }
+  if (!hit.mod) {
     return undefined;
   }
   const kind = hit.resolution.ok ? hit.resolution.decl.kind : undefined;
@@ -396,14 +407,27 @@ export function traceModule(
 }
 
 /**
- * Up = the instances that instantiate `mod`; down = the modules the anchor
- * instantiates.
+ * The trace of the module a cursor with no symbol under it sits in.
  *
- * The anchor is the module the hop starts from. A cursor on an instantiation
- * means "go into this instance", so the anchor is the *instantiated* module and
- * the hop lands on that module's children - one level deeper than the
- * containing module's. Anywhere else the containing module is the anchor.
+ * An empty line, or the space between two tokens, names no signal and no
+ * module, so the trace falls back to the module the cursor is in: up reaches
+ * the instances that instantiate it, down the modules it instantiates.
  */
+function blankTrace(
+  index: HdlIndex,
+  file: string,
+  line: number,
+  character: number,
+  direction: TraceDirection,
+): TraceResult | undefined {
+  const mod = index.moduleAtLine(file, line);
+  if (!mod) {
+    return undefined;
+  }
+  return moduleTrace(index, mod, direction, line, character);
+}
+
+/** Up = the instances that instantiate `mod`; down = the modules below the cursor. */
 function moduleTrace(
   index: HdlIndex,
   mod: ModuleDef,
@@ -411,25 +435,51 @@ function moduleTrace(
   line: number,
   character: number,
 ): TraceResult {
-  const anchor = direction === 'down' ? downAnchor(index, mod, line, character) : { module: mod, name: mod.name };
+  return direction === 'up' ? moduleTraceUp(index, mod) : moduleTraceDown(index, mod, line, character);
+}
+
+/** Up: the instances that instantiate the module the cursor is in. */
+function moduleTraceUp(index: HdlIndex, mod: ModuleDef): TraceResult {
   const targets: TraceStep[] = [];
-  if (direction === 'up') {
-    for (const { mod: parent, inst } of instancesOf(index, mod.name)) {
-      add(targets, {
-        file: parent.file,
-        range: inst.nameRange,
-        kind: 'parent-instance',
-        label: `${inst.name} : ${mod.name}`,
-        detail: `instantiated in ${parent.name}`,
-      });
-    }
-  } else if (anchor.module) {
-    const start = anchor.module;
-    for (const inst of start.instances) {
-      const child = index.resolveModule(inst.moduleName, start.file);
-      if (!child) {
-        continue;
-      }
+  for (const { mod: parent, inst } of instancesOf(index, mod.name)) {
+    add(targets, {
+      file: parent.file,
+      range: inst.nameRange,
+      kind: 'parent-instance',
+      label: `${inst.name} : ${mod.name}`,
+      detail: `instantiated in ${parent.name}`,
+    });
+  }
+  return {
+    name: mod.name,
+    module: mod.name,
+    direction: 'up',
+    file: mod.file,
+    range: mod.nameRange,
+    targets,
+  };
+}
+
+/**
+ * Down: the modules below the cursor.
+ *
+ * On an instantiation the instance names exactly one module, so the trace lands
+ * on that module's implementation - there is nothing to choose. Anywhere else
+ * the children of the module the cursor is in are the candidates and the
+ * caller picks one; a module without children sends the trace back to its own
+ * definition.
+ */
+function moduleTraceDown(
+  index: HdlIndex,
+  mod: ModuleDef,
+  line: number,
+  character: number,
+): TraceResult {
+  const inst = instanceAt(mod, line, character);
+  if (inst) {
+    const child = index.resolveModule(inst.moduleName, mod.file);
+    const targets: TraceStep[] = [];
+    if (child) {
       add(targets, {
         file: child.file,
         range: child.nameRange,
@@ -438,39 +488,46 @@ function moduleTrace(
         detail: `${child.name} defined in ${child.file.split('/').pop() ?? child.file}`,
       });
     }
+    return {
+      name: child?.name ?? inst.moduleName,
+      module: child?.name ?? mod.name,
+      direction: 'down',
+      file: child?.file ?? mod.file,
+      range: child?.nameRange ?? mod.nameRange,
+      targets,
+    };
   }
-  const from = anchor.module ?? mod;
+  const targets: TraceStep[] = [];
+  for (const child of mod.instances) {
+    const impl = index.resolveModule(child.moduleName, mod.file);
+    if (!impl) {
+      continue;
+    }
+    add(targets, {
+      file: impl.file,
+      range: impl.nameRange,
+      kind: 'child-module',
+      label: `${child.name} : ${impl.name}`,
+      detail: `${impl.name} defined in ${impl.file.split('/').pop() ?? impl.file}`,
+    });
+  }
+  if (targets.length === 0) {
+    add(targets, {
+      file: mod.file,
+      range: mod.nameRange,
+      kind: 'module-definition',
+      label: mod.name,
+      detail: 'no child module',
+    });
+  }
   return {
-    name: anchor.name,
-    module: from.name,
-    direction,
-    file: from.file,
-    range: from.nameRange,
+    name: mod.name,
+    module: mod.name,
+    direction: 'down',
+    file: mod.file,
+    range: mod.nameRange,
     targets,
   };
-}
-
-/**
- * The module a downward module trace starts from, and the name to report when
- * it has none.
- *
- * A cursor on an instantiation - the instance name or the module type name of
- * the instantiation statement - points *into* that instance, so the trace
- * starts at the instantiated module. A module that is not indexed (an external
- * library or a black box) has no children to show.
- */
-function downAnchor(
-  index: HdlIndex,
-  mod: ModuleDef,
-  line: number,
-  character: number,
-): { module?: ModuleDef; name: string } {
-  const inst = instanceAt(mod, line, character);
-  if (!inst) {
-    return { module: mod, name: mod.name };
-  }
-  const child = index.resolveModule(inst.moduleName, mod.file);
-  return { module: child, name: child?.name ?? inst.moduleName };
 }
 
 /** The instantiation the cursor points at, if any: its name or its module type name. */
