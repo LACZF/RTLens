@@ -233,6 +233,66 @@ test('db source: file path filter hides modules defined in that file', async () 
   );
 });
 
+test('db source: a module-name filter hides instances of that module', async () => {
+  setupSpace({ 'composition.filterModules': ['a'], 'composition.filterMode': 2 });
+  const { IndexService } = await import('../vscode/indexService');
+  const { CatalogService } = await import('../vscode/catalog');
+  const svc = new IndexService(vscode.window.createOutputChannel('test') as never);
+  for (const [rel, src] of FILES) svc.index.addFile(path.join(TEMP, rel), src);
+  const catalog = new CatalogService(svc as never, { appendLine() {} } as never);
+  await catalog.refresh('full');
+  catalog.dispose();
+
+  const { CompositionStore } = await import('../vscode/compositionStore');
+  assert.ok(CompositionStore.open(TEMP), 'the hierarchy DB is on disk');
+
+  const { CompositionViewProvider } = await import('../vscode/compView');
+  const provider = new CompositionViewProvider(svc);
+  const ui = attach(provider);
+  await provider.setContext(path.join(TEMP, 'top/top.v'), 0);
+  await provider.setExpandedAll(true);
+  assert.deepEqual(
+    ui.rowsPaths(),
+    ['top', 'top.u_b', 'top.u_la2'],
+    'module `a` is resolved against the db store and hidden by name (db source)',
+  );
+});
+
+test('config change: a name filter reaches a DB-backed tree through the host refresh path', async () => {
+  setupSpace();
+  const { IndexService } = await import('../vscode/indexService');
+  const { CatalogService } = await import('../vscode/catalog');
+  const svc = new IndexService(vscode.window.createOutputChannel('test') as never);
+  for (const [rel, src] of FILES) svc.index.addFile(path.join(TEMP, rel), src);
+  const catalog = new CatalogService(svc as never, { appendLine() {} } as never);
+  await catalog.refresh('full');
+  catalog.dispose();
+
+  const { CompositionViewProvider } = await import('../vscode/compView');
+  const provider = new CompositionViewProvider(svc);
+  const ui = attach(provider);
+  await provider.setContext(path.join(TEMP, 'top/top.v'), 0);
+  await provider.setExpandedAll(true);
+  assert.deepEqual(
+    ui.rowsPaths(),
+    ['top', 'top.u_a', 'top.u_a.u_la', 'top.u_a.u_mid', 'top.u_a.u_mid.u_leaf', 'top.u_b', 'top.u_la2'],
+    'the whole design is on screen without a filter',
+  );
+
+  // The user edits the setting; the host path is refreshIndex -> svc.refresh()
+  // (which rereads the config) -> composition.refresh().
+  settings['composition.filterModules'] = ['a'];
+  settings['composition.filterMode'] = 2;
+  await svc.refresh();
+  await provider.refresh();
+
+  assert.deepEqual(
+    ui.rowsPaths(),
+    ['top', 'top.u_b', 'top.u_la2'],
+    'the name filter applies to the db-backed tree after the host refresh',
+  );
+});
+
 test('mode 2: following the cursor into a hidden subtree streams nothing', async () => {
   setupSpace({ 'composition.filterModules': ['a'], 'composition.filterMode': 2 });
   const { IndexService } = await import('../vscode/indexService');
