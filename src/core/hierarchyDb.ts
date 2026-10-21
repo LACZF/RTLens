@@ -95,8 +95,12 @@ export interface HierarchyDatabase {
  *
  * A module defined more than once (an RTL definition and a black-box stub, say)
  * is merged under one name: its children are concatenated so no instantiation is
- * lost, and the first definition supplies `file`/`nameRange`. `preferTops` names
- * are always kept in `tops`, even when something instantiates them.
+ * lost, and the first definition supplies `file`/`nameRange`. Siblings that
+ * repeat one instance name across the merged definitions (or from `ifdef`
+ * alternatives inside a single definition, where both branches are parsed) keep
+ * only the first edge — the tree is keyed by path and would draw the row
+ * twice. `preferTops` names are always kept in `tops`, even when something
+ * instantiates them.
  */
 export function buildHierarchyDatabase(
   index: HdlIndex,
@@ -105,6 +109,7 @@ export function buildHierarchyDatabase(
   source = '',
 ): HierarchyDatabase {
   const modules: Record<string, HierarchyModule> = {};
+  const seen = new Map<string, Set<string>>();
   for (const def of index.allModules()) {
     let entry = modules[def.name];
     if (!entry) {
@@ -119,10 +124,20 @@ export function buildHierarchyDatabase(
       };
       modules[def.name] = entry;
     }
+    let names = seen.get(def.name);
+    if (!names) {
+      names = new Set();
+      seen.set(def.name, names);
+    }
     for (const inst of def.instances) {
+      const i = inst.genPrefix ? `${inst.genPrefix}.${inst.name}` : inst.name;
+      if (names.has(i)) {
+        continue;
+      }
+      names.add(i);
       const child = index.resolveModule(inst.moduleName, def.file);
       entry.children.push({
-        i: inst.genPrefix ? `${inst.genPrefix}.${inst.name}` : inst.name,
+        i,
         m: inst.moduleName,
         g: inst.genPrefix ?? '',
         f: def.file,

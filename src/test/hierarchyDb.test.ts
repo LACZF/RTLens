@@ -172,3 +172,66 @@ test('hierarchyDb: a generated instance keeps the generate prefix on the row', (
   assert.ok(child, 'the generate prefix is part of the instance name');
   assert.equal(child!.generate, 'blk[0]');
 });
+
+test('hierarchyDb: ifdef alternatives sharing one instance name collapse to a single edge', () => {
+  // The parser keeps both `ifdef branches for navigation, so one def can hold
+  // two InstanceSites with the same name. The database edge list and the
+  // index builder's level template must agree on one child per path, or the
+  // composed tree shows the row twice when the view swaps engines.
+  const index = new HdlIndex();
+  index.addFile(
+    '/w/ifdef.v',
+    [
+      'module leaf (); endmodule',
+      'module other (); endmodule',
+      'module top ();',
+      '`ifdef SYNTH',
+      '  leaf u_x ();',
+      '`else',
+      '  other u_x ();',
+      '`endif',
+      'endmodule',
+    ].join('\n'),
+  );
+  const def = index.resolveModule('top')!;
+  assert.equal(def.instances.length, 2, 'the parser keeps both ifdef branches');
+
+  const db = buildHierarchyDatabase(index, []);
+  const edges = db.modules['top'].children;
+  assert.deepEqual(edges.map((e) => e.i), ['u_x'], 'one edge per path');
+  assert.equal(edges[0].m, 'leaf', 'the first branch wins');
+
+  const builder = new HierarchyDbBuilder(db, {});
+  const root = builder.root('top')!;
+  assert.equal(builder.childCount(root), 1, 'the count matches the single edge');
+  builder.expandLevel(root);
+  assert.deepEqual(root.children!.map((c) => c.path), ['top.u_x']);
+
+  const indexBuilder = new HierarchyBuilder(index, {});
+  compareLevels(indexBuilder, builder, indexBuilder.root('top')!, root, 1);
+});
+
+test('hierarchyDb: duplicate module definitions merge without duplicating sibling edges', () => {
+  // Two files defining the same module with the same instance name (RTL +
+  // stub, or a copied file) used to concatenate into two edges at `i: u_l`,
+  // so every path under the merged module drew its children twice. Distinct
+  // sibling names still union, which is what the merge is for.
+  const index = new HdlIndex();
+  index.addFile('/w/rtl.v', 'module leaf (); endmodule\nmodule mid (); leaf u_l (); endmodule\n');
+  index.addFile('/w/stub.v', 'module mid (); leaf u_l (); endmodule\n');
+  index.addFile('/w/top.v', 'module top (); mid u_mid (); endmodule\n');
+
+  const db = buildHierarchyDatabase(index, []);
+  const mids = db.modules['mid'].children;
+  assert.deepEqual(mids.map((e) => e.i), ['u_l'], 'the shared instance name collapses to one edge');
+
+  const index2 = new HdlIndex();
+  index2.addFile('/w/rtl.v', 'module leaf (); endmodule\nmodule mid (); leaf a (); leaf b (); endmodule\n');
+  index2.addFile('/w/other.v', 'module mid (); leaf c (); endmodule\n');
+  const db2 = buildHierarchyDatabase(index2, []);
+  assert.deepEqual(
+    db2.modules['mid'].children.map((e) => e.i),
+    ['a', 'b', 'c'],
+    'distinct sibling names from both definitions are still kept',
+  );
+});

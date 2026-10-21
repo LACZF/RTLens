@@ -265,6 +265,40 @@ test('lazy hierarchy: the budget cuts later siblings, matching the eager build\'
   assert.equal(b.childCount(root.children![0]), 0, 'a budget-cut node has no children to expand');
 });
 
+test('lazy hierarchy: ifdef alternatives sharing one instance name collapse to a single row', () => {
+  // The parser keeps both `ifdef branches for navigation, so a module whose
+  // alternatives instantiate the same name twice has two InstanceSites with
+  // one name. The composition tree is keyed by path, so two rows at
+  // `top.u_x` collide in findByPath and splice twice into the webview.
+  const index = new HdlIndex();
+  index.addFile(
+    '/w/ifdef.v',
+    [
+      'module leaf (); endmodule',
+      'module other (); endmodule',
+      'module top ();',
+      '`ifdef SYNTH',
+      '  leaf u_x ();',
+      '`else',
+      '  other u_x ();',
+      '`endif',
+      'endmodule',
+    ].join('\n'),
+  );
+  const def = index.resolveModule('top')!;
+  assert.equal(def.instances.length, 2, 'the parser keeps both ifdef branches');
+  const b = new HierarchyBuilder(index, { maxDepth: 0, maxInstances: 0 });
+  const root = b.root('top')!;
+  assert.equal(b.childCount(root), 1, 'the count matches the single visible row');
+  b.expandLevel(root);
+  assert.deepEqual(
+    root.children!.map((c) => c.path),
+    ['top.u_x'],
+    'both branches name the same instance, so the level shows it once',
+  );
+  assert.equal(root.children![0].moduleName, 'leaf', 'the first branch wins');
+});
+
 test('containingPath: the design top and the dotted path, without materialising the tree', () => {
   const index = new HdlIndex();
   index.addFile(

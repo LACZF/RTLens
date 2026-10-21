@@ -152,17 +152,27 @@ export class HierarchyBuilder implements HierarchyExpander {
       return 0;
     }
     const def = this.index.resolveModule(node.moduleName, node.file);
-    return def ? def.instances.length : 0;
+    return def ? this.levelTemplate(def).length : 0;
   }
 
   /** The compiled direct instances of `def`, memoised per module. */
   private levelTemplate(def: ModuleDef): RowTemplate[] {
     let t = this.templateCache.get(def);
     if (!t) {
-      t = def.instances.map((inst) => {
+      t = [];
+      const seen = new Set<string>();
+      for (const inst of def.instances) {
+        const instName = inst.genPrefix ? `${inst.genPrefix}.${inst.name}` : inst.name;
+        // `ifdef` alternatives can repeat one instance name (both branches are
+        // parsed for navigation). The tree is keyed by path, so the first
+        // branch wins and later duplicates are dropped.
+        if (seen.has(instName)) {
+          continue;
+        }
+        seen.add(instName);
         const child = this.index.resolveModule(inst.moduleName, def.file);
-        return {
-          instName: inst.genPrefix ? `${inst.genPrefix}.${inst.name}` : inst.name,
+        t.push({
+          instName,
           rawName: inst.rawName,
           moduleName: inst.moduleName,
           nameRange: inst.nameRange,
@@ -173,8 +183,8 @@ export class HierarchyBuilder implements HierarchyExpander {
           file: def.file,
           resolved: !!child,
           hasChildren: !!child && child.instances.length > 0,
-        };
-      });
+        });
+      }
       this.templateCache.set(def, t);
     }
     return t;
