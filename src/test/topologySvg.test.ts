@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 
 import { HdlIndex } from '../core/index';
-import { buildModuleTopology, type ModuleTopology } from '../core/topology';
+import { buildModuleTopology, type ModuleTopology, type TopoChildPort } from '../core/topology';
 import {
   renderFrameSvg,
   renderFramesSvg,
@@ -106,6 +106,43 @@ function synthetic(): ModuleTopology {
         label: 'x ? y : z',
       },
     ],
+    warnings: [],
+  };
+}
+
+/** A model with one child that has `count` input ports, for the port cap. */
+function wideChild(count: number): ModuleTopology {
+  const range = { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } };
+  const ports: TopoChildPort[] = Array.from({ length: count }, (_, i) => ({
+    name: `p${i}`,
+    side: 'input',
+    direction: 'input',
+    connected: true,
+  }));
+  return {
+    moduleName: 'wide',
+    file: '/tmp/wide.v',
+    nameRange: range,
+    path: 'wide',
+    top: 'wide',
+    ancestors: [],
+    inputs: [],
+    outputs: [],
+    children: [
+      {
+        id: 'u_wide',
+        instName: 'u_wide',
+        moduleName: 'leaf',
+        defFile: '/tmp/leaf.v',
+        file: '/tmp/wide.v',
+        range,
+        nameRange: range,
+        moduleNameRange: range,
+        resolved: true,
+        ports,
+      },
+    ],
+    edges: [],
     warnings: [],
   };
 }
@@ -213,6 +250,38 @@ test('svg: a child is linked by key, by href or by source position', () => {
     input(model, { u_ctrl: { src: { file: '/tmp/control.v', line: 4, character: 2 } } }),
   ).svg;
   assert.ok(sourced.includes('data-src="/tmp/control.v:4:2"'));
+});
+
+test('svg: a child with many ports is capped and its box still hugs the content', () => {
+  const model = wideChild(100);
+  const svg = renderFrameSvg(input(model)).svg;
+
+  const at = svg.indexOf('<title>u_wide</title>');
+  assert.notEqual(at, -1, 'the child is in the picture');
+  const closeG = svg.indexOf('</g>', at);
+  const closeA = svg.indexOf('</a>', at);
+  const stop = closeG < 0 ? closeA : closeA < 0 ? closeG : Math.min(closeG, closeA);
+  const box = svg.slice(at, stop);
+
+  assert.ok(box.includes('+92 more'), 'the overflow is announced');
+
+  const rect = /<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"/.exec(box);
+  assert.ok(rect, 'the child has a box');
+  const boxBottom = Number(rect[2]) + Number(rect[4]);
+
+  const stubYs = [...box.matchAll(/<line x1="[\d.]+" y1="([\d.]+)"/g)].map((m) => Number(m[1]));
+  const rows = [...new Set(stubYs)].sort((a, b) => a - b);
+  assert.equal(rows.length, 9, 'the header rule and eight port stubs');
+  const pitch = (rows[rows.length - 1] - rows[1]) / (rows.length - 2);
+
+  const more = /y="([\d.]+)"[^>]*>\+92 more<\/text>/.exec(box);
+  assert.ok(more, 'the overflow line is drawn');
+  const moreY = Number(more[1]);
+  assert.ok(moreY <= boxBottom, 'the overflow line stays inside the box');
+  assert.ok(boxBottom - moreY < pitch * 2, 'the box hugs the content instead of the port count');
+
+  const height = Number(/height="(\d+)"/.exec(svg)?.[1]);
+  assert.ok(height < 700, `the picture stays a normal size (${height}px)`);
 });
 
 test('svg: an instance whose module is missing is marked as such', () => {

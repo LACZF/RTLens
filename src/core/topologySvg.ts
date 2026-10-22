@@ -234,9 +234,15 @@ function childPorts(child: TopoChild): { left: TopoChildPort[]; right: TopoChild
   return splitPorts(child.ports || []);
 }
 
+/** How many rows one side of a child box draws: the capped ports plus the `+N more` line. */
+function portRows(ports: TopoChildPort[]): number {
+  const drawn = Math.min(ports.length, PORT_CAP);
+  return ports.length > drawn ? drawn + 1 : drawn;
+}
+
 function childRows(child: TopoChild): number {
   const { left, right } = childPorts(child);
-  return Math.max(1, left.length, right.length);
+  return Math.max(1, portRows(left), portRows(right));
 }
 
 function childBoxHeight(child: TopoChild): number {
