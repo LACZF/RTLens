@@ -188,7 +188,7 @@
           "enumDescriptions": [
             "Draw every input and output signal as its own row (the default).",
             "Hide the signal rows; each connection ends in a named stub on the frame boundary.",
-            "Collapse all inputs into one thick bar and all outputs into another, so only the instance wiring is visible."
+            "Merge inputs, outputs, and inouts into separate buses by direction; internal links between instances remain visible."
           ],
           "default": "all",
           "description": "How the topology diagram draws module input/output signals. Can also be switched from the diagram's toolbar."

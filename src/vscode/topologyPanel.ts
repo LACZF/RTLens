@@ -453,7 +453,7 @@ function html(): string {
   <div id="modes" role="group" aria-label="Signal display">
     <button type="button" data-mode="all" title="Show every input and output">Signals</button>
     <button type="button" data-mode="hidden" title="Keep only the instance boxes">Hide</button>
-    <button type="button" data-mode="bundled" title="Collapse all inputs and all outputs into one bus each">Bundle</button>
+    <button type="button" data-mode="bundled" title="Merge inputs, inouts, and outputs into separate buses by direction">Bundle</button>
   </div>
   <button type="button" id="save" title="Write this frame to an SVG file">Save SVG</button>
   <div id="meta"></div>

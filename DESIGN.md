@@ -701,9 +701,14 @@ entryOf(name: string): Entry | undefined   // 用 parentsOf 每层取排序最�
 
 - 三列布局：输入在左、子模块在中、输出在右，连线走贝塞尔曲线。
 - **配色**：输入一色（蓝）、输出一色（绿）、每个不同的子模块一种颜色（同一 module 的多个实例同色——按 `moduleName` 的稳定排序取 8 色相）；深浅主题各一套 CSS 变量。
-- **信号模式**：`all`（全部逐条列出）、`hidden`（不画信号行，信号名收缩到两侧边栏）、`bundled`（所有输入合并成一根粗线、所有输出合并成一根，名字进 tooltip）。
+- **信号模式**：`all`（全部逐条列出）、`hidden`（不画信号行，信号名收缩到两侧边栏）、`bundled`（**按方向合并成总线**，见下一条）。
 - 表达式边虚线（`stroke-dasharray`）；标签过长（> 24 字符）时只留在 `<title>` 里，鼠标悬停可见。
 - **端口上限**：子模块框只画前 `PORT_CAP = 8` 个端口，多的收成一行 `+N more`；框高按**实际画出的行数**算（`portRows` = `min(端口数, 8)`，溢出再加一行），不按完整端口数算——否则一个 100 端口的子模块会撑出 ~1900px 的空框。`portRows` 与 `drawPorts` 的行数记账必须一致，两边对不上就会有一行掉到框外。
+- **合并模式按方向分组**（`bundled`）：`portCat` 把端口归成三类——`in`（`input` 与 `ref`）、`out`（`output`）、`inout`（`inout`）。
+  - 帧级：输入合并成一根 `inputs (n)` 总线、输出合并成一根 `outputs (n)` 总线，**`inout` 单独成一根 `inout (n)` 总线**（不混进 `inputs`），三根都在画布两侧竖着排。
+  - 子模块级：每个子模块框按方向合并成 `in (n)` / `out (n)` / `inout (n)` 三根合并线（`childGroups` 分桶：左侧 `in` → `inout` → `out`，右侧 `out` → `inout` → `in`），每根线带 `<title>`，端口名全在里面（悬停可见），不再受 `PORT_CAP` 限制——合并后一根线就代表一整类端口，100 端口的子模块也只占三行。
+  - 帧内子模块之间的连线照画，端点落在合并线上（按组内端口序号在行内铺开），不因为合并而消失。
+  - 配色：输入一色、输出一色、`inout` 用中性灰（`th.neutral`）——不新增主题色，也不占用 8 色的 module 调色板；图例里有 `inout` 时才加这一项。
 - **SVG 里不写 `<script>`**：交互交给 webview 面板（postMessage），导出的文件用 `<a href>`（`vscode://file/...` 或相对文件名）做链接，贴到任何地方都安全。
 - 链接三种：`data-nav`（面板内下钻）、`<a href>`（跳源码 / 跳另一张导出图）、`data-src`（`file:line:char`，定位到子模块框的例化处）。
 - 文件名 `<module 名>-<N>.svg`（`N` 从 1 起，同名 module 的不同实例各得一张）。
@@ -723,7 +728,7 @@ entryOf(name: string): Entry | undefined   // 用 parentsOf 每层取排序最�
 
 - `hdl.connectView.topology.maxDepth`：批量导出的层次深度（当前 module 为第 0 层），`0` = 不限。
 - `hdl.connectView.topology.filterModules`：条目可以是 **module 名**（名字优先）、**文件路径**（该文件内定义的所有 module）或**目录路径**（其下递归定义的所有 module），相对路径按 workspace folder 解析——与组合树的过滤条目同形。路径条目在宿主层解析成 module 名后交给纯核心。
-- `hdl.connectView.topology.signalMode`：默认信号模式（面板里也能改）。
+- `hdl.connectView.topology.signalMode`：默认信号模式（面板里也能改），`bundled` 按方向合并成 `inputs` / `inout` / `outputs` 各一根总线并保留模块间内部连线。
 
 #### 5.10.5 测试
 
