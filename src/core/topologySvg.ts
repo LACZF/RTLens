@@ -196,6 +196,7 @@ const PORT_CAP = 8;
 const TICK = 10;
 const EDGE_ATTACH = 15;
 const BAR_W = 46;
+const BAR_GAP = 8;
 const HIDDEN_MARGIN = 110;
 const LEGEND_CAP = 6;
 const CHAR_W = 6;
@@ -234,19 +235,72 @@ function childPorts(child: TopoChild): { left: TopoChildPort[]; right: TopoChild
   return splitPorts(child.ports || []);
 }
 
+/* ------------------------------------------------------------------ */
+/* port groups                                                         */
+/* ------------------------------------------------------------------ */
+
+type PortCat = 'in' | 'out' | 'inout';
+
+function portCat(p: TopoChildPort): PortCat {
+  if (p.direction === 'output') {
+    return 'out';
+  }
+  if (p.direction === 'inout') {
+    return 'inout';
+  }
+  return 'in';
+}
+
+interface PortGroup {
+  cat: PortCat;
+  ports: TopoChildPort[];
+}
+
+/** The port groups one side of a child box draws: `in`/`inout` on the left, `out` on the right. */
+function childGroups(child: TopoChild): { left: PortGroup[]; right: PortGroup[] } {
+  const buckets: Record<'left' | 'right', Map<PortCat, TopoChildPort[]>> = {
+    left: new Map(),
+    right: new Map(),
+  };
+  for (const p of child.ports || []) {
+    const map = buckets[portSide(p)];
+    const list = map.get(portCat(p)) ?? [];
+    list.push(p);
+    map.set(portCat(p), list);
+  }
+  const order = (map: Map<PortCat, TopoChildPort[]>, cats: PortCat[]): PortGroup[] => {
+    const out: PortGroup[] = [];
+    for (const c of cats) {
+      const list = map.get(c);
+      if (list && list.length > 0) {
+        out.push({ cat: c, ports: list });
+      }
+    }
+    return out;
+  };
+  return {
+    left: order(buckets.left, ['in', 'inout', 'out']),
+    right: order(buckets.right, ['out', 'inout', 'in']),
+  };
+}
+
 /** How many rows one side of a child box draws: the capped ports plus the `+N more` line. */
 function portRows(ports: TopoChildPort[]): number {
   const drawn = Math.min(ports.length, PORT_CAP);
   return ports.length > drawn ? drawn + 1 : drawn;
 }
 
-function childRows(child: TopoChild): number {
+function childRows(child: TopoChild, mode: SignalDisplay): number {
+  if (mode === 'bundled') {
+    const { left, right } = childGroups(child);
+    return Math.max(1, left.length, right.length);
+  }
   const { left, right } = childPorts(child);
   return Math.max(1, portRows(left), portRows(right));
 }
 
-function childBoxHeight(child: TopoChild): number {
-  return CHILD_HEAD + CHILD_ROW * childRows(child) + CHILD_PAD;
+function childBoxHeight(child: TopoChild, mode: SignalDisplay): number {
+  return CHILD_HEAD + CHILD_ROW * childRows(child, mode) + CHILD_PAD;
 }
 
 /* ------------------------------------------------------------------ */
@@ -329,6 +383,9 @@ export function renderFrameSvg(
   const useBars = mode === 'bundled';
   const hidden = mode === 'hidden';
 
+  const bundledIn = inputs.filter((s) => s.direction !== 'inout');
+  const bundledIo = inputs.filter((s) => s.direction === 'inout');
+
   let leftW: number;
   let rightW: number;
   let gutterL: number;
@@ -339,7 +396,8 @@ export function renderFrameSvg(
     gutterL = 0;
     gutterR = 0;
   } else if (useBars) {
-    leftW = BAR_W;
+    const ioBars = bundledIo.length > 0 ? 1 : 0;
+    leftW = BAR_W * (1 + ioBars) + BAR_GAP * ioBars;
     rightW = BAR_W;
     gutterL = GUTTER;
     gutterR = GUTTER;
@@ -366,7 +424,7 @@ export function renderFrameSvg(
   if (children.length > 0) {
     let total = 0;
     for (const c of children) {
-      total += childBoxHeight(c);
+      total += childBoxHeight(c, mode);
     }
     childrenH = total + (children.length - 1) * CHILD_GAP;
   }
@@ -420,7 +478,7 @@ export function renderFrameSvg(
     const boxW = Math.max(160, Math.min(200, midW - 40));
     let y = contentTop + Math.max(0, (contentH - childrenH) / 2);
     for (const c of children) {
-      const h = childBoxHeight(c);
+      const h = childBoxHeight(c, mode);
       childGeoms.push({
         child: c,
         x: midColX + (midW - boxW) / 2,
@@ -473,7 +531,7 @@ export function renderFrameSvg(
   /* ---------------- bundles (mode `bundled`) ---------------- */
 
   interface BarGeom {
-    side: 'input' | 'output';
+    cat: PortCat;
     x: number;
     y: number;
     w: number;
@@ -484,21 +542,34 @@ export function renderFrameSvg(
   }
   const bars: BarGeom[] = [];
   if (useBars) {
-    if (inputs.length > 0) {
+    if (bundledIn.length > 0) {
       bars.push({
-        side: 'input',
+        cat: 'in',
         x: pad,
         y: contentTop,
         w: BAR_W,
         h: contentH,
         trunkX: pad + BAR_W - 2,
-        count: inputs.length,
-        names: inputs.map((s) => s.name),
+        count: bundledIn.length,
+        names: bundledIn.map((s) => s.name),
+      });
+    }
+    if (bundledIo.length > 0) {
+      const x = pad + BAR_W + BAR_GAP;
+      bars.push({
+        cat: 'inout',
+        x,
+        y: contentTop,
+        w: BAR_W,
+        h: contentH,
+        trunkX: x + BAR_W - 2,
+        count: bundledIo.length,
+        names: bundledIo.map((s) => s.name),
       });
     }
     if (outputs.length > 0) {
       bars.push({
-        side: 'output',
+        cat: 'out',
         x: canvasW - pad - BAR_W,
         y: contentTop,
         w: BAR_W,
@@ -533,12 +604,25 @@ export function renderFrameSvg(
           return { x: row.x + row.w, y: row.y + row.h / 2, role: 'input' };
         }
         if (mode === 'bundled') {
-          const bar = bars.find((b) => b.side === 'input');
+          const sig = inputs.find((s) => s.name === name || s.declName === name);
+          if (!sig) {
+            return null;
+          }
+          const cat: PortCat = sig.direction === 'inout' ? 'inout' : 'in';
+          const bar = bars.find((b) => b.cat === cat);
           if (!bar || bar.count <= 0) {
             return null;
           }
-          const i = Math.max(0, Math.min(bar.count - 1, idx));
-          return { x: bar.trunkX, y: bar.y + ((i + 0.5) * bar.h) / bar.count, role: 'input' };
+          const list = cat === 'inout' ? bundledIo : bundledIn;
+          const i = Math.max(
+            0,
+            Math.min(bar.count - 1, list.findIndex((s) => s.name === name || s.declName === name)),
+          );
+          return {
+            x: bar.trunkX,
+            y: bar.y + ((i + 0.5) * bar.h) / bar.count,
+            role: cat === 'inout' ? 'neutral' : 'input',
+          };
         }
         const tick = ticks.find((t) => t.side === 'input' && t.name === name);
         if (!tick) {
@@ -558,7 +642,7 @@ export function renderFrameSvg(
         return { x: row.x, y: row.y + row.h / 2, role: 'output' };
       }
       if (mode === 'bundled') {
-        const bar = bars.find((b) => b.side === 'output');
+        const bar = bars.find((b) => b.cat === 'out');
         if (!bar || bar.count <= 0) {
           return null;
         }
@@ -575,6 +659,25 @@ export function renderFrameSvg(
     const g = childById.get(ep.child);
     if (!g) {
       return null;
+    }
+    if (mode === 'bundled') {
+      const groups = childGroups(g.child);
+      const list = ep.side === 'input' ? groups.left : groups.right;
+      let row = list.findIndex((grp) => grp.ports.some((p) => p.name === ep.port));
+      if (row < 0) {
+        row = 0;
+      }
+      const grp = list[row];
+      const rowTop = g.y + CHILD_HEAD + row * CHILD_ROW;
+      let portY = rowTop + CHILD_ROW / 2;
+      if (grp) {
+        const n = grp.ports.length;
+        const slot = Math.max(0, grp.ports.findIndex((p) => p.name === ep.port));
+        portY = rowTop + ((slot + 0.5) * CHILD_ROW) / n;
+      }
+      const y = Math.max(g.y + CHILD_HEAD, Math.min(g.y + g.h - 4, portY));
+      const x = ep.side === 'input' ? g.x + EDGE_ATTACH : g.x + g.w - EDGE_ATTACH;
+      return { x, y, role: 'neutral' };
     }
     const ports = childPorts(g.child);
     const list = ep.side === 'input' ? ports.left : ports.right;
@@ -750,10 +853,23 @@ export function renderFrameSvg(
     label: string;
   }
   const modKeys = moduleKeys(children);
+  const hasInout =
+    bundledIo.length > 0 ||
+    children.some((c) => {
+      const groups = childGroups(c);
+      return (
+        groups.left.some((grp) => grp.cat === 'inout') ||
+        groups.right.some((grp) => grp.cat === 'inout')
+      );
+    });
   const legendItems: LegendItem[] = [
     { color: th.input, label: 'input' },
     { color: th.output, label: 'output' },
   ];
+  if (hasInout) {
+    legendItems.push({ color: th.neutral, label: 'inout' });
+  }
+  const fixedItems = legendItems.length;
   for (const mk of modKeys.slice(0, LEGEND_CAP)) {
     const idx = modKeys.indexOf(mk);
     const color = th.palette.length > 0 ? th.palette[idx % th.palette.length] : th.neutral;
@@ -779,10 +895,12 @@ export function renderFrameSvg(
   let maxChars = 20;
   while (legendWidth(shown) > legendAvail && maxChars > 4) {
     maxChars -= 1;
-    shown = shown.map((it, i) => (i < 2 ? it : { color: it.color, label: trunc(it.label, maxChars) }));
+    shown = shown.map((it, i) =>
+      i < fixedItems ? it : { color: it.color, label: trunc(it.label, maxChars) },
+    );
   }
   let droppedModules = 0;
-  while (shown.length > 2 && legendWidth(shown) > legendAvail) {
+  while (shown.length > fixedItems && legendWidth(shown) > legendAvail) {
     shown.pop();
     droppedModules += 1;
   }
@@ -879,7 +997,8 @@ export function renderFrameSvg(
   if (useBars) {
     const barParts: string[] = [];
     for (const b of bars) {
-      const color = b.side === 'input' ? th.input : th.output;
+      const color = b.cat === 'in' ? th.input : b.cat === 'out' ? th.output : th.neutral;
+      const label = b.cat === 'in' ? 'inputs' : b.cat === 'out' ? 'outputs' : 'inout';
       const cx = b.x + b.w / 2;
       const cy = b.y + b.h / 2;
       barParts.push(
@@ -893,7 +1012,7 @@ export function renderFrameSvg(
           `<text class="mono" x="${num(cx)}" y="${num(cy)}" font-family="${FONT}" font-size="11" text-anchor="middle" fill="${esc(
             th.muted,
           )}" transform="rotate(-90 ${num(cx)} ${num(cy)})">${esc(
-            `${b.side === 'input' ? 'inputs' : 'outputs'} (${b.count})`,
+            `${label} (${b.count})`,
           )}</text>` +
           '</g>',
       );
@@ -905,7 +1024,7 @@ export function renderFrameSvg(
 
   const childParts: string[] = [];
   for (const g of childGeoms) {
-    childParts.push(childBox(g, navChildren[g.child.id], th));
+    childParts.push(childBox(g, navChildren[g.child.id], th, mode));
   }
   parts.push(`<g class="children">${childParts.join('')}</g>`);
 
@@ -990,6 +1109,7 @@ function childBox(
   g: { child: TopoChild; x: number; y: number; w: number; h: number; color: string },
   nav: NavRef | undefined,
   th: Theme,
+  mode: SignalDisplay,
 ): string {
   const c = g.child;
   const unresolved = c.resolved === false;
@@ -1092,50 +1212,79 @@ function childBox(
   }
 
   // port stubs
-  const { left, right } = childPorts(c);
-  const drawPorts = (ports: TopoChildPort[], side: 'left' | 'right'): void => {
-    const cap = ports.slice(0, PORT_CAP);
-    const more = ports.length - cap.length;
-    for (let i = 0; i < cap.length; i++) {
-      const p = cap[i];
-      const py = g.y + CHILD_HEAD + (i + 0.5) * CHILD_ROW;
-      if (side === 'left') {
+  if (mode === 'bundled') {
+    const groups = childGroups(c);
+    const drawGroups = (list: PortGroup[], side: 'left' | 'right'): void => {
+      list.forEach((grp, row) => {
+        const rowTop = g.y + CHILD_HEAD + row * CHILD_ROW;
+        const py = rowTop + CHILD_ROW / 2;
+        const color = grp.cat === 'in' ? th.input : grp.cat === 'out' ? th.output : th.neutral;
+        const x = side === 'left' ? g.x : g.x + g.w - TICK;
+        const lx = side === 'left' ? g.x + TICK + 4 : g.x + g.w - TICK - 4;
+        const anchor = side === 'left' ? 'start' : 'end';
+        const label = `${grp.cat === 'in' ? 'in' : grp.cat === 'out' ? 'out' : 'inout'} (${
+          grp.ports.length
+        })`;
         body.push(
-          `<line x1="${num(g.x)}" y1="${num(py)}" x2="${num(g.x + TICK)}" y2="${num(
-            py,
-          )}" stroke="${esc(th.neutral)}" stroke-width="1.2"/>`,
+          `<g class="port-group"><title>${esc(grp.ports.map((p) => p.name).join('\n'))}</title>` +
+            `<rect x="${num(x)}" y="${num(rowTop + 2)}" width="${num(TICK)}" height="${num(
+              CHILD_ROW - 4,
+            )}" rx="3" fill="${esc(color)}" fill-opacity="0.25" stroke="${esc(color)}" stroke-width="1.2"/>` +
+            `<text class="mono" x="${num(lx)}" y="${num(py + 3)}" font-family="${FONT}" font-size="9" text-anchor="${anchor}" fill="${esc(
+              th.muted,
+            )}">${esc(label)}</text>` +
+            '</g>',
         );
+      });
+    };
+    drawGroups(groups.left, 'left');
+    drawGroups(groups.right, 'right');
+  } else {
+    const { left, right } = childPorts(c);
+    const drawPorts = (ports: TopoChildPort[], side: 'left' | 'right'): void => {
+      const cap = ports.slice(0, PORT_CAP);
+      const more = ports.length - cap.length;
+      for (let i = 0; i < cap.length; i++) {
+        const p = cap[i];
+        const py = g.y + CHILD_HEAD + (i + 0.5) * CHILD_ROW;
+        if (side === 'left') {
+          body.push(
+            `<line x1="${num(g.x)}" y1="${num(py)}" x2="${num(g.x + TICK)}" y2="${num(
+              py,
+            )}" stroke="${esc(th.neutral)}" stroke-width="1.2"/>`,
+          );
+          body.push(
+            `<text class="mono" x="${num(g.x + TICK + 4)}" y="${num(py + 3)}" font-family="${FONT}" font-size="9" text-anchor="start" fill="${esc(
+              th.muted,
+            )}">${esc(trunc(p.name, 16))}</text>`,
+          );
+        } else {
+          body.push(
+            `<line x1="${num(g.x + g.w - TICK)}" y1="${num(py)}" x2="${num(g.x + g.w)}" y2="${num(
+              py,
+            )}" stroke="${esc(th.neutral)}" stroke-width="1.2"/>`,
+          );
+          body.push(
+            `<text class="mono" x="${num(g.x + g.w - TICK - 4)}" y="${num(py + 3)}" font-family="${FONT}" font-size="9" text-anchor="end" fill="${esc(
+              th.muted,
+            )}">${esc(trunc(p.name, 16))}</text>`,
+          );
+        }
+      }
+      if (more > 0) {
+        const py = g.y + CHILD_HEAD + (cap.length + 0.5) * CHILD_ROW;
+        const lx2 = side === 'left' ? g.x + TICK + 4 : g.x + g.w - TICK - 4;
+        const anchor = side === 'left' ? 'start' : 'end';
         body.push(
-          `<text class="mono" x="${num(g.x + TICK + 4)}" y="${num(py + 3)}" font-family="${FONT}" font-size="9" text-anchor="start" fill="${esc(
+          `<text class="mono" x="${num(lx2)}" y="${num(py + 3)}" font-family="${FONT}" font-size="9" text-anchor="${anchor}" fill="${esc(
             th.muted,
-          )}">${esc(trunc(p.name, 16))}</text>`,
-        );
-      } else {
-        body.push(
-          `<line x1="${num(g.x + g.w - TICK)}" y1="${num(py)}" x2="${num(g.x + g.w)}" y2="${num(
-            py,
-          )}" stroke="${esc(th.neutral)}" stroke-width="1.2"/>`,
-        );
-        body.push(
-          `<text class="mono" x="${num(g.x + g.w - TICK - 4)}" y="${num(py + 3)}" font-family="${FONT}" font-size="9" text-anchor="end" fill="${esc(
-            th.muted,
-          )}">${esc(trunc(p.name, 16))}</text>`,
+          )}">+${more} more</text>`,
         );
       }
-    }
-    if (more > 0) {
-      const py = g.y + CHILD_HEAD + (cap.length + 0.5) * CHILD_ROW;
-      const lx2 = side === 'left' ? g.x + TICK + 4 : g.x + g.w - TICK - 4;
-      const anchor = side === 'left' ? 'start' : 'end';
-      body.push(
-        `<text class="mono" x="${num(lx2)}" y="${num(py + 3)}" font-family="${FONT}" font-size="9" text-anchor="${anchor}" fill="${esc(
-          th.muted,
-        )}">+${more} more</text>`,
-      );
-    }
-  };
-  drawPorts(left, 'left');
-  drawPorts(right, 'right');
+    };
+    drawPorts(left, 'left');
+    drawPorts(right, 'right');
+  }
 
   const titleText = unresolved ? 'module not found' : c.instName;
   const inner = `<title>${esc(titleText)}</title>${body.join('')}`;

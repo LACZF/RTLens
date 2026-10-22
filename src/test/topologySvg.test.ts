@@ -4,7 +4,13 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 
 import { HdlIndex } from '../core/index';
-import { buildModuleTopology, type ModuleTopology, type TopoChildPort } from '../core/topology';
+import {
+  buildModuleTopology,
+  type ModuleTopology,
+  type TopoChildPort,
+  type TopoSignal,
+} from '../core/topology';
+import type { PortDir } from '../core/ast';
 import {
   renderFrameSvg,
   renderFramesSvg,
@@ -147,6 +153,92 @@ function wideChild(count: number): ModuleTopology {
   };
 }
 
+/** A model with an inout port and an instance with every port direction. */
+function mixedDirections(): ModuleTopology {
+  const range = { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } };
+  const signal = (name: string, direction: PortDir): TopoSignal => ({
+    name,
+    declName: name,
+    side: direction === 'output' ? 'output' : 'input',
+    direction,
+    width: 1,
+    file: '/tmp/mixed.v',
+    range,
+    nameRange: range,
+  });
+  const port = (name: string, direction: PortDir): TopoChildPort => ({
+    name,
+    side: direction === 'output' ? 'output' : 'input',
+    direction,
+    width: 1,
+    connected: true,
+  });
+  return {
+    moduleName: 'mixed',
+    file: '/tmp/mixed.v',
+    nameRange: range,
+    path: 'mixed',
+    top: 'mixed',
+    ancestors: [],
+    inputs: [signal('clk', 'input'), signal('pad', 'inout')],
+    outputs: [signal('q', 'output')],
+    children: [
+      {
+        id: 'u_ctrl',
+        instName: 'u_ctrl',
+        moduleName: 'ctrl',
+        defFile: '/tmp/ctrl.v',
+        file: '/tmp/mixed.v',
+        range,
+        nameRange: range,
+        moduleNameRange: range,
+        resolved: true,
+        ports: [
+          port('in_x', 'input'),
+          port('in_y', 'input'),
+          port('out_z', 'output'),
+          port('bio_w', 'inout'),
+        ],
+      },
+      {
+        id: 'u_leaf',
+        instName: 'u_leaf',
+        moduleName: 'leaf',
+        defFile: '/tmp/leaf.v',
+        file: '/tmp/mixed.v',
+        range,
+        nameRange: range,
+        moduleNameRange: range,
+        resolved: true,
+        ports: [port('in_q', 'input')],
+      },
+    ],
+    edges: [
+      {
+        from: { kind: 'signal', name: 'clk' },
+        to: { kind: 'child', child: 'u_ctrl', port: 'in_x', side: 'input' },
+        kind: 'port',
+      },
+      {
+        from: { kind: 'signal', name: 'pad' },
+        to: { kind: 'child', child: 'u_ctrl', port: 'bio_w', side: 'input' },
+        kind: 'port',
+      },
+      {
+        from: { kind: 'child', child: 'u_ctrl', port: 'out_z', side: 'output' },
+        to: { kind: 'signal', name: 'q' },
+        kind: 'port',
+      },
+      {
+        from: { kind: 'child', child: 'u_ctrl', port: 'out_z', side: 'output' },
+        to: { kind: 'child', child: 'u_leaf', port: 'in_q', side: 'input' },
+        kind: 'port',
+      },
+    ],
+    warnings: [],
+  };
+}
+
 test('svg: a frame is a standalone document', () => {
   const model = chipTop();
   const svg = renderFrameSvg(input(model)).svg;
@@ -224,6 +316,51 @@ test('svg: bundling merges the signals into one bus per side', () => {
   assert.ok(svg.includes(`outputs (${model.outputs.length})`));
   // One trunk per side, drawn four units wide.
   assert.equal((svg.match(/stroke-width="4"/g) ?? []).length, 2);
+});
+
+test('svg: bundling merges the ports of an instance by direction', () => {
+  const model = mixedDirections();
+  const svg = renderFrameSvg(input(model), { signalMode: 'bundled' }).svg;
+  // One line per category: `in` and `inout` on the left of u_ctrl, `out` on
+  // its right, `in` on the left of u_leaf.
+  assert.ok(svg.includes('>in (2)<'), 'the two input ports are one line');
+  assert.ok(svg.includes('>out (1)<'), 'the output port is one line');
+  assert.ok(svg.includes('>inout (1)<'), 'the inout port is one line');
+  assert.equal((svg.match(/class="port-group"/g) ?? []).length, 4);
+
+  // The port names are not spelled out on the box any more.
+  assert.ok(!svg.includes('>in_x</text>'), 'the port names are not written on the box');
+  const all = renderFrameSvg(input(model), { signalMode: 'all' }).svg;
+  assert.ok(all.includes('>in_x</text>'), 'the other modes still spell them out');
+});
+
+test('svg: an inout port gets a bus of its own', () => {
+  const model = mixedDirections();
+  const svg = renderFrameSvg(input(model), { signalMode: 'bundled' }).svg;
+  assert.ok(svg.includes('inputs (1)'), 'the input bus holds the pure inputs only');
+  assert.ok(svg.includes('inout (1)'), 'the inout port is a bus of its own');
+  assert.ok(svg.includes('outputs (1)'));
+  // Three buses: inputs, inout, outputs.
+  assert.equal((svg.match(/stroke-width="4"/g) ?? []).length, 3);
+});
+
+test('svg: bundling keeps the link between two instances', () => {
+  const model = mixedDirections();
+  const svg = renderFrameSvg(input(model), { signalMode: 'bundled' }).svg;
+  assert.equal((svg.match(/<g class="edge">/g) ?? []).length, model.edges.length);
+});
+
+test('svg: the bundled picture keeps every port name in a tooltip', () => {
+  const model = mixedDirections();
+  const svg = renderFrameSvg(input(model), { signalMode: 'bundled' }).svg;
+  const groups = [...svg.matchAll(/<g class="port-group"><title>([^<]*)<\/title>/g)].map((m) => m[1]);
+  assert.equal(groups.length, 4, 'one tooltip per merged line');
+  const names = groups.flatMap((t) => t.split('\n'));
+  for (const c of model.children) {
+    for (const p of c.ports) {
+      assert.ok(names.includes(p.name), `${p.name} is in a tooltip`);
+    }
+  }
 });
 
 test('svg: text and attribute values are escaped', () => {
