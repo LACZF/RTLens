@@ -84,12 +84,13 @@ test('config: numeric settings have a floor', () => {
       continue;
     }
     // A handful of settings can be 0 to mean "no cap": the graph signal cap,
-    // and the Composition tree's own depth / node budget (both unlimited by
-    // default).
+    // the Composition tree's own depth / node budget (both unlimited by
+    // default), and the topology SVG depth (0 = the module's whole subtree).
     if (
       key === 'hdl.connectView.graph.maxSignalsPerGroup' ||
       key === 'hdl.connectView.composition.maxDepth' ||
-      key === 'hdl.connectView.composition.maxInstances'
+      key === 'hdl.connectView.composition.maxInstances' ||
+      key === 'hdl.connectView.topology.maxDepth'
     ) {
       assert.ok(
         typeof schema.minimum === 'number' && schema.minimum >= 0,

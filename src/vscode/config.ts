@@ -20,6 +20,12 @@ export interface HdlConfig {
   compositionFilterModules: string[];
   /** 1 = keep filtered instances but hide their submodules; 2 = hide them too. */
   compositionFilterMode: 1 | 2;
+  /** Topology-SVG depth below the current module; 0 means no limit. */
+  topologyMaxDepth: number;
+  /** Modules left out of the topology diagram (name, file or directory). */
+  topologyFilterModules: string[];
+  /** How the topology diagram draws module input/output signals. */
+  topologySignalMode: SignalDisplayMode;
   /** Enable F8 word highlight (false lets F8 fall back to default). */
   wordHighlight: boolean;
   graphMaxNodes: number;
@@ -35,6 +41,17 @@ export interface HdlConfig {
 }
 
 export const SECTION = 'hdl.connectView';
+
+/**
+ * How the topology diagram draws module input/output signals. Structurally the
+ * same union as `SignalDisplay` in `core/topologySvg`, kept local so the config
+ * layer does not depend on the renderer.
+ */
+export type SignalDisplayMode = 'all' | 'hidden' | 'bundled';
+
+function signalMode(v: unknown): SignalDisplayMode {
+  return v === 'hidden' || v === 'bundled' ? v : 'all';
+}
 
 function strArray(cfg: vscode.WorkspaceConfiguration, key: string, fallback: string[]): string[] {
   const v = cfg.get<unknown>(key);
@@ -57,6 +74,9 @@ export function readConfig(scope?: vscode.Uri): HdlConfig {
     compositionMaxInstances: cfg.get<number>('composition.maxInstances') ?? 0,
     compositionFilterModules: strArray(cfg, 'composition.filterModules', []),
     compositionFilterMode: cfg.get<number>('composition.filterMode') === 2 ? 2 : 1,
+    topologyMaxDepth: cfg.get<number>('topology.maxDepth') ?? 0,
+    topologyFilterModules: strArray(cfg, 'topology.filterModules', []),
+    topologySignalMode: signalMode(cfg.get<string>('topology.signalMode')),
     wordHighlight: cfg.get<boolean>('wordHighlight') ?? true,
     graphMaxNodes: cfg.get<number>('graph.maxNodes') ?? 800,
     graphShowContainment: cfg.get<boolean>('graph.showContainment') ?? false,

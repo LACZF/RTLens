@@ -22,6 +22,8 @@ import { NetsViewProvider } from './vscode/netsView';
 import { CompositionViewProvider } from './vscode/compView';
 import { GraphPanel } from './vscode/graphPanel';
 import { runGenerateWrapper } from './vscode/generate';
+import { TopologyPanel } from './vscode/topologyPanel';
+import { generateTopologySvg, showTopology } from './vscode/topology';
 import { DatabaseService, pickRefreshMode } from './vscode/database';
 import { CatalogService } from './vscode/catalog';
 import type { HierarchyNode, Range } from './core/ast';
@@ -237,6 +239,10 @@ export function activate(context: vscode.ExtensionContext): void {
     await runGenerateWrapper(svc, selection.length ? selection : editorNodes(svc), composition.hierarchyRoot);
   });
 
+  reg('hdl.connectView.showTopology', () => showTopology(svc, context.extensionUri));
+  reg('hdl.connectView.generateTopologySvg', () => generateTopologySvg(svc, 'module'));
+  reg('hdl.connectView.generateTopologyTreeSvg', () => generateTopologySvg(svc, 'tree'));
+
   reg('hdl.connectView.revealInComposition', async (uri?: vscode.Uri) => {
     const target = uri ?? vscode.window.activeTextEditor?.document.uri;
     if (!target) {
@@ -370,6 +376,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 export function deactivate(): void {
   GraphPanel.disposeAll();
+  TopologyPanel.disposeAll();
 }
 
 // ---------------------------------------------------------------------------

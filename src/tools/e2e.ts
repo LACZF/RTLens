@@ -13,6 +13,8 @@ import { flattenModule, composeModule, generateWrapper, stubModule } from '../co
 import { collectProblems } from '../core/problems';
 import { signalUsage } from '../core/nets';
 import { databaseStats, hashText, updateDatabase, type FileInput } from '../core/relations';
+import { buildModuleTopology, buildTopologyTree } from '../core/topology';
+import { renderFrameSvg, renderFramesSvg, topologyFileNames, type FrameInput } from '../core/topologySvg';
 
 const FIXTURES = path.resolve(__dirname, '../../test/fixtures');
 
@@ -415,6 +417,65 @@ console.log('\n[11] signal/module relation database');
   const second = updateDatabase(index, first.db, inputs, 'incremental', 'e2e2');
   check('incremental recomputes nothing', second.changed.length, 0);
   check('incremental reuses every file', second.reused, files.length);
+}
+
+console.log('\n[12] module topology SVG');
+{
+  const def = index.resolveModule('chip_top');
+  const model = def ? buildModuleTopology(index, def) : undefined;
+  checkTrue('chip_top topology builds', !!model);
+  if (model) {
+    check('topology inputs', model.inputs.map((s) => s.name), ['clk', 'rst_n', 'operand_a', 'operand_b', 'cin', 'start']);
+    check('topology outputs', model.outputs.map((s) => s.name), ['result', 'carry', 'busy']);
+    check('topology children', model.children.map((c) => c.id), ['u_ctrl', 'u_dpath']);
+    // `assign carry = dp_carry;` is a buffer, so the child output reaches the
+    // module output as one net instead of through a labelled expression hop.
+    const alias = model.edges.find(
+      (e) => e.from.kind === 'child' && e.from.port === 'carry' && e.to.kind === 'signal' && e.to.name === 'carry',
+    );
+    check('an alias assign is a plain wire', alias?.kind, 'port');
+    // A parameter passed down as `WIDTH` shows its folded value, not its name.
+    check('ported parameter is folded', model.children.find((c) => c.id === 'u_dpath')?.params, 'WIDTH=8, DEPTH=4');
+
+    const filtered = def ? buildModuleTopology(index, def, { filterModules: ['control'] }) : undefined;
+    check('filtering drops the instance', filtered?.children.map((c) => c.id), ['u_dpath']);
+
+    const tree = buildTopologyTree(index, 'chip_top', undefined, { maxDepth: 1 });
+    // The frames are keyed by the instance path from the design top, so the
+    // testbench that wraps chip_top is part of the key, not of the tree.
+    check('depth one modules', tree?.frames.map((f) => f.moduleName), ['chip_top', 'control', 'datapath']);
+    const keys = tree?.frames.map((f) => f.key) ?? [];
+    checkTrue(
+      'every frame hangs off the root frame',
+      keys.length > 0 && keys.every((k) => k === keys[0] || k.startsWith(`${keys[0]}.`)),
+      keys.join(' '),
+    );
+    checkTrue('depth one is marked truncated', tree?.truncated === true);
+
+    if (tree) {
+      const input: FrameInput = {
+        key: model.path,
+        model,
+        self: { href: 'chip_top.html' },
+        crumbs: [],
+        children: Object.fromEntries(model.children.map((c) => [c.id, { href: `${c.instName}.svg` }])),
+      };
+      const modes = ['all', 'hidden', 'bundled'] as const;
+      for (const mode of modes) {
+        const svg = renderFrameSvg(input, { signalMode: mode }).svg;
+        checkTrue(`svg ${mode} is a standalone document`, svg.startsWith('<svg') && svg.trimEnd().endsWith('</svg>'));
+        checkTrue(`svg ${mode} carries no script or handler`, !/<script/i.test(svg) && !/\son[a-z]+\s*=/i.test(svg));
+        checkTrue(`svg ${mode} has finite geometry`, !/\b(NaN|Infinity|undefined)\b/.test(svg));
+      }
+      const all = renderFrameSvg(input, { signalMode: 'all' }).svg;
+      checkTrue('every port is named', [...model.inputs, ...model.outputs].every((s) => all.includes(s.name)));
+      const names = topologyFileNames(tree.frames);
+      check('one file per frame', names.length, tree.frames.length);
+      checkTrue('file names are unique svgs', new Set(names).size === names.length && names.every((n) => n.endsWith('.svg')));
+      const rendered = renderFramesSvg(tree.frames.map((f) => ({ ...input, key: f.key, model: f.model })), {});
+      check('rendering matches the manifest', rendered.map((s) => s.fileName), names);
+    }
+  }
 }
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'}`);
