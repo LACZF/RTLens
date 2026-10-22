@@ -195,9 +195,9 @@ const CHILD_PAD = 10;
 const GROUP_PAD = 22;
 const PORT_CAP = 8;
 const TICK = 10;
-const EDGE_ATTACH = 15;
 const BAR_W = 46;
 const BAR_GAP = 8;
+const RAIL_W = 4;
 const HIDDEN_MARGIN = 110;
 const LEGEND_CAP = 6;
 const CHAR_W = 6;
@@ -670,7 +670,11 @@ export function renderFrameSvg(
           return null;
         }
         const i = Math.max(0, Math.min(bar.count - 1, idx));
-        return { x: bar.trunkX, y: bar.y + ((i + 0.5) * bar.h) / bar.count, role: 'output' };
+        return {
+          x: bar.trunkX - RAIL_W / 2,
+          y: bar.y + ((i + 0.5) * bar.h) / bar.count,
+          role: 'output',
+        };
       }
       const tick = ticks.find((t) => t.side === 'output' && t.name === name);
       if (!tick) {
@@ -699,7 +703,7 @@ export function renderFrameSvg(
         portY = rowTop + ((slot + 0.5) * CHILD_ROW) / n;
       }
       const y = Math.max(g.y + CHILD_HEAD, Math.min(g.y + g.h - 4, portY));
-      const x = ep.side === 'input' ? g.x + EDGE_ATTACH : g.x + g.w - EDGE_ATTACH;
+      const x = ep.side === 'input' ? g.x : g.x + g.w;
       return { x, y, role: 'neutral' };
     }
     const ports = childPorts(g.child);
@@ -710,7 +714,7 @@ export function renderFrameSvg(
     }
     const portY = g.y + CHILD_HEAD + (idx + 0.5) * CHILD_ROW;
     const y = Math.max(g.y + CHILD_HEAD, Math.min(g.y + g.h - 4, portY));
-    const x = ep.side === 'input' ? g.x + EDGE_ATTACH : g.x + g.w - EDGE_ATTACH;
+    const x = ep.side === 'input' ? g.x : g.x + g.w;
     return { x, y, role: 'neutral' };
   }
 
@@ -1129,7 +1133,7 @@ export function renderFrameSvg(
           )}" rx="8" fill="${esc(th.panel)}" stroke="${esc(color)}" stroke-width="1.4"/>` +
           `<line x1="${num(b.trunkX)}" y1="${num(b.y)}" x2="${num(b.trunkX)}" y2="${num(
             b.y + b.h,
-          )}" stroke="${esc(color)}" stroke-width="4"/>` +
+          )}" stroke="${esc(color)}" stroke-width="${num(RAIL_W)}"/>` +
           `<text class="mono" x="${num(cx)}" y="${num(cy)}" font-family="${FONT}" font-size="11" text-anchor="middle" fill="${esc(
             th.muted,
           )}" transform="rotate(-90 ${num(cx)} ${num(cy)})">${esc(

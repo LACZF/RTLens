@@ -539,6 +539,55 @@ test('svg: the instances sit in a box the signals cross', () => {
   }
 });
 
+test('svg: the wires stop at the border so their arrows stay visible', () => {
+  const model = chipTop();
+  for (const mode of ['all', 'hidden', 'bundled'] as const) {
+    const svg = renderFrameSvg(input(model), { signalMode: mode }).svg;
+    const boxes = [
+      ...svg.matchAll(
+        /(?:<g class="child">|<a [^>]*class="nav">)<title>([^<]*)<\/title><rect x="([-\d.]+)" y="([-\d.]+)" width="([-\d.]+)" height="([-\d.]+)"/g,
+      ),
+    ].map((m) => ({ name: m[1], x: +m[2], y: +m[3], w: +m[4], h: +m[5] }));
+    assert.ok(boxes.length > 0, `the ${mode} picture has instance boxes`);
+    for (const m of svg.matchAll(
+      /<g class="(?:bundle|signal)"><title>[^<]*<\/title><rect x="([-\d.]+)" y="([-\d.]+)" width="([-\d.]+)" height="([-\d.]+)"/g,
+    )) {
+      boxes.push({ name: 'bus', x: +m[1], y: +m[2], w: +m[3], h: +m[4] });
+    }
+    const wires = [
+      ...svg.matchAll(
+        /<g class="edge">(?:<title>([^<]*)<\/title>)?<path d="M ([-\d.]+),([-\d.]+) C [^"]* ([-\d.]+),([-\d.]+)/g,
+      ),
+    ].map((m) => ({ title: m[1] ?? '', to: [+m[4], +m[5]] }));
+    assert.ok(wires.length > 0, `the ${mode} picture has wires`);
+    assert.equal(
+      (svg.match(/marker-end=/g) ?? []).length,
+      wires.length,
+      `every ${mode} wire carries an arrow`,
+    );
+    for (const w of wires) {
+      for (const b of boxes) {
+        assert.ok(
+          !(w.to[0] > b.x && w.to[0] < b.x + b.w && w.to[1] > b.y && w.to[1] < b.y + b.h),
+          `the ${mode} wire into ${b.name} stops outside the box so the arrow shows`,
+        );
+      }
+    }
+  }
+  const svg = renderFrameSvg(input(model), { signalMode: 'bundled' }).svg;
+  const feed = [
+    ...svg.matchAll(
+      /<g class="edge"><title>([^<]*)<\/title><path d="M ([-\d.]+),([-\d.]+) C [^"]* ([-\d.]+),([-\d.]+)"/g,
+    ),
+  ].find((m) => m[1].includes('→u_ctrl.'));
+  assert.ok(feed, 'a wire feeds the control instance');
+  const ctrl = /(?:<g class="child">|<a [^>]*class="nav">)<title>u_ctrl<\/title><rect x="([-\d.]+)"/.exec(
+    svg,
+  );
+  assert.ok(ctrl, 'the control instance is drawn');
+  assert.equal(+feed![4], +ctrl![1], 'the wire stops on the border of the instance');
+});
+
 test('svg: the bundled picture keeps every port name in a tooltip', () => {
   const model = mixedDirections();
   const svg = renderFrameSvg(input(model), { signalMode: 'bundled' }).svg;
