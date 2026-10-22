@@ -653,7 +653,7 @@ endmodule`;
   assert.equal(downSecond.targets[0].label, 'u2 : leaf');
 });
 
-test('trace module down: a module jumps to its children implementations', () => {
+test('trace module down: a module jumps to where its children are instantiated', () => {
   const index = indexDir(FIXTURES);
   const file = path.join(FIXTURES, 'datapath.v');
   const src = fs.readFileSync(file, 'utf8');
@@ -664,9 +664,32 @@ test('trace module down: a module jumps to its children implementations', () => 
   const byLabel = Object.fromEntries(down.targets.map((t) => [t.label, t]));
   assert.ok(byLabel['u_adder : adder'], 'adder is a child');
   assert.ok(byLabel['u_regfile : regfile'], 'regfile is a child');
-  assert.equal(path.basename(byLabel['u_adder : adder'].file), 'adder.v');
-  assert.equal(path.basename(byLabel['u_regfile : regfile'].file), 'regfile.v');
-  assert.ok(down.targets.every((t) => t.kind === 'child-module'));
+  // The hop lands on the instantiation, not on the implementation: the file is
+  // the one that holds the module and the range is the instance name.
+  for (const t of down.targets) {
+    assert.equal(t.kind, 'child-instance');
+    assert.equal(path.basename(t.file), 'datapath.v');
+  }
+  const name = at(src, 'u_adder');
+  assert.equal(byLabel['u_adder : adder'].range.start.line, name.line);
+  assert.equal(byLabel['u_adder : adder'].range.start.character, name.character);
+});
+
+test('trace module down: the instantiation comes first, the implementation next', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'chip_top.v');
+  const src = fs.readFileSync(file, 'utf8');
+  const p = at(src, 'module chip_top', 'module '.length);
+
+  const first = traceModule(index, file, src, p.line, p.character, 'down')!;
+  const hop = first.targets.find((t) => t.label === 'u_dpath : datapath');
+  assert.ok(hop, 'the child is a candidate');
+  assert.equal(hop.kind, 'child-instance');
+
+  const second = traceModule(index, file, src, hop.range.start.line, hop.range.start.character, 'down')!;
+  assert.equal(second.targets.length, 1, 'one instance points at one module');
+  assert.equal(second.targets[0].kind, 'child-module');
+  assert.equal(path.basename(second.targets[0].file), 'datapath.v');
 });
 
 test('trace module up: a top-level module has no parent', () => {
@@ -680,15 +703,15 @@ test('trace module up: a top-level module has no parent', () => {
   assert.deepEqual(up.targets, [], 'the top is never instantiated');
 });
 
-test('trace module down: the top fans out to every child implementation', () => {
+test('trace module down: the top fans out to every child instantiation', () => {
   const index = indexDir(FIXTURES);
   const file = path.join(FIXTURES, 'chip_top.v');
   const src = fs.readFileSync(file, 'utf8');
   const p = at(src, 'module chip_top', 'module '.length);
 
   const down = traceModule(index, file, src, p.line, p.character, 'down')!;
-  const files = down.targets.map((t) => path.basename(t.file)).sort();
-  assert.deepEqual(files, ['control.v', 'datapath.v']);
+  assert.deepEqual(down.targets.map((t) => t.label).sort(), ['u_ctrl : control', 'u_dpath : datapath']);
+  assert.ok(down.targets.every((t) => path.basename(t.file) === 'chip_top.v'));
 });
 
 test('trace module down: a cursor on an instance jumps to the module implementation', () => {
@@ -765,15 +788,30 @@ endmodule`;
   assert.deepEqual(down.targets, [], 'an unindexed module has no children');
 });
 
+test('trace module down: an unindexed child is not offered as a candidate', () => {
+  const index = new HdlIndex();
+  const src = `module top (input wire a, output wire y);
+  mystery u_m (.a(a));
+  leaf u_l (.i(a), .o(y));
+endmodule
+module leaf (input wire i, output wire o);
+endmodule`;
+  index.addFile('/w/t.v', src);
+  const p = at(src, 'module top', 'module '.length);
+
+  const down = traceModule(index, '/w/t.v', src, p.line, p.character, 'down')!;
+  assert.deepEqual(down.targets.map((t) => t.label), ['u_l : leaf'], 'the unindexed child is skipped');
+});
+
 test('trace at: dispatches a module cursor to the module trace and a signal cursor to the signal trace', () => {
   const index = indexDir(FIXTURES);
   const file = path.join(FIXTURES, 'datapath.v');
   const src = fs.readFileSync(file, 'utf8');
 
-  // On the module name: the hierarchy, so a child implementation comes back.
+  // On the module name: the hierarchy, so the instantiation of a child comes back.
   const mod = at(src, 'module datapath', 'module '.length);
   const down = traceAt(index, file, src, mod.line, mod.character, 'down')!;
-  assert.ok(down.targets.some((t) => t.kind === 'child-module'), 'module cursor traces the module');
+  assert.ok(down.targets.some((t) => t.kind === 'child-instance'), 'module cursor traces the module');
 
   // On a net: the signal web, so the child connection comes back.
   const net = at(src, 'wire [WIDTH-1:0] alu_sum', 'wire [WIDTH-1:0] '.length);
@@ -836,8 +874,7 @@ test('trace at: a blank line traces the current module, not an instantiated one'
   // children are chip_top's own and not the ones of the module it instantiates.
   const down = traceAt(index, file, src, 12, 0, 'down')!;
   assert.equal(down.name, 'chip_top');
-  const files = down.targets.map((t) => path.basename(t.file)).sort();
-  assert.deepEqual(files, ['control.v', 'datapath.v']);
+  assert.deepEqual(down.targets.map((t) => t.label).sort(), ['u_ctrl : control', 'u_dpath : datapath']);
 });
 
 test('trace module: a blank cursor traces the module it sits in', () => {

@@ -37,6 +37,8 @@ export type TraceStepKind =
   | 'usage'
   /** A module traces up to the instance that instantiates its parent context? */
   | 'parent-instance'
+  /** A module traces down to the place a child module is instantiated. */
+  | 'child-instance'
   /** A module traces down to a child module's definition. */
   | 'child-module'
   /** A module trace lands on the module's own definition. */
@@ -502,10 +504,15 @@ function moduleTraceUp(
 /**
  * Down: the modules below the cursor.
  *
- * On an instantiation the instance names exactly one module, so the trace lands
- * on that module's implementation - there is nothing to choose. Anywhere else
- * the children of the module the cursor is in are the candidates and the
- * caller picks one; a module without children sends the trace back to its own
+ * The descent visits both positions of every level it passes, the way the climb
+ * does: the place where a child module is instantiated and the implementation
+ * of that child. A cursor on a module header goes to the instantiation of one
+ * of its children; a cursor on an instantiation goes to the implementation of
+ * the module that is instantiated there. Every hop is one position, so tracing
+ * down walks the hierarchy the same way tracing up walks it.
+ *
+ * The children of the module the cursor is in are the candidates and the caller
+ * picks one; a module without children sends the trace back to its own
  * definition.
  */
 function moduleTraceDown(
@@ -543,11 +550,11 @@ function moduleTraceDown(
       continue;
     }
     add(targets, {
-      file: impl.file,
-      range: impl.nameRange,
-      kind: 'child-module',
+      file: mod.file,
+      range: child.nameRange,
+      kind: 'child-instance',
       label: `${child.name} : ${impl.name}`,
-      detail: `${impl.name} defined in ${impl.file.split('/').pop() ?? impl.file}`,
+      detail: `instantiated in ${mod.name}`,
     });
   }
   if (targets.length === 0) {
