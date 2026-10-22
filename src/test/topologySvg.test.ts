@@ -494,51 +494,6 @@ test('svg: bundling gives the frame ports one link per instance', () => {
   );
 });
 
-test('svg: the instances sit in a box the signals cross', () => {
-  const model = chipTop();
-  for (const mode of ['all', 'hidden', 'bundled'] as const) {
-    const svg = renderFrameSvg(input(model), { signalMode: mode }).svg;
-    const box = /<g class="instance-group"><rect x="([-\d.]+)" y="([-\d.]+)" width="([-\d.]+)" height="([-\d.]+)"/.exec(
-      svg,
-    );
-    assert.ok(box, `the ${mode} picture has a box around the instances`);
-    const bx = +box![1];
-    const by = +box![2];
-    const bw = +box![3];
-    const bh = +box![4];
-    const canvas = /<rect x="0" y="0" width="([-\d.]+)" height="([-\d.]+)"/.exec(svg);
-    assert.ok(canvas);
-    assert.ok(bx >= 0 && by >= 0, `the ${mode} box starts inside the canvas`);
-    assert.ok(
-      bx + bw <= +canvas![1] && by + bh <= +canvas![2],
-      `the ${mode} box ends inside the canvas`,
-    );
-    const kids = [
-      ...svg.matchAll(
-        /(?:<g class="child">|<a [^>]*class="nav">|<g class="src"[^>]*>)<title>[^<]*<\/title><rect x="([-\d.]+)" y="([-\d.]+)" width="([-\d.]+)" height="([-\d.]+)"/g,
-      ),
-    ];
-    assert.equal(kids.length, model.children.length);
-    for (const k of kids) {
-      assert.ok(
-        +k[1] >= bx && +k[2] >= by && +k[1] + +k[3] <= bx + bw && +k[2] + +k[4] <= by + bh,
-        `the ${mode} box hugs the instance`,
-      );
-    }
-    const wires = [
-      ...svg.matchAll(/<g class="edge">.*?<path d="M ([-\d.]+),([-\d.]+) C [^"]* ([-\d.]+),([-\d.]+)"/g),
-    ];
-    const crossing = wires.filter(
-      (w) => (+w[1] < bx && +w[3] > bx) || (+w[3] < bx && +w[1] > bx),
-    );
-    assert.ok(crossing.length > 0, `the ${mode} signals pass through the box`);
-    assert.ok(
-      svg.indexOf('class="instance-group"') < svg.indexOf('class="edges"'),
-      `the ${mode} box sits behind the wires`,
-    );
-  }
-});
-
 test('svg: the current module has a frame that reaches the port boxes', () => {
   const model = chipTop();
   for (const mode of ['all', 'hidden', 'bundled'] as const) {
@@ -608,17 +563,38 @@ test('svg: the current module has a frame that reaches the port boxes', () => {
       svg.indexOf('class="module-frame"') > svg.indexOf(portGroup),
       `the ${mode} frame is drawn over the port boxes`,
     );
+    const kids = [
+      ...svg.matchAll(
+        /(?:<g class="child">|<a [^>]*class="nav">|<g class="src"[^>]*>)<title>[^<]*<\/title><rect x="([-\d.]+)" y="([-\d.]+)" width="([-\d.]+)" height="([-\d.]+)"/g,
+      ),
+    ];
+    assert.equal(kids.length, model.children.length);
+    for (const k of kids) {
+      assert.ok(
+        +k[1] > fx &&
+          +k[2] > +frame![2] &&
+          +k[1] + +k[3] < fx + fw &&
+          +k[2] + +k[4] < +frame![2] + +frame![4],
+        `the ${mode} frame holds the instance inside`,
+      );
+    }
+    assert.equal(
+      (svg.match(/<g class="module-frame">/g) ?? []).length,
+      1,
+      `the ${mode} picture has one frame and no second box`,
+    );
+    assert.ok(
+      !/module-frame-fill|instance-group/.test(svg),
+      `the ${mode} picture has no second box around the module`,
+    );
   }
   const leaf: ModuleTopology = { ...model, children: [], edges: [] };
   for (const mode of ['all', 'hidden', 'bundled'] as const) {
     const svg = renderFrameSvg(input(leaf), { signalMode: mode }).svg;
-    assert.ok(
-      /<g class="module-frame">/.test(svg),
-      `the ${mode} picture of a module without instances still has a frame`,
-    );
-    assert.ok(
-      !/<g class="instance-group">/.test(svg),
-      `the ${mode} picture of a module without instances has no instance box`,
+    assert.equal(
+      (svg.match(/<g class="module-frame">/g) ?? []).length,
+      1,
+      `the ${mode} picture of a module without instances still has one frame`,
     );
   }
 });

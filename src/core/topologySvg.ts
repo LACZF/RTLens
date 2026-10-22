@@ -500,20 +500,6 @@ export function renderFrameSvg(
     }
   }
 
-  let groupBox: { x: number; y: number; w: number; h: number } | null = null;
-  if (childGeoms.length > 0) {
-    const x0 = Math.min(...childGeoms.map((g) => g.x));
-    const y0 = Math.min(...childGeoms.map((g) => g.y));
-    const x1 = Math.max(...childGeoms.map((g) => g.x + g.w));
-    const y1 = Math.max(...childGeoms.map((g) => g.y + g.h));
-    groupBox = {
-      x: x0 - groupPad,
-      y: y0 - groupPad,
-      w: x1 - x0 + groupPad * 2,
-      h: y1 - y0 + groupPad * 2,
-    };
-  }
-
   /* ---------------- boundary rails (mode `hidden`) ---------------- */
 
   const railInnerLeft = pad + HIDDEN_MARGIN - 26;
@@ -1062,31 +1048,6 @@ export function renderFrameSvg(
 
   parts.push(`<g class="header">${headerParts.join('')}</g>`);
 
-  /* ---------------- instance group box ---------------- */
-
-  if (groupBox) {
-    parts.push(
-      `<g class="instance-group">` +
-        `<rect x="${num(groupBox.x)}" y="${num(groupBox.y)}" width="${num(groupBox.w)}" height="${num(
-          groupBox.h,
-        )}" rx="12" fill="${esc(th.panel)}" fill-opacity="0.5" stroke="${esc(th.stroke)}" stroke-width="1" stroke-dasharray="6 4"/>` +
-        `<text class="mono" x="${num(groupBox.x + 10)}" y="${num(groupBox.y + 16)}" font-family="${FONT}" font-size="10" fill="${esc(
-          th.muted,
-        )}">${esc(`instances (${children.length})`)}</text>` +
-        `</g>`,
-    );
-  }
-
-  /* ---------------- the current module's frame (fill) ---------------- */
-
-  parts.push(
-    `<g class="module-frame-fill">` +
-      `<rect x="${num(moduleFrame.x)}" y="${num(moduleFrame.y)}" width="${num(
-        moduleFrame.w,
-      )}" height="${num(moduleFrame.h)}" rx="12" fill="${esc(th.panel)}" fill-opacity="0.18"/>` +
-      `</g>`,
-  );
-
   /* ---------------- edges (behind the boxes) ---------------- */
 
   const edgeParts: string[] = [];
@@ -1180,7 +1141,7 @@ export function renderFrameSvg(
     parts.push(`<g class="bundles">${barParts.join('')}</g>`);
   }
 
-  /* ---------------- the current module's frame (border) ---------------- */
+  /* ---------------- the current module's frame ---------------- */
 
   parts.push(
     `<g class="module-frame">` +
