@@ -193,6 +193,7 @@ const CHILD_HEAD = 34;
 const CHILD_ROW = 18;
 const CHILD_PAD = 10;
 const GROUP_PAD = 22;
+const FRAME_PAD = 16;
 const PORT_CAP = 8;
 const TICK = 10;
 const BAR_W = 46;
@@ -444,7 +445,7 @@ export function renderFrameSvg(
       : Math.max(signalRowsH, childrenH + groupPad * 2),
   );
 
-  const canvasH = Math.max(240, pad + HEADER_H + contentH + FOOTER_H + pad);
+  const canvasH = Math.max(240, pad + HEADER_H + contentH + FOOTER_H + pad + FRAME_PAD);
   const contentTop = pad + HEADER_H;
   const contentBottom = contentTop + contentH;
 
@@ -592,8 +593,6 @@ export function renderFrameSvg(
 
   /* ---------------- the current module's frame ---------------- */
 
-  // The frame is the module's own boundary, so it is drawn for a module
-  // without instances as well.
   let frameLeft: number;
   let frameRight: number;
   if (hidden) {
@@ -611,9 +610,9 @@ export function renderFrameSvg(
   }
   const moduleFrame = {
     x: frameLeft,
-    y: contentTop,
+    y: contentTop - FRAME_PAD,
     w: Math.max(1, frameRight - frameLeft),
-    h: contentH,
+    h: contentH + FRAME_PAD * 2,
   };
 
   /* ---------------- edge endpoints ---------------- */

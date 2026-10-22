@@ -496,107 +496,126 @@ test('svg: bundling gives the frame ports one link per instance', () => {
 
 test('svg: the current module has a frame that reaches the port boxes', () => {
   const model = chipTop();
-  for (const mode of ['all', 'hidden', 'bundled'] as const) {
-    const svg = renderFrameSvg(input(model), { signalMode: mode }).svg;
-    const frame = /<g class="module-frame"><rect x="([-\d.]+)" y="([-\d.]+)" width="([-\d.]+)" height="([-\d.]+)"/.exec(
-      svg,
-    );
-    assert.ok(frame, `the ${mode} picture has a frame around the current module`);
-    const fx = +frame![1];
-    const fw = +frame![3];
-    let left = 0;
-    let right = 0;
-    let portTop = 0;
-    let portBottom = 0;
-    let portGroup = '';
-    if (mode === 'all') {
-      const rows = [
+  const plain: ModuleTopology = { ...model, children: [], edges: [] };
+  const cases: [string, ModuleTopology][] = [
+    ['with instances', model],
+    ['without instances', plain],
+  ];
+  for (const [label, m] of cases) {
+    for (const mode of ['all', 'hidden', 'bundled'] as const) {
+      const svg = renderFrameSvg(input(m), { signalMode: mode }).svg;
+      const frames = [
         ...svg.matchAll(
-          /<g class="signal"><title>[^<]*<\/title><rect x="([-\d.]+)" y="([-\d.]+)" width="([-\d.]+)" height="([-\d.]+)"/g,
+          /<g class="module-frame"><rect x="([-\d.]+)" y="([-\d.]+)" width="([-\d.]+)" height="([-\d.]+)"/g,
         ),
       ];
-      assert.ok(rows.length >= 2, `the ${mode} picture has input and output boxes`);
-      left = +rows[0]![1] + +rows[0]![3] / 2;
-      right = +rows[rows.length - 1]![1] + +rows[rows.length - 1]![3] / 2;
-      portTop = +rows[0]![2];
-      portBottom = +rows[rows.length - 1]![2] + +rows[rows.length - 1]![4];
-      portGroup = 'class="signals"';
-    } else if (mode === 'bundled') {
-      const bars = [
-        ...svg.matchAll(
-          /<g class="bundle"><title>[^<]*<\/title><rect x="([-\d.]+)" y="([-\d.]+)" width="([-\d.]+)" height="([-\d.]+)"/g,
-        ),
-      ];
-      assert.ok(bars.length >= 2, `the ${mode} picture has input and output boxes`);
-      left = +bars[0]![1] + +bars[0]![3] / 2;
-      right = +bars[bars.length - 1]![1] + +bars[bars.length - 1]![3] / 2;
-      portTop = +bars[0]![2];
-      portBottom = +bars[bars.length - 1]![2] + +bars[bars.length - 1]![4];
-      portGroup = 'class="bundles"';
-    } else {
-      const rails = [
-        ...svg.matchAll(
-          /<line x1="([-\d.]+)" y1="([-\d.]+)" x2="[-\d.]+" y2="([-\d.]+)" stroke="[^"]*" stroke-width="1" stroke-dasharray="3 3"/g,
-        ),
-      ];
-      assert.equal(rails.length, 2, `the ${mode} picture has two rails`);
-      left = +rails[0]![1];
-      right = +rails[1]![1];
-      portTop = +rails[0]![2];
-      portBottom = +rails[1]![3];
-      portGroup = 'class="rails"';
-    }
-    assert.ok(Math.abs(fx - left) < 0.02, `the ${mode} frame starts in the middle of the input box`);
-    assert.ok(
-      Math.abs(fx + fw - right) < 0.02,
-      `the ${mode} frame ends in the middle of the output box`,
-    );
-    assert.ok(
-      Math.abs(+frame![2] - portTop) < 0.02,
-      `the ${mode} frame starts at the top of the port boxes`,
-    );
-    assert.ok(
-      +frame![2] + +frame![4] >= portBottom - 0.02,
-      `the ${mode} frame reaches past the port boxes`,
-    );
-    assert.ok(
-      svg.indexOf('class="module-frame"') > svg.indexOf(portGroup),
-      `the ${mode} frame is drawn over the port boxes`,
-    );
-    const kids = [
-      ...svg.matchAll(
-        /(?:<g class="child">|<a [^>]*class="nav">|<g class="src"[^>]*>)<title>[^<]*<\/title><rect x="([-\d.]+)" y="([-\d.]+)" width="([-\d.]+)" height="([-\d.]+)"/g,
-      ),
-    ];
-    assert.equal(kids.length, model.children.length);
-    for (const k of kids) {
+      assert.equal(frames.length, 1, `the ${mode} picture of a module ${label} has one frame`);
+      const fx = +frames[0]![1];
+      const fy = +frames[0]![2];
+      const fw = +frames[0]![3];
+      const fh = +frames[0]![4];
+      let left = 0;
+      let right = 0;
+      let portTop = 0;
+      let portBottom = 0;
+      let portGroup = '';
+      if (mode === 'all') {
+        const rows = [
+          ...svg.matchAll(
+            /<g class="signal"><title>[^<]*<\/title><rect x="([-\d.]+)" y="([-\d.]+)" width="([-\d.]+)" height="([-\d.]+)"/g,
+          ),
+        ];
+        assert.ok(rows.length >= 2, `the ${mode} picture has input and output boxes`);
+        left = +rows[0]![1] + +rows[0]![3] / 2;
+        right = +rows[rows.length - 1]![1] + +rows[rows.length - 1]![3] / 2;
+        portTop = +rows[0]![2];
+        portBottom = +rows[rows.length - 1]![2] + +rows[rows.length - 1]![4];
+        portGroup = 'class="signals"';
+      } else if (mode === 'bundled') {
+        const bars = [
+          ...svg.matchAll(
+            /<g class="bundle"><title>[^<]*<\/title><rect x="([-\d.]+)" y="([-\d.]+)" width="([-\d.]+)" height="([-\d.]+)"/g,
+          ),
+        ];
+        assert.ok(bars.length >= 2, `the ${mode} picture has input and output boxes`);
+        left = +bars[0]![1] + +bars[0]![3] / 2;
+        right = +bars[bars.length - 1]![1] + +bars[bars.length - 1]![3] / 2;
+        portTop = +bars[0]![2];
+        portBottom = +bars[bars.length - 1]![2] + +bars[bars.length - 1]![4];
+        portGroup = 'class="bundles"';
+      } else {
+        const rails = [
+          ...svg.matchAll(
+            /<line x1="([-\d.]+)" y1="([-\d.]+)" x2="[-\d.]+" y2="([-\d.]+)" stroke="[^"]*" stroke-width="1" stroke-dasharray="3 3"/g,
+          ),
+        ];
+        assert.equal(rails.length, 2, `the ${mode} picture has two rails`);
+        left = +rails[0]![1];
+        right = +rails[1]![1];
+        portTop = +rails[0]![2];
+        portBottom = +rails[1]![3];
+        portGroup = 'class="rails"';
+      }
       assert.ok(
-        +k[1] > fx &&
-          +k[2] > +frame![2] &&
-          +k[1] + +k[3] < fx + fw &&
-          +k[2] + +k[4] < +frame![2] + +frame![4],
-        `the ${mode} frame holds the instance inside`,
+        Math.abs(fx - left) < 0.02,
+        `the ${mode} frame starts in the middle of the input box`,
       );
+      assert.ok(
+        Math.abs(fx + fw - right) < 0.02,
+        `the ${mode} frame ends in the middle of the output box`,
+      );
+      assert.ok(
+        portTop - fy >= 8,
+        `the ${mode} frame of a module ${label} leaves room above the port boxes`,
+      );
+      assert.ok(
+        fy + fh - portBottom >= 8,
+        `the ${mode} frame of a module ${label} leaves room below the port boxes`,
+      );
+      if (mode !== 'all') {
+        assert.ok(
+          Math.abs(portTop - fy - (fy + fh - portBottom)) < 0.02,
+          `the ${mode} frame of a module ${label} is padded the same above and below`,
+        );
+      }
+      assert.ok(
+        svg.indexOf('class="module-frame"') > svg.indexOf(portGroup),
+        `the ${mode} frame is drawn over the port boxes`,
+      );
+      assert.ok(
+        !/module-frame-fill|instance-group/.test(svg),
+        `the ${mode} picture has no second box around the module`,
+      );
+      const kids = [
+        ...svg.matchAll(
+          /(?:<g class="child">|<a [^>]*class="nav">|<g class="src"[^>]*>)<title>[^<]*<\/title><rect x="([-\d.]+)" y="([-\d.]+)" width="([-\d.]+)" height="([-\d.]+)"/g,
+        ),
+      ];
+      assert.equal(kids.length, m.children.length);
+      for (const k of kids) {
+        assert.ok(
+          +k[1] > fx && +k[2] > fy && +k[1] + +k[3] < fx + fw && +k[2] + +k[4] < fy + fh,
+          `the ${mode} frame of a module ${label} holds the instance inside`,
+        );
+      }
     }
-    assert.equal(
-      (svg.match(/<g class="module-frame">/g) ?? []).length,
-      1,
-      `the ${mode} picture has one frame and no second box`,
-    );
-    assert.ok(
-      !/module-frame-fill|instance-group/.test(svg),
-      `the ${mode} picture has no second box around the module`,
-    );
   }
-  const leaf: ModuleTopology = { ...model, children: [], edges: [] };
-  for (const mode of ['all', 'hidden', 'bundled'] as const) {
-    const svg = renderFrameSvg(input(leaf), { signalMode: mode }).svg;
-    assert.equal(
-      (svg.match(/<g class="module-frame">/g) ?? []).length,
-      1,
-      `the ${mode} picture of a module without instances still has one frame`,
-    );
-  }
+});
+
+test('svg: the footer of a warned picture stays under the frame', () => {
+  const model: ModuleTopology = {
+    ...chipTop(),
+    children: [],
+    edges: [],
+    warnings: [{ message: 'module not found: missing' }],
+  };
+  const svg = renderFrameSvg(input(model), { signalMode: 'all' }).svg;
+  const frame = /<g class="module-frame"><rect x="([-\d.]+)" y="([-\d.]+)" width="([-\d.]+)" height="([-\d.]+)"/.exec(svg);
+  const footer = /<g class="footer">[\s\S]*?<text[^>]* y="([-\d.]+)"/.exec(svg);
+  assert.ok(frame, 'the picture has a frame');
+  assert.ok(footer, 'the picture has a footer');
+  const frameBottom = +frame![2] + +frame![4];
+  assert.ok(+footer![1] - frameBottom >= 8, 'the footer sits clear of the bottom of the frame');
 });
 
 test('svg: the wires stop at the border so their arrows stay visible', () => {
