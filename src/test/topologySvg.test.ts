@@ -450,6 +450,95 @@ test('svg: bundling draws one link per direction between two instances', () => {
   );
 });
 
+test('svg: bundling gives the frame ports one link per instance', () => {
+  const model = chipTop();
+  const svg = renderFrameSvg(input(model), { signalMode: 'bundled' }).svg;
+  const wires = [...svg.matchAll(/<g class="edge"><title>([^<]*)<\/title>/g)].map((m) => {
+    const parts = /^(\w+) \((\d+)\): (.*)$/.exec(m[1]);
+    assert.ok(parts, `the wire title reads as a class and a list: ${m[1]}`);
+    return {
+      cat: parts![1],
+      pairs: parts![3].split(', ').map((p) => p.split('→') as [string, string]),
+    };
+  });
+  const fromFrame = wires.filter((w) => w.pairs.every(([from]) => !from.includes('.')));
+  const toFrame = wires.filter((w) => w.pairs.every(([, to]) => !to.includes('.')));
+  const fed = new Set<string>();
+  const drives = new Set<string>();
+  for (const e of model.edges) {
+    if (e.from.kind === 'signal' && e.to.kind === 'child') {
+      fed.add(e.to.child);
+    }
+    if (e.from.kind === 'child' && e.to.kind === 'signal') {
+      drives.add(e.from.child);
+    }
+  }
+  assert.equal(fromFrame.length, fed.size, 'one wire from the input bus into each instance');
+  assert.equal(toFrame.length, drives.size, 'one wire from each instance to the output bus');
+  assert.equal(
+    wires.length,
+    fromFrame.length + toFrame.length + 1,
+    'the link between the two instances is one wire',
+  );
+  const feed = fromFrame.find((w) => w.pairs.some(([, to]) => to.startsWith('u_ctrl.')));
+  assert.ok(feed, 'the input bus feeds the control instance');
+  assert.ok(
+    feed.pairs.some(([, to]) => to.endsWith('.clk')),
+    'the wire names the ports it swallowed',
+  );
+  const back = toFrame.find((w) => w.pairs.some(([from]) => from.startsWith('u_dpath.')));
+  assert.ok(back, 'the data path instance drives the output bus');
+  assert.ok(
+    back.pairs.some(([from]) => from.endsWith('.result')),
+    'the wire names the ports it swallowed',
+  );
+});
+
+test('svg: the instances sit in a box the signals cross', () => {
+  const model = chipTop();
+  for (const mode of ['all', 'hidden', 'bundled'] as const) {
+    const svg = renderFrameSvg(input(model), { signalMode: mode }).svg;
+    const box = /<g class="instance-group"><rect x="([-\d.]+)" y="([-\d.]+)" width="([-\d.]+)" height="([-\d.]+)"/.exec(
+      svg,
+    );
+    assert.ok(box, `the ${mode} picture has a box around the instances`);
+    const bx = +box![1];
+    const by = +box![2];
+    const bw = +box![3];
+    const bh = +box![4];
+    const canvas = /<rect x="0" y="0" width="([-\d.]+)" height="([-\d.]+)"/.exec(svg);
+    assert.ok(canvas);
+    assert.ok(bx >= 0 && by >= 0, `the ${mode} box starts inside the canvas`);
+    assert.ok(
+      bx + bw <= +canvas![1] && by + bh <= +canvas![2],
+      `the ${mode} box ends inside the canvas`,
+    );
+    const kids = [
+      ...svg.matchAll(
+        /(?:<g class="child">|<a [^>]*class="nav">|<g class="src"[^>]*>)<title>[^<]*<\/title><rect x="([-\d.]+)" y="([-\d.]+)" width="([-\d.]+)" height="([-\d.]+)"/g,
+      ),
+    ];
+    assert.equal(kids.length, model.children.length);
+    for (const k of kids) {
+      assert.ok(
+        +k[1] >= bx && +k[2] >= by && +k[1] + +k[3] <= bx + bw && +k[2] + +k[4] <= by + bh,
+        `the ${mode} box hugs the instance`,
+      );
+    }
+    const wires = [
+      ...svg.matchAll(/<g class="edge">.*?<path d="M ([-\d.]+),([-\d.]+) C [^"]* ([-\d.]+),([-\d.]+)"/g),
+    ];
+    const crossing = wires.filter(
+      (w) => (+w[1] < bx && +w[3] > bx) || (+w[3] < bx && +w[1] > bx),
+    );
+    assert.ok(crossing.length > 0, `the ${mode} signals pass through the box`);
+    assert.ok(
+      svg.indexOf('class="instance-group"') < svg.indexOf('class="edges"'),
+      `the ${mode} box sits behind the wires`,
+    );
+  }
+});
+
 test('svg: the bundled picture keeps every port name in a tooltip', () => {
   const model = mixedDirections();
   const svg = renderFrameSvg(input(model), { signalMode: 'bundled' }).svg;

@@ -192,6 +192,7 @@ const CHILD_GAP = 24;
 const CHILD_HEAD = 34;
 const CHILD_ROW = 18;
 const CHILD_PAD = 10;
+const GROUP_PAD = 22;
 const PORT_CAP = 8;
 const TICK = 10;
 const EDGE_ATTACH = 15;
@@ -408,6 +409,12 @@ export function renderFrameSvg(
     gutterR = GUTTER;
   }
 
+  const groupPad = children.length > 0 ? GROUP_PAD : 0;
+  if (groupPad > 0) {
+    gutterL = Math.max(gutterL, groupPad);
+    gutterR = Math.max(gutterR, groupPad);
+  }
+
   const canvasW = leftW + gutterL + midW + gutterR + rightW + pad * 2;
 
   const leftColX = pad;
@@ -432,7 +439,9 @@ export function renderFrameSvg(
   const maxCount = Math.max(inputs.length, outputs.length);
   const contentH = Math.max(
     1,
-    hidden ? Math.max(childrenH, maxCount * 18) : Math.max(signalRowsH, childrenH),
+    hidden
+      ? Math.max(childrenH + groupPad * 2, maxCount * 18)
+      : Math.max(signalRowsH, childrenH + groupPad * 2),
   );
 
   const canvasH = Math.max(240, pad + HEADER_H + contentH + FOOTER_H + pad);
@@ -489,6 +498,20 @@ export function renderFrameSvg(
       });
       y += h + CHILD_GAP;
     }
+  }
+
+  let groupBox: { x: number; y: number; w: number; h: number } | null = null;
+  if (childGeoms.length > 0) {
+    const x0 = Math.min(...childGeoms.map((g) => g.x));
+    const y0 = Math.min(...childGeoms.map((g) => g.y));
+    const x1 = Math.max(...childGeoms.map((g) => g.x + g.w));
+    const y1 = Math.max(...childGeoms.map((g) => g.y + g.h));
+    groupBox = {
+      x: x0 - groupPad,
+      y: y0 - groupPad,
+      w: x1 - x0 + groupPad * 2,
+      h: y1 - y0 + groupPad * 2,
+    };
   }
 
   /* ---------------- boundary rails (mode `hidden`) ---------------- */
@@ -723,28 +746,50 @@ export function renderFrameSvg(
       const grp = list.find((gr) => gr.ports.some((p) => p.name === portName));
       return grp ? grp.cat : null;
     };
+    const lineOf = (ep: TopoEndpoint, side: 'left' | 'right'): { id: string; cat: PortCat } | null => {
+      if (ep.kind === 'signal') {
+        if (side === 'right') {
+          return { id: 'bus:out', cat: 'out' };
+        }
+        const sig = inputs.find((s) => s.name === ep.name || s.declName === ep.name);
+        if (!sig) {
+          return null;
+        }
+        const cat: PortCat = sig.direction === 'inout' ? 'inout' : 'in';
+        return { id: `bus:${cat}`, cat };
+      }
+      const cat = childGroupCat(ep.child, ep.side, ep.port);
+      return cat ? { id: `child:${ep.child}:${cat}`, cat } : null;
+    };
+    const labelOf = (ep: TopoEndpoint): string =>
+      ep.kind === 'signal' ? ep.name : `${ep.child}.${ep.port}`;
     interface MergedLink {
       edge: TopoEdge;
       cat: PortCat;
       ports: string[];
     }
     const links = new Map<string, MergedLink>();
-    const singles: { edge: TopoEdge; role?: 'input' | 'output' | 'neutral' }[] = [];
+    const singles: { edge: TopoEdge }[] = [];
     for (const e of edges) {
-      if (e.from.kind === 'child' && e.to.kind === 'child') {
-        const fromCat = childGroupCat(e.from.child, e.from.side, e.from.port);
-        const toCat = childGroupCat(e.to.child, e.to.side, e.to.port);
-        const cat = fromCat || toCat || 'in';
-        const key = `${e.from.child}->${e.to.child}:${cat}`;
-        const found = links.get(key);
-        if (found) {
-          found.ports.push(`${e.from.port}→${e.to.port}`);
-        } else {
-          links.set(key, { edge: e, cat, ports: [`${e.from.port}→${e.to.port}`] });
-        }
+      const fromLine = lineOf(e.from, 'left');
+      const toLine = lineOf(e.to, 'right');
+      if (!fromLine || !toLine) {
+        singles.push({ edge: e });
         continue;
       }
-      singles.push({ edge: e });
+      const cat: PortCat = fromLine.id.startsWith('bus:')
+        ? fromLine.cat
+        : toLine.id === 'bus:out'
+          ? 'out'
+          : fromLine.cat;
+      const key = `${fromLine.id}->${toLine.id}`;
+      const pair = `${labelOf(e.from)}→${labelOf(e.to)}`;
+      const found = links.get(key);
+      if (found) {
+        found.ports.push(pair);
+      } else {
+        links.set(key, { edge: e, cat, ports: [pair] });
+      }
     }
     drawEdges = [
       ...singles,
@@ -987,6 +1032,21 @@ export function renderFrameSvg(
   }
 
   parts.push(`<g class="header">${headerParts.join('')}</g>`);
+
+  /* ---------------- instance group box ---------------- */
+
+  if (groupBox) {
+    parts.push(
+      `<g class="instance-group">` +
+        `<rect x="${num(groupBox.x)}" y="${num(groupBox.y)}" width="${num(groupBox.w)}" height="${num(
+          groupBox.h,
+        )}" rx="12" fill="${esc(th.panel)}" fill-opacity="0.5" stroke="${esc(th.stroke)}" stroke-width="1" stroke-dasharray="6 4"/>` +
+        `<text class="mono" x="${num(groupBox.x + 10)}" y="${num(groupBox.y + 16)}" font-family="${FONT}" font-size="10" fill="${esc(
+          th.muted,
+        )}">${esc(`instances (${children.length})`)}</text>` +
+        `</g>`,
+    );
+  }
 
   /* ---------------- edges (behind the boxes) ---------------- */
 
