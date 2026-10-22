@@ -705,18 +705,75 @@ export function renderFrameSvg(
   const edgeGeoms: EdgeGeom[] = [];
   const margin = 2;
 
-  for (const e of edges) {
+  let drawEdges: {
+    edge: TopoEdge;
+    role?: 'input' | 'output' | 'neutral';
+    merged?: { cat: PortCat; ports: string[] };
+  }[] = edges.map((edge) => ({
+    edge,
+  }));
+  if (useBars) {
+    const childGroupCat = (childId: string, side: 'input' | 'output', portName: string): PortCat | null => {
+      const cg = childGeoms.find((g) => g.child.id === childId);
+      if (!cg) {
+        return null;
+      }
+      const groups = childGroups(cg.child);
+      const list = side === 'input' ? groups.left : groups.right;
+      const grp = list.find((gr) => gr.ports.some((p) => p.name === portName));
+      return grp ? grp.cat : null;
+    };
+    interface MergedLink {
+      edge: TopoEdge;
+      cat: PortCat;
+      ports: string[];
+    }
+    const links = new Map<string, MergedLink>();
+    const singles: { edge: TopoEdge; role?: 'input' | 'output' | 'neutral' }[] = [];
+    for (const e of edges) {
+      if (e.from.kind === 'child' && e.to.kind === 'child') {
+        const fromCat = childGroupCat(e.from.child, e.from.side, e.from.port);
+        const toCat = childGroupCat(e.to.child, e.to.side, e.to.port);
+        const cat = fromCat || toCat || 'in';
+        const key = `${e.from.child}->${e.to.child}:${cat}`;
+        const found = links.get(key);
+        if (found) {
+          found.ports.push(`${e.from.port}→${e.to.port}`);
+        } else {
+          links.set(key, { edge: e, cat, ports: [`${e.from.port}→${e.to.port}`] });
+        }
+        continue;
+      }
+      singles.push({ edge: e });
+    }
+    drawEdges = [
+      ...singles,
+      ...Array.from(links.values()).map((l) => ({
+        edge: l.edge,
+        role: (l.cat === 'in' ? 'input' : l.cat === 'out' ? 'output' : 'neutral') as
+          | 'input'
+          | 'output'
+          | 'neutral',
+        merged: { cat: l.cat, ports: l.ports },
+      })),
+    ];
+  }
+
+  for (const item of drawEdges) {
+    const e = item.edge;
     const from = endpointFor(e.from, 'left');
     const to = endpointFor(e.to, 'right');
     if (!from || !to) {
       continue;
     }
 
-    let role: 'input' | 'output' | 'neutral' = 'neutral';
-    if (from.role !== 'neutral') {
-      role = from.role;
-    } else if (to.role !== 'neutral') {
-      role = to.role;
+    let role: 'input' | 'output' | 'neutral' = item.role ?? 'neutral';
+    if (!item.role) {
+      if (from.role !== 'neutral') {
+        role = from.role;
+      } else if (to.role !== 'neutral') {
+        role = to.role;
+      }
     }
     const color = role === 'input' ? th.input : role === 'output' ? th.output : th.neutral;
 
@@ -750,6 +807,10 @@ export function renderFrameSvg(
     const labelY = (y0 + 3 * y0 + 3 * y1 + y1) / 8;
 
     const titleParts: string[] = [];
+    if (item.merged) {
+      const label = item.merged.cat === 'in' ? 'in' : item.merged.cat === 'out' ? 'out' : 'inout';
+      titleParts.push(`${label} (${item.merged.ports.length}): ${item.merged.ports.join(', ')}`);
+    }
     if (e.kind === 'expression' && e.label) {
       titleParts.push(e.label);
     }

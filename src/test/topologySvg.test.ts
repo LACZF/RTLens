@@ -8,6 +8,7 @@ import {
   buildModuleTopology,
   type ModuleTopology,
   type TopoChildPort,
+  type TopoEdge,
   type TopoSignal,
 } from '../core/topology';
 import type { PortDir } from '../core/ast';
@@ -239,6 +240,75 @@ function mixedDirections(): ModuleTopology {
   };
 }
 
+function linkedPair(): ModuleTopology {
+  const range = { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } };
+  const port = (name: string, direction: PortDir): TopoChildPort => ({
+    name,
+    side: direction === 'output' ? 'output' : 'input',
+    direction,
+    width: 1,
+    connected: true,
+  });
+  const link = (fromPort: string, fromDir: PortDir, toPort: string, toDir: PortDir): TopoEdge => ({
+    from: {
+      kind: 'child',
+      child: 'u_a',
+      port: fromPort,
+      side: fromDir === 'output' ? 'output' : 'input',
+    },
+    to: {
+      kind: 'child',
+      child: 'u_b',
+      port: toPort,
+      side: toDir === 'output' ? 'output' : 'input',
+    },
+    kind: 'port',
+  });
+  return {
+    moduleName: 'pair',
+    file: '/tmp/pair.v',
+    nameRange: range,
+    path: 'pair',
+    top: 'pair',
+    ancestors: [],
+    inputs: [],
+    outputs: [],
+    children: [
+      {
+        id: 'u_a',
+        instName: 'u_a',
+        moduleName: 'a',
+        defFile: '/tmp/a.v',
+        file: '/tmp/pair.v',
+        range,
+        nameRange: range,
+        moduleNameRange: range,
+        resolved: true,
+        ports: [port('o1', 'output'), port('o2', 'output'), port('io1', 'inout')],
+      },
+      {
+        id: 'u_b',
+        instName: 'u_b',
+        moduleName: 'b',
+        defFile: '/tmp/b.v',
+        file: '/tmp/pair.v',
+        range,
+        nameRange: range,
+        moduleNameRange: range,
+        resolved: true,
+        ports: [port('i1', 'input'), port('i2', 'input'), port('io2', 'inout')],
+      },
+    ],
+    edges: [
+      link('o1', 'output', 'i1', 'input'),
+      link('o2', 'output', 'i2', 'input'),
+      link('o1', 'output', 'i2', 'input'),
+      link('io1', 'inout', 'io2', 'inout'),
+    ],
+    warnings: [],
+  };
+}
+
 test('svg: a frame is a standalone document', () => {
   const model = chipTop();
   const svg = renderFrameSvg(input(model)).svg;
@@ -348,6 +418,36 @@ test('svg: bundling keeps the link between two instances', () => {
   const model = mixedDirections();
   const svg = renderFrameSvg(input(model), { signalMode: 'bundled' }).svg;
   assert.equal((svg.match(/<g class="edge">/g) ?? []).length, model.edges.length);
+});
+
+test('svg: bundling draws one link per direction between two instances', () => {
+  const model = linkedPair();
+  const svg = renderFrameSvg(input(model), { signalMode: 'bundled' }).svg;
+  const titles = [...svg.matchAll(/<g class="edge"><title>([^<]*)<\/title>/g)].map((m) => m[1]);
+  assert.equal(titles.length, 2, 'the four links collapse into one wire per direction class');
+  assert.ok(titles.some((t) => t.startsWith('out (3)')), 'the three output links are one wire');
+  assert.ok(titles.some((t) => t.startsWith('inout (1)')), 'the inout link is a wire of its own');
+  assert.ok(
+    titles.some((t) => t.includes('o1') && t.includes('i1')),
+    'the wire names the ports it swallowed',
+  );
+  assert.equal((svg.match(/marker-end=/g) ?? []).length, 2, 'every wire keeps its direction');
+  const outputColor = /--output:(#[0-9a-f]{6})/.exec(svg)?.[1];
+  assert.ok(outputColor, 'the theme knows the output colour');
+  const strokes = [...svg.matchAll(/<g class="edge"><title>([^<]*)<\/title><path[^>]*stroke="(#[0-9a-f]{6})"/g)].map(
+    (m) => ({ title: m[1], stroke: m[2] }),
+  );
+  assert.equal(
+    strokes.find((s) => s.title.startsWith('out'))?.stroke,
+    outputColor,
+    'the output wire wears the output colour',
+  );
+  const all = renderFrameSvg(input(model), { signalMode: 'all' }).svg;
+  assert.equal(
+    (all.match(/<g class="edge">/g) ?? []).length,
+    model.edges.length,
+    'the plain mode keeps every link',
+  );
 });
 
 test('svg: the bundled picture keeps every port name in a tooltip', () => {
