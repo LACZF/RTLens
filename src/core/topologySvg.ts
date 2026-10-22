@@ -604,8 +604,33 @@ export function renderFrameSvg(
     }
   }
 
-  /* ---------------- edge endpoints ---------------- */
+  /* ---------------- the current module's frame ---------------- */
 
+  // The frame is the module's own boundary, so it is drawn for a module
+  // without instances as well.
+  let frameLeft: number;
+  let frameRight: number;
+  if (hidden) {
+    // No input or output boxes in this mode; the rails are the boundary.
+    frameLeft = railInnerLeft - 6;
+    frameRight = railInnerRight + 6;
+  } else if (useBars) {
+    const inBar = bars.find((b) => b.cat === 'in') ?? bars.find((b) => b.cat === 'inout');
+    const outBar = bars.find((b) => b.cat === 'out');
+    frameLeft = inBar ? inBar.x + inBar.w / 2 : midColX;
+    frameRight = outBar ? outBar.x + outBar.w / 2 : midColX + midW;
+  } else {
+    frameLeft = inputRows.length > 0 ? inputRows[0].x + inputRows[0].w / 2 : midColX;
+    frameRight = outputRows.length > 0 ? outputRows[0].x + outputRows[0].w / 2 : midColX + midW;
+  }
+  const moduleFrame = {
+    x: frameLeft,
+    y: contentTop,
+    w: Math.max(1, frameRight - frameLeft),
+    h: contentH,
+  };
+
+  /* ---------------- edge endpoints ---------------- */
   const childById = new Map<string, ChildGeom>();
   for (const g of childGeoms) {
     childById.set(g.child.id, g);
@@ -1052,6 +1077,16 @@ export function renderFrameSvg(
     );
   }
 
+  /* ---------------- the current module's frame (fill) ---------------- */
+
+  parts.push(
+    `<g class="module-frame-fill">` +
+      `<rect x="${num(moduleFrame.x)}" y="${num(moduleFrame.y)}" width="${num(
+        moduleFrame.w,
+      )}" height="${num(moduleFrame.h)}" rx="12" fill="${esc(th.panel)}" fill-opacity="0.18"/>` +
+      `</g>`,
+  );
+
   /* ---------------- edges (behind the boxes) ---------------- */
 
   const edgeParts: string[] = [];
@@ -1144,6 +1179,18 @@ export function renderFrameSvg(
     }
     parts.push(`<g class="bundles">${barParts.join('')}</g>`);
   }
+
+  /* ---------------- the current module's frame (border) ---------------- */
+
+  parts.push(
+    `<g class="module-frame">` +
+      `<rect x="${num(moduleFrame.x)}" y="${num(moduleFrame.y)}" width="${num(
+        moduleFrame.w,
+      )}" height="${num(moduleFrame.h)}" rx="12" fill="none" stroke="${esc(
+        th.stroke,
+      )}" stroke-width="1.2"/>` +
+      `</g>`,
+  );
 
   /* ---------------- child boxes ---------------- */
 
