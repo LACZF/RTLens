@@ -161,7 +161,7 @@
             "Mode 2: hide every instance of a filtered module together with its whole subtree."
           ],
           "minimum": 1,
-          "default": 1,
+          "default": 2,
           "description": "How the Composition tree hides the modules selected by hdl.connectView.composition.filterModules (by module name, file, or directory). 1 = keep the filtered instances but hide their submodules; 2 = hide the filtered instances and their submodules."
         },
         "hdl.connectView.topology.maxDepth": {

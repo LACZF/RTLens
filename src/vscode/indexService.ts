@@ -83,6 +83,10 @@ export class IndexService implements vscode.Disposable {
     return this.readyPromise;
   }
 
+  reloadConfig(): void {
+    this.configValue = readConfig();
+  }
+
   /** Full rescan, e.g. after a configuration change. */
   async refresh(): Promise<void> {
     // The state has to move before the index is torn down: views rebuild on

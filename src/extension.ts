@@ -363,11 +363,15 @@ export function activate(context: vscode.ExtensionContext): void {
       // The file set moved: rebuild the database even if auto-update is off.
       const fileSetChanged = SCAN_SETTINGS.some((k) => e.affectsConfiguration(`${SECTION}.${k}`));
       void (async () => {
-        await vscode.commands.executeCommand('hdl.connectView.refreshIndex');
-        if (fileSetChanged) {
-          database.scheduleAutoRefresh(0);
-          catalog.scheduleAutoRefresh(0);
+        if (!fileSetChanged) {
+          svc.reloadConfig();
+          await composition.refresh();
+          problems.refresh();
+          return;
         }
+        await vscode.commands.executeCommand('hdl.connectView.refreshIndex');
+        database.scheduleAutoRefresh(0);
+        catalog.scheduleAutoRefresh(0);
       })();
     }),
     { dispose: () => GraphPanel.disposeAll() },

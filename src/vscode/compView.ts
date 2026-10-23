@@ -105,6 +105,7 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
   private pendingContext?: { file: string | undefined; line: number | undefined; character: number | undefined };
   private source?: CompositionSource;
   private sourceFolder?: string;
+  private sourceLimits?: { maxDepth: number; maxInstances: number };
   private cachedRoot?: HierarchyNode;
   private cachedRootModule?: string;
   private cachedFile?: string;
@@ -266,17 +267,24 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     if (!folder) {
       this.source = undefined;
       this.sourceFolder = undefined;
-      return;
-    }
-    if (this.source && this.sourceFolder === folder) {
+      this.sourceLimits = undefined;
       return;
     }
     const limits = {
       maxDepth: this.svc.config.compositionMaxDepth,
       maxInstances: this.svc.config.compositionMaxInstances,
     };
+    if (
+      this.source &&
+      this.sourceFolder === folder &&
+      this.sourceLimits?.maxDepth === limits.maxDepth &&
+      this.sourceLimits?.maxInstances === limits.maxInstances
+    ) {
+      return;
+    }
     const store = CompositionStore.open(folder);
     this.sourceFolder = folder;
+    this.sourceLimits = limits;
     this.filterCache = undefined;
     if (store) {
       this.source = new DbCompositionSource(store, limits);
@@ -348,7 +356,7 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     this.cachedRootModule = moduleName;
     this.cachedFile = fromFile;
     this.pending = [];
-    if (root) {
+    if (root && !this.dropped(root) && !this.pruned(root)) {
       await source.expand(root);
     }
     this.rebuild();
@@ -502,6 +510,7 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     const stack: HierarchyNode[] = [root];
     while (stack.length > 0) {
       const node = stack.pop()!;
+      if (this.dropped(node) || this.pruned(node)) continue;
       if (node.children === undefined && this.childCount(node) > 0) {
         await source.expand(node);
       }
@@ -520,6 +529,7 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     const expanded = this.cachedRoot ? materializedPaths(this.cachedRoot) : new Set<string>();
+    await this.ensureSource(this.cachedFile ?? this.lastContextFile);
     await this.source?.reload();
     await this.prepareFilter();
     const source = this.source;
@@ -537,7 +547,9 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     this.cachedRoot = root;
-    await source.expand(root);
+    if (!this.dropped(root) && !this.pruned(root)) {
+      await source.expand(root);
+    }
     await this.rematerialize(expanded);
     this.rebuild();
     this.post();
@@ -551,6 +563,7 @@ export class CompositionViewProvider implements vscode.WebviewViewProvider {
     const stack: HierarchyNode[] = [root];
     while (stack.length > 0) {
       const node = stack.pop()!;
+      if (this.dropped(node) || this.pruned(node)) continue;
       if (node.children === undefined && expanded.has(node.path) && this.childCount(node) > 0) {
         await source.expand(node);
       }
