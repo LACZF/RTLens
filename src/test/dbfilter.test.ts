@@ -17,6 +17,7 @@ import * as path from 'node:path';
 import { Module } from 'node:module';
 
 import { vscode } from './vscodeStub';
+import { findByPath } from '../core/hierarchy';
 
 const loader = Module as unknown as { _load: (request: string, ...rest: unknown[]) => unknown };
 const originalLoad = loader._load;
@@ -42,6 +43,7 @@ const FILES: [string, string][] = [
 
 /** Fresh per test via `setupSpace`, so no setting leaks into the next test. */
 let settings: Record<string, unknown> = { topModules: ['top'], autoUpdateDatabase: false };
+let findFilesCalls = 0;
 
 const originalConfig = vscode.workspace.getConfiguration;
 const originalFindFiles = vscode.workspace.findFiles;
@@ -103,10 +105,11 @@ function childrenAfter(posted: Posted[], mark: number): Posted[] {
   return posted.slice(mark).filter((m) => m.type === 'children' || m.type === 'childrenMore');
 }
 
-function setupSpace(cfg: Record<string, unknown> = {}): void {
+function setupSpace(cfg: Record<string, unknown> = {}, files: [string, string][] = FILES): void {
+  findFilesCalls = 0;
   fs.rmSync(TEMP, { recursive: true, force: true });
   fs.mkdirSync(TEMP, { recursive: true });
-  for (const [rel, src] of FILES) {
+  for (const [rel, src] of files) {
     const abs = path.join(TEMP, rel);
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, src);
@@ -118,8 +121,10 @@ function setupSpace(cfg: Record<string, unknown> = {}): void {
   (vscode.workspace as { getConfiguration: unknown }).getConfiguration = () => ({
     get: (key: string, fallback: unknown) => (key in settings ? settings[key] : fallback),
   });
-  (vscode.workspace as { findFiles: unknown }).findFiles = async () =>
-    FILES.map(([rel]) => vscode.Uri.file(path.join(TEMP, rel)));
+  (vscode.workspace as { findFiles: unknown }).findFiles = async () => {
+    findFilesCalls++;
+    return files.map(([rel]) => vscode.Uri.file(path.join(TEMP, rel)));
+  };
 }
 
 /** Disposables pushed by `activate` in the activation test, released in `after`. */
@@ -199,6 +204,7 @@ test('activate: firing onDidChangeConfiguration applies a filter added in settin
 
   settings['composition.filterModules'] = ['rtl/a.v'];
   settings['composition.filterMode'] = 2;
+  const scansBefore = findFilesCalls;
   // The listener runs the refresh command asynchronously; poll for the result.
   configListener!({ affectsConfiguration: (s) => s === 'hdl.connectView' || s.startsWith('hdl.connectView.composition') });
   await waitFor(
@@ -206,6 +212,11 @@ test('activate: firing onDidChangeConfiguration applies a filter added in settin
     'the settings change to reach the composition view',
   );
   assert.deepEqual(ui.rowsPaths(), ['top', 'top.u_b'], 'the file filter is applied after the config change');
+  assert.equal(
+    findFilesCalls,
+    scansBefore,
+    'a composition-only settings change must not rescan the workspace',
+  );
 });
 
 test('db source: file path filter hides modules defined in that file', async () => {
@@ -399,4 +410,123 @@ test('mode 2: an expand that raced a config change does not stream a hidden leve
   const answers = childrenAfter(ui.posted, mark).filter((m) => m.parentPath === 'top.u_a');
   assert.equal(answers.length, 1, 'exactly one answer for the expand request');
   assert.deepEqual(answers[0].rows, [], 'the hidden level answers with no rows');
+});
+
+// top -> { v u_v, f u_f }: `f` fans out to five leaves, `v` is a three-deep
+// chain. Source order puts `f` last, so expand-all visits it first.
+const BUDGET_FILES: [string, string][] = [
+  [
+    'rtl/v.v',
+    'module v (input wire x); vv u_v1 (.x(x)); endmodule\n' +
+      'module vv (input wire x); vvv u_vv (.x(x)); endmodule\n' +
+      'module vvv (input wire x); endmodule\n',
+  ],
+  [
+    'rtl/f.v',
+    'module f (input wire x); fa u_fa (.x(x)); fb u_fb (.x(x)); fc u_fc (.x(x)); fd u_fd (.x(x)); fe u_fe (.x(x)); endmodule\n' +
+      'module fa (input wire x); endmodule\nmodule fb (input wire x); endmodule\n' +
+      'module fc (input wire x); endmodule\nmodule fd (input wire x); endmodule\n' +
+      'module fe (input wire x); endmodule\n',
+  ],
+  ['vtop/top.v', 'module top (input wire x); v u_v (.x(x)); f u_f (.x(x)); endmodule\n'],
+];
+
+test('mode 2: expand all never descends into a filtered subtree', async () => {
+  // Four instances fit the budget (`u_v`, `u_f`, `u_v1`, `u_vv`). Expanding the
+  // hidden `f` subtree first would spend the budget on rows nobody sees and
+  // truncate the visible `v` chain - the guard has to skip it.
+  setupSpace(
+    { 'composition.filterModules': ['f'], 'composition.filterMode': 2, 'composition.maxInstances': 4 },
+    BUDGET_FILES,
+  );
+  const { IndexService } = await import('../vscode/indexService');
+  const svc = new IndexService(vscode.window.createOutputChannel('test') as never);
+  await svc.refresh();
+
+  const { CompositionViewProvider } = await import('../vscode/compView');
+  const provider = new CompositionViewProvider(svc);
+  const ui = attach(provider);
+  await provider.setContext(path.join(TEMP, 'vtop/top.v'), 0);
+  await provider.setExpandedAll(true);
+
+  assert.deepEqual(
+    ui.rowsPaths(),
+    ['top', 'top.u_v', 'top.u_v.u_v1', 'top.u_v.u_v1.u_vv'],
+    'the whole visible chain is on screen; the hidden subtree never spent its budget',
+  );
+  const vRow = ui.lastRows()!.find((r) => r.path === 'top.u_v')!;
+  assert.ok(!(vRow.badge ?? '').includes('truncated'), 'the visible branch is not starved of the budget');
+});
+
+test('mode 2: a filter added after expand-all keeps hidden subtrees unmaterialised', async () => {
+  setupSpace();
+  const { IndexService } = await import('../vscode/indexService');
+  const svc = new IndexService(vscode.window.createOutputChannel('test') as never);
+  await svc.refresh();
+
+  const { CompositionViewProvider } = await import('../vscode/compView');
+  const provider = new CompositionViewProvider(svc);
+  const ui = attach(provider);
+  await provider.setContext(path.join(TEMP, 'top/top.v'), 0);
+  await provider.setExpandedAll(true);
+  assert.equal(ui.rowsPaths()!.length, 7, 'the whole design is materialised before the filter is set');
+
+  settings['composition.filterModules'] = ['a'];
+  settings['composition.filterMode'] = 2;
+  svc.reloadConfig();
+  await provider.refresh();
+
+  assert.deepEqual(ui.rowsPaths(), ['top', 'top.u_b', 'top.u_la2'], 'the filter applies on refresh');
+  const hidden = findByPath(provider.hierarchyRoot!, 'top.u_a');
+  assert.ok(hidden, 'the hidden row is still in the tree (it is just not drawn)');
+  assert.equal(hidden.children, undefined, 'refresh must not re-materialise the hidden subtree');
+});
+
+test('mode 2: filtering the root itself leaves the tree empty without materialising it', async () => {
+  setupSpace({ 'composition.filterModules': ['top'], 'composition.filterMode': 2 });
+  const { IndexService } = await import('../vscode/indexService');
+  const svc = new IndexService(vscode.window.createOutputChannel('test') as never);
+  await svc.refresh();
+
+  const { CompositionViewProvider } = await import('../vscode/compView');
+  const provider = new CompositionViewProvider(svc);
+  const ui = attach(provider);
+  await provider.setContext(path.join(TEMP, 'top/top.v'), 0);
+  assert.deepEqual(ui.rowsPaths(), [], 'a filtered root draws nothing');
+  assert.equal(provider.hierarchyRoot?.children, undefined, 'the root level is never materialised');
+
+  const mark = ui.posted.length;
+  await provider.setExpandedAll(true);
+  await provider.refresh();
+  assert.deepEqual(ui.rowsPaths(), [], 'expand all and refresh keep the filtered root empty');
+  assert.equal(provider.hierarchyRoot?.children, undefined, 'refresh does not materialise the filtered root');
+  assert.deepEqual(
+    childrenAfter(ui.posted, mark),
+    [],
+    'nothing below the filtered root is ever streamed',
+  );
+});
+
+test('settings: a new composition instance budget applies on refresh', async () => {
+  setupSpace({ 'composition.maxInstances': 1 });
+  const { IndexService } = await import('../vscode/indexService');
+  const svc = new IndexService(vscode.window.createOutputChannel('test') as never);
+  await svc.refresh();
+
+  const { CompositionViewProvider } = await import('../vscode/compView');
+  const provider = new CompositionViewProvider(svc);
+  const ui = attach(provider);
+  await provider.setContext(path.join(TEMP, 'top/top.v'), 0);
+  await provider.setExpandedAll(true);
+  assert.deepEqual(ui.rowsPaths(), ['top', 'top.u_a'], 'a budget of one truncates the root level');
+
+  settings['composition.maxInstances'] = 0;
+  svc.reloadConfig();
+  await provider.refresh();
+  await provider.setExpandedAll(true);
+  assert.deepEqual(
+    ui.rowsPaths(),
+    ['top', 'top.u_a', 'top.u_a.u_la', 'top.u_a.u_mid', 'top.u_a.u_mid.u_leaf', 'top.u_b', 'top.u_la2'],
+    'lifting the budget rebuilds the source and the whole design comes back',
+  );
 });

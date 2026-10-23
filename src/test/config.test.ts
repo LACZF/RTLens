@@ -70,6 +70,16 @@ test('config: every setting in the manifest is read', () => {
   }
 });
 
+test('config: the composition filter hides the whole instance by default', () => {
+  const manifest = JSON.parse(read(path.join(ROOT, 'package.json')));
+  const schema = manifest.contributes.configuration.properties['hdl.connectView.composition.filterMode'];
+  assert.equal(
+    schema.default,
+    2,
+    'filtering a module is expected to drop its instance rows unless the user opts into mode 1',
+  );
+});
+
 test('config: numeric settings have a floor', () => {
   const manifest = JSON.parse(read(path.join(ROOT, 'package.json')));
   const props = manifest.contributes.configuration.properties as Record<
