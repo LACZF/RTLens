@@ -362,9 +362,14 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       // The file set moved: rebuild the database even if auto-update is off.
       const fileSetChanged = SCAN_SETTINGS.some((k) => e.affectsConfiguration(`${SECTION}.${k}`));
+      const filterChanged = e.affectsConfiguration(`${SECTION}.composition.filterModules`);
       void (async () => {
         if (!fileSetChanged) {
           svc.reloadConfig();
+          if (filterChanged) {
+            database.scheduleAutoRefresh(0);
+            catalog.scheduleAutoRefresh(0);
+          }
           await composition.refresh();
           problems.refresh();
           return;

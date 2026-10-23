@@ -14,6 +14,7 @@ import {
   type UpdateResult,
 } from '../core/relations';
 import type { IndexService } from './indexService';
+import { resolveModuleFilter } from './moduleFilter';
 
 /**
  * The signal ↔ module relation database, persisted under each workspace
@@ -197,6 +198,7 @@ export class DatabaseService implements vscode.Disposable {
       const folders = vscode.workspace.workspaceFolders ?? [];
       const started = Date.now();
       const summary: RefreshSummary = { folders: folders.length, files: 0, changed: 0, removed: 0, reused: 0, ms: 0 };
+      const filterNames = resolveModuleFilter(this.svc.index, this.svc.config.compositionFilterModules);
 
       for (const folder of folders) {
         const inputs = collectInputs(this.svc, folder.uri);
@@ -207,6 +209,7 @@ export class DatabaseService implements vscode.Disposable {
           inputs,
           mode,
           new Date().toISOString(),
+          filterNames,
         );
         writeDatabase(folder.uri, result.db);
         this.databases.set(folder.uri.fsPath, result.db);
