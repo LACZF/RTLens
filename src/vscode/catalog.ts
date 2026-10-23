@@ -39,6 +39,7 @@ import {
 import { sourceFingerprint } from '../core/relations';
 import { DB_DIR, collectInputs, type RefreshMode } from './database';
 import type { IndexService } from './indexService';
+import { moduleFilterKey, resolveModuleFilter } from './moduleFilter';
 
 /**
  * The classified catalog: the databases the §5.6 design splits out besides the
@@ -181,6 +182,9 @@ export class CatalogService implements vscode.Disposable {
   /** Read the databases already on disk and check them against the sources. */
   async load(): Promise<void> {
     this.dbs.clear();
+    const filterHash = moduleFilterKey(
+      resolveModuleFilter(this.svc.index, this.svc.config.compositionFilterModules),
+    );
     for (const folder of vscode.workspace.workspaceFolders ?? []) {
       const fingerprint = sourceFingerprint(collectInputs(this.svc, folder.uri));
       const index = await readJson(folder.uri, INDEX_DB_FILE, parseIndexDatabase);
@@ -189,7 +193,9 @@ export class CatalogService implements vscode.Disposable {
       const fresh =
         !!index && index.source === fingerprint &&
         !!hierarchy && hierarchy.source === fingerprint &&
-        !!graph && graph.source === fingerprint;
+        (hierarchy.filterHash ?? '') === filterHash &&
+        !!graph && graph.source === fingerprint &&
+        (graph.filterHash ?? '') === filterHash;
       this.dbs.set(folder.uri.fsPath, { index, hierarchy, graph, fingerprint, fresh });
     }
     this.autoStarted = true;
@@ -255,6 +261,8 @@ export class CatalogService implements vscode.Disposable {
     };
     const cfg = this.svc.config;
     const tops = this.svc.index.tops(cfg.topModules).map((t) => t.name);
+    const filterNames = resolveModuleFilter(this.svc.index, cfg.compositionFilterModules);
+    const filterHash = moduleFilterKey(filterNames);
 
     for (const folder of folders) {
       const inputs = collectInputs(this.svc, folder.uri);
@@ -274,14 +282,29 @@ export class CatalogService implements vscode.Disposable {
 
       const index = buildIndexDatabase(this.svc.index, inputs, generatedAt, fingerprint);
       await yieldToHost();
-      const hierarchy = buildHierarchyDatabase(this.svc.index, cfg.topModules, generatedAt, fingerprint);
+      const hierarchy = buildHierarchyDatabase(
+        this.svc.index,
+        cfg.topModules,
+        generatedAt,
+        fingerprint,
+        filterNames,
+        filterHash,
+      );
       await yieldToHost();
 
       // Build one top at a time so a workspace with many/large graphs yields
       // between them instead of holding the extension host for the whole set.
       let graph: GraphDatabase | undefined;
       for (const top of [...tops].sort()) {
-        const part = buildGraphDatabase(this.svc.index, [top], graphOptions, generatedAt, fingerprint);
+        const part = buildGraphDatabase(
+          this.svc.index,
+          [top],
+          graphOptions,
+          generatedAt,
+          fingerprint,
+          filterNames,
+          filterHash,
+        );
         if (!graph) {
           graph = part;
         } else {
@@ -290,7 +313,14 @@ export class CatalogService implements vscode.Disposable {
         }
         await yieldToHost();
       }
-      graph ??= { version: GRAPH_DB_VERSION, generatedAt, source: fingerprint, tops: [], graphs: {} };
+      graph ??= {
+        version: GRAPH_DB_VERSION,
+        generatedAt,
+        source: fingerprint,
+        ...(filterHash ? { filterHash } : {}),
+        tops: [],
+        graphs: {},
+      };
 
       writeJson(folder.uri, INDEX_DB_FILE, serializeIndexDatabase(index));
       await yieldToHost();

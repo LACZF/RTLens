@@ -177,3 +177,29 @@ test('catalog: the activation scan alone does not write the catalog', async () =
   assert.ok(!fs.existsSync(HIERARCHY_FILE), 'auto-update starts only after load()');
   catalog.dispose();
 });
+
+test('catalog: composition filter removes modules from hierarchy and graph, not index', async () => {
+  const { catalog } = await setup({ 'composition.filterModules': ['leaf'] });
+  await catalog.refresh('full');
+
+  const index = JSON.parse(fs.readFileSync(INDEX_FILE, 'utf8'));
+  assert.ok(index.modules.leaf, 'the jump index keeps the filtered module');
+
+  const hierarchy = JSON.parse(fs.readFileSync(HIERARCHY_FILE, 'utf8'));
+  assert.ok(hierarchy.filterHash, 'the manifest records the filter hash');
+  const { CompositionStore } = await import('../vscode/compositionStore');
+  const store = CompositionStore.open(TEMP)!;
+  assert.equal(await store.module('leaf'), undefined, 'the filtered module is gone from the hierarchy');
+  assert.deepEqual(await store.modulesAmong(['top', 'leaf']), new Set(['top']));
+  assert.deepEqual((await store.module('top'))!.children, [], 'the edge to the filtered module is gone');
+
+  const graph = JSON.parse(fs.readFileSync(GRAPH_FILE, 'utf8'));
+  assert.ok(graph.filterHash, 'the graph records the filter hash');
+  assert.equal(
+    graph.graphs.top.graph.nodes.some((node: { moduleName?: string }) => node.moduleName === 'leaf'),
+    false,
+    'the filtered module has no graph node',
+  );
+  catalog.dispose();
+});
+
