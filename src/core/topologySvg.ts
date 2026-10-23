@@ -443,7 +443,9 @@ export function renderFrameSvg(
     1,
     hidden
       ? Math.max(childrenH + groupPad * 2, maxCount * 18)
-      : Math.max(signalRowsH, childrenH + groupPad * 2),
+      : useBars
+        ? Math.max(childrenH + groupPad * 2, 1)
+        : Math.max(signalRowsH, childrenH + groupPad * 2),
   );
 
   const canvasH = Math.max(240, pad + HEADER_H + contentH + FOOTER_H + pad + FRAME_PAD);
@@ -553,13 +555,21 @@ export function renderFrameSvg(
   }
   const bars: BarGeom[] = [];
   if (useBars) {
+    let busTop = contentTop;
+    let busBottom = contentBottom;
+    if (children.length > 0 && childGeoms.length > 0) {
+      const top = Math.min(...childGeoms.map((g) => g.y));
+      const bottom = Math.max(...childGeoms.map((g) => g.y + g.h));
+      busTop = Math.max(contentTop, top - GROUP_PAD);
+      busBottom = Math.min(contentBottom, bottom + GROUP_PAD);
+    }
     if (bundledIn.length > 0) {
       bars.push({
         cat: 'in',
         x: pad,
-        y: contentTop,
+        y: busTop,
         w: BAR_W,
-        h: contentH,
+        h: Math.max(1, busBottom - busTop),
         trunkX: pad + BAR_W - 2,
         count: bundledIn.length,
         names: bundledIn.map((s) => s.name),
@@ -570,9 +580,9 @@ export function renderFrameSvg(
       bars.push({
         cat: 'inout',
         x,
-        y: contentTop,
+        y: busTop,
         w: BAR_W,
-        h: contentH,
+        h: Math.max(1, busBottom - busTop),
         trunkX: x + BAR_W - 2,
         count: bundledIo.length,
         names: bundledIo.map((s) => s.name),
@@ -582,9 +592,9 @@ export function renderFrameSvg(
       bars.push({
         cat: 'out',
         x: canvasW - pad - BAR_W,
-        y: contentTop,
+        y: busTop,
         w: BAR_W,
-        h: contentH,
+        h: Math.max(1, busBottom - busTop),
         trunkX: canvasW - pad - BAR_W + 2,
         count: outputs.length,
         names: outputs.map((s) => s.name),

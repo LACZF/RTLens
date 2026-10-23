@@ -646,14 +646,25 @@ test('svg: the current module has a frame that reaches the port boxes', () => {
         Math.abs(fx + fw - right) < 0.02,
         `the ${mode} frame ends in the middle of the output box`,
       );
-      assert.ok(
-        portTop - fy >= 8,
-        `the ${mode} frame of a module ${label} leaves room above the port boxes`,
-      );
-      assert.ok(
-        fy + fh - portBottom >= 8,
-        `the ${mode} frame of a module ${label} leaves room below the port boxes`,
-      );
+      if (mode !== 'bundled') {
+        assert.ok(
+          portTop - fy >= 8,
+          `the ${mode} frame of a module ${label} leaves room above the port boxes`,
+        );
+        assert.ok(
+          fy + fh - portBottom >= 8,
+          `the ${mode} frame of a module ${label} leaves room below the port boxes`,
+        );
+      } else {
+        assert.ok(
+          portTop >= fy,
+          `the ${mode} frame of a module ${label} covers the input bus`,
+        );
+        assert.ok(
+          portBottom <= fy + fh,
+          `the ${mode} frame of a module ${label} covers the output bus`,
+        );
+      }
       if (mode !== 'all') {
         assert.ok(
           Math.abs(portTop - fy - (fy + fh - portBottom)) < 0.02,
