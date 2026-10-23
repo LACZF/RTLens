@@ -23,6 +23,7 @@ export interface HierarchyOptions {
   maxInstances?: number;
   /** Modules along the current path, for cycle detection. */
   stopOnCycle?: boolean;
+  filterModules?: readonly string[];
 }
 
 export interface HierarchyResult {
@@ -69,6 +70,7 @@ export class HierarchyBuilder implements HierarchyExpander {
   private nodeCount = 0;
   private budget: number;
   private maxDepth: number;
+  private readonly excluded: Set<string>;
   truncated = false;
   unresolved = 0;
   /** Per-module compiled child rows, reused across occurrences for this builder's life. */
@@ -80,11 +82,12 @@ export class HierarchyBuilder implements HierarchyExpander {
       opts.maxInstances === undefined ? 20000 : opts.maxInstances > 0 ? opts.maxInstances : Infinity;
     this.maxDepth =
       opts.maxDepth === undefined ? 32 : opts.maxDepth > 0 ? opts.maxDepth : Infinity;
+    this.excluded = new Set(opts.filterModules ?? []);
   }
 
   build(moduleName: string, fromFile?: string): HierarchyResult | undefined {
     const def = this.index.resolveModule(moduleName, fromFile);
-    if (!def) {
+    if (!def || this.excluded.has(def.name)) {
       return undefined;
     }
     const root: HierarchyNode = {
@@ -121,7 +124,7 @@ export class HierarchyBuilder implements HierarchyExpander {
    */
   root(moduleName: string, fromFile?: string): HierarchyNode | undefined {
     const def = this.index.resolveModule(moduleName, fromFile);
-    if (!def) {
+    if (!def || this.excluded.has(def.name)) {
       return undefined;
     }
     this.nodeCount = 0;
@@ -162,6 +165,9 @@ export class HierarchyBuilder implements HierarchyExpander {
       t = [];
       const seen = new Set<string>();
       for (const inst of def.instances) {
+        if (this.excluded.has(inst.moduleName)) {
+          continue;
+        }
         const instName = inst.genPrefix ? `${inst.genPrefix}.${inst.name}` : inst.name;
         // `ifdef` alternatives can repeat one instance name (both branches are
         // parsed for navigation). The tree is keyed by path, so the first
@@ -182,12 +188,16 @@ export class HierarchyBuilder implements HierarchyExpander {
           conditional: inst.conditional,
           file: def.file,
           resolved: !!child,
-          hasChildren: !!child && child.instances.length > 0,
+          hasChildren: !!child && child.instances.some((i) => !this.excluded.has(i.moduleName)),
         });
       }
       this.templateCache.set(def, t);
     }
     return t;
+  }
+
+  private hasVisibleInstances(def: ModuleDef): boolean {
+    return def.instances.some((inst) => !this.excluded.has(inst.moduleName));
   }
 
   /**
@@ -210,7 +220,7 @@ export class HierarchyBuilder implements HierarchyExpander {
       return node;
     }
     if (node.depth >= this.maxDepth) {
-      if (def.instances.length > 0) {
+      if (this.hasVisibleInstances(def)) {
         node.truncated = true;
         this.truncated = true;
       }
@@ -330,7 +340,7 @@ export class HierarchyBuilder implements HierarchyExpander {
         if (frame.node.depth >= this.maxDepth) {
           // The depth limit cut this subtree off; say so on the node and on the
           // result, so callers can tell a leaf from an unexpanded instance.
-          if (frame.def.instances.length > 0) {
+          if (this.hasVisibleInstances(frame.def)) {
             frame.node.truncated = true;
             this.truncated = true;
           }
@@ -358,6 +368,9 @@ export class HierarchyBuilder implements HierarchyExpander {
         continue;
       }
       const inst = frame.def.instances[frame.i++];
+      if (this.excluded.has(inst.moduleName)) {
+        continue;
+      }
       this.nodeCount++;
       const instPath = inst.genPrefix ? `${inst.genPrefix}.${inst.name}` : inst.name;
       const childPath = frame.node.path ? `${frame.node.path}.${instPath}` : instPath;

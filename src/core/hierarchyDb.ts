@@ -85,6 +85,7 @@ export interface HierarchyDatabase {
    * a reader must treat the database as stale.
    */
   source: string;
+  filterHash?: string;
   /** Modules nothing instantiates (or the configured tops), sorted by name. */
   tops: string[];
   modules: Record<string, HierarchyModule>;
@@ -107,10 +108,17 @@ export function buildHierarchyDatabase(
   preferTops: string[] = [],
   generatedAt = '',
   source = '',
+  filterModules: readonly string[] = [],
+  filterHash = '',
 ): HierarchyDatabase {
+  const excluded = new Set(filterModules);
+  const originalTops = new Set(index.tops(preferTops).map((top) => top.name));
   const modules: Record<string, HierarchyModule> = {};
   const seen = new Map<string, Set<string>>();
   for (const def of index.allModules()) {
+    if (excluded.has(def.name)) {
+      continue;
+    }
     let entry = modules[def.name];
     if (!entry) {
       entry = {
@@ -130,6 +138,9 @@ export function buildHierarchyDatabase(
       seen.set(def.name, names);
     }
     for (const inst of def.instances) {
+      if (excluded.has(inst.moduleName)) {
+        continue;
+      }
       const i = inst.genPrefix ? `${inst.genPrefix}.${inst.name}` : inst.name;
       if (names.has(i)) {
         continue;
@@ -175,16 +186,11 @@ export function buildHierarchyDatabase(
   }
 
   // Tops: nothing instantiates them. Configured tops are kept even when
-  // something does instantiate them.
+  // something does instantiate them. Use the unfiltered top set so deleting a
+  // filtered module does not promote its orphaned children to new roots.
   const tops = Object.keys(modules)
-    .filter((n) => modules[n].parents.length === 0)
+    .filter((n) => originalTops.has(n))
     .sort();
-  for (const t of preferTops) {
-    if (modules[t] && !tops.includes(t)) {
-      tops.push(t);
-    }
-  }
-  tops.sort();
 
   // First-branch parent: a pre-order DFS from each top, first visit wins, so
   // every module's `firstParent` chain reaches exactly one top.
@@ -221,7 +227,14 @@ export function buildHierarchyDatabase(
     }
   }
 
-  return { version: HIERARCHY_DB_VERSION, generatedAt, source, tops, modules };
+  return {
+    version: HIERARCHY_DB_VERSION,
+    generatedAt,
+    source,
+    ...(filterHash ? { filterHash } : {}),
+    tops,
+    modules,
+  };
 }
 
 /**
@@ -296,6 +309,9 @@ export function parseHierarchyDatabase(text: string): HierarchyDatabase | undefi
     version: HIERARCHY_DB_VERSION,
     generatedAt: typeof value.generatedAt === 'string' ? value.generatedAt : '',
     source: typeof value.source === 'string' ? value.source : '',
+    ...(typeof value.filterHash === 'string' && value.filterHash
+      ? { filterHash: value.filterHash }
+      : {}),
     tops: value.tops as string[],
     modules,
   };

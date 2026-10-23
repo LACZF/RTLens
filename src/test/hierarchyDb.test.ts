@@ -235,3 +235,39 @@ test('hierarchyDb: duplicate module definitions merge without duplicating siblin
     'distinct sibling names from both definitions are still kept',
   );
 });
+
+test('hierarchyDb: filtered modules and their edges are left out', () => {
+  const db = buildHierarchyDatabase(libIndex(), [], '', '', ['datapath'], 'fh');
+
+  assert.equal(db.modules['datapath'], undefined, 'the filtered definition is gone');
+  assert.equal(db.filterHash, 'fh', 'the database records the filter it was built with');
+  assert.equal(
+    childrenOf(db, 'chip_top').some((edge) => edge.m === 'datapath'),
+    false,
+    'the edge that instantiates the filtered module is gone',
+  );
+  assert.equal(db.tops.includes('datapath'), false, 'a filtered module is never a top');
+});
+
+test('hierarchyDb: a filtered configured top is not returned as a root', () => {
+  const db = buildHierarchyDatabase(libIndex(), ['chip_top'], '', '', ['chip_top']);
+
+  assert.equal(db.modules['chip_top'], undefined);
+  assert.equal(db.tops.includes('chip_top'), false, 'the filtered top is not listed');
+  assert.equal(new HierarchyDbBuilder(db, {}).root('chip_top'), undefined);
+});
+
+test('hierarchyDb: filtering a mid-level module does not promote its children to tops', () => {
+  const index = libIndex();
+  const full = buildHierarchyDatabase(index);
+  const filtered = buildHierarchyDatabase(index, [], '', '', ['datapath']);
+
+  assert.deepEqual(
+    filtered.tops,
+    full.tops.filter((top) => top !== 'datapath'),
+    'the original top set still decides the roots',
+  );
+  assert.equal(filtered.tops.includes('adder'), false, 'an orphaned child is not a new top');
+});
+
+

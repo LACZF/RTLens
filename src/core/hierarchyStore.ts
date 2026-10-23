@@ -43,6 +43,7 @@ export interface HierarchyManifest {
   generatedAt: string;
   /** Source fingerprint recorded at build time (see `core/relations`). */
   source: string;
+  filterHash?: string;
   /** Top modules, sorted; configured tops are kept even when instantiated. */
   tops: string[];
   counts: { modules: number; instances: number };
@@ -81,6 +82,7 @@ export function manifestFor(db: HierarchyDatabase, generation: string): Hierarch
     generation,
     generatedAt: db.generatedAt,
     source: db.source,
+    ...(db.filterHash ? { filterHash: db.filterHash } : {}),
     tops: db.tops.slice(),
     counts: { modules: Object.keys(db.modules).length, instances },
   };
@@ -143,6 +145,9 @@ export function parseManifest(text: string): HierarchyManifest | undefined {
     generation: value.generation,
     generatedAt: typeof value.generatedAt === 'string' ? value.generatedAt : '',
     source: typeof value.source === 'string' ? value.source : '',
+    ...(typeof value.filterHash === 'string' && value.filterHash
+      ? { filterHash: value.filterHash }
+      : {}),
     tops: value.tops.filter((t): t is string => typeof t === 'string'),
     counts: {
       modules: typeof counts.modules === 'number' ? counts.modules : 0,
