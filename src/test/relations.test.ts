@@ -217,3 +217,52 @@ test('emptyDatabase is versioned and empty', () => {
   assert.deepEqual(db.files, {});
   assert.equal(db.generatedAt, 'T0');
 });
+
+test('updateDatabase drops filtered modules and connections from a full build', () => {
+  const index = new HdlIndex();
+  index.addFile('/w/child.v', CHILD);
+  index.addFile('/w/parent.v', PARENT);
+  const texts = new Map([
+    ['/w/child.v', CHILD],
+    ['/w/parent.v', PARENT],
+  ]);
+
+  const db = updateDatabase(index, undefined, inputs(index, texts), 'full', 'T0', ['leaf']).db;
+
+  assert.deepEqual(db.files['child.v'].modules, [], 'the filtered module entry is gone');
+  assert.deepEqual(
+    db.files['parent.v'].modules.map((mod) => mod.name),
+    ['top'],
+    'the parent module itself stays',
+  );
+  assert.deepEqual(
+    db.files['parent.v'].modules[0].connections,
+    [],
+    'connections that target the filtered child are gone',
+  );
+});
+
+test('updateDatabase strips filtered modules from reused files too', () => {
+  const index = new HdlIndex();
+  index.addFile('/w/child.v', CHILD);
+  index.addFile('/w/parent.v', PARENT);
+  const texts = new Map([
+    ['/w/child.v', CHILD],
+    ['/w/parent.v', PARENT],
+  ]);
+  const first = updateDatabase(index, undefined, inputs(index, texts), 'full', 'T0').db;
+
+  const { db, reused } = updateDatabase(
+    index,
+    first,
+    inputs(index, texts),
+    'incremental',
+    'T1',
+    ['leaf'],
+  );
+
+  assert.equal(reused, 2, 'both files were unchanged and reused');
+  assert.deepEqual(db.files['child.v'].modules, []);
+  assert.deepEqual(db.files['parent.v'].modules[0].connections, []);
+});
+

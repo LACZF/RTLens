@@ -192,6 +192,7 @@ export function updateDatabase(
   inputs: FileInput[],
   mode: 'incremental' | 'full',
   generatedAt: string,
+  filterModules: readonly string[] = [],
 ): UpdateResult {
   const reusable = mode === 'incremental' ? existing : undefined;
   const files: Record<string, FileRelations> = {};
@@ -250,10 +251,26 @@ export function updateDatabase(
   }
   removed.sort();
 
-  // Deterministic key order so an unchanged refresh rewrites the same bytes.
+  const excluded = new Set(filterModules);
   const sorted: Record<string, FileRelations> = {};
   for (const rel of Object.keys(files).sort()) {
-    sorted[rel] = files[rel];
+    const entry = files[rel];
+    if (excluded.size === 0) {
+      sorted[rel] = entry;
+      continue;
+    }
+    const modules = entry.modules
+      .filter((mod) => !excluded.has(mod.name))
+      .map((mod) => {
+        const connections = mod.connections.filter((conn) => !excluded.has(conn.child));
+        return connections.length === mod.connections.length
+          ? mod
+          : { ...mod, connections };
+      });
+    sorted[rel] =
+      modules.length === entry.modules.length && modules.every((mod, i) => mod === entry.modules[i])
+        ? entry
+        : { hash: entry.hash, modules };
   }
 
   const changed = [...dirty]
