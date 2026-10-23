@@ -494,6 +494,88 @@ test('svg: bundling gives the frame ports one link per instance', () => {
   );
 });
 
+test('svg: bundled input/output wires run straight and never cross', () => {
+  const wire = (svg: string): {
+    title: string;
+    x0: number;
+    y0: number;
+    x3: number;
+    y3: number;
+  }[] =>
+    [...svg.matchAll(
+      /<g class="edge"><title>([^<]*)<\/title><path d="M ([-\d.]+),([-\d.]+) C [^"]* ([-\d.]+),([-\d.]+)"/g,
+    )].map((m) => ({
+      title: m[1]!,
+      x0: +m[2]!,
+      y0: +m[3]!,
+      x3: +m[4]!,
+      y3: +m[5]!,
+    }));
+
+  // A frame wire names only flat signals on one of its two sides; a wire
+  // between two instances names a `.port` on both sides.
+  const sideOf = (title: string): 'input' | 'output' | null => {
+    const body = /^\w+ \(\d+\): (.*)$/.exec(title)?.[1];
+    if (!body) {
+      return null;
+    }
+    const pairs = body.split(', ').map((p) => p.split('→'));
+    if (pairs.every((p) => p.length === 2 && !p[0]!.includes('.'))) {
+      return 'input';
+    }
+    if (pairs.every((p) => p.length === 2 && !p[1]!.includes('.'))) {
+      return 'output';
+    }
+    return null;
+  };
+
+  const model = chipTop();
+  const svg = renderFrameSvg(input(model), { signalMode: 'bundled' }).svg;
+  const frameWires = wire(svg)
+    .map((w) => ({ ...w, side: sideOf(w.title) }))
+    .filter((w): w is typeof w & { side: 'input' | 'output' } => w.side !== null);
+  assert.equal(frameWires.filter((w) => w.side === 'input').length, 2, 'one wire per fed instance');
+  assert.equal(frameWires.filter((w) => w.side === 'output').length, 2, 'one wire per driving instance');
+
+  for (const w of frameWires) {
+    assert.equal(w.y0, w.y3, `${w.title} leaves and meets the bus at one y`);
+  }
+  const span = (w: { x0: number; x3: number }): [number, number] => [
+    Math.min(w.x0, w.x3),
+    Math.max(w.x0, w.x3),
+  ];
+  for (let i = 0; i < frameWires.length; i++) {
+    for (let j = i + 1; j < frameWires.length; j++) {
+      const a = frameWires[i]!;
+      const b = frameWires[j]!;
+      const [a0, a1] = span(a);
+      const [b0, b1] = span(b);
+      assert.ok(
+        a.y0 !== b.y0 || Math.max(a0, b0) >= Math.min(a1, b1),
+        `${a.title} and ${b.title} do not cross`,
+      );
+    }
+  }
+
+  // A frame input driven straight to a frame output is one horizontal bus-to-bus
+  // wire, not a curve through the middle.
+  const direct: ModuleTopology = {
+    ...model,
+    children: [],
+    edges: [
+      {
+        from: { kind: 'signal', name: 'clk' },
+        to: { kind: 'signal', name: 'result' },
+        kind: 'port',
+      },
+    ],
+  };
+  const directSvg = renderFrameSvg(input(direct), { signalMode: 'bundled' }).svg;
+  const directWires = wire(directSvg);
+  assert.equal(directWires.length, 1, 'the pass-through is one wire');
+  assert.equal(directWires[0]!.y0, directWires[0]!.y3, 'the pass-through is horizontal');
+});
+
 test('svg: the current module has a frame that reaches the port boxes', () => {
   const model = chipTop();
   const plain: ModuleTopology = { ...model, children: [], edges: [] };

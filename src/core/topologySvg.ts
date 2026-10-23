@@ -340,6 +340,7 @@ interface EdgeEnd {
   x: number;
   y: number;
   role: 'input' | 'output' | 'neutral';
+  bus?: boolean;
 }
 
 function findSignalIndex(signals: TopoSignal[], name: string): number {
@@ -655,6 +656,7 @@ export function renderFrameSvg(
             x: bar.trunkX,
             y: bar.y + ((i + 0.5) * bar.h) / bar.count,
             role: cat === 'inout' ? 'neutral' : 'input',
+            bus: true,
           };
         }
         const tick = ticks.find((t) => t.side === 'input' && t.name === name);
@@ -684,6 +686,7 @@ export function renderFrameSvg(
           x: bar.trunkX - RAIL_W / 2,
           y: bar.y + ((i + 0.5) * bar.h) / bar.count,
           role: 'output',
+          bus: true,
         };
       }
       const tick = ticks.find((t) => t.side === 'output' && t.name === name);
@@ -835,6 +838,18 @@ export function renderFrameSvg(
       }
     }
     const color = role === 'input' ? th.input : role === 'output' ? th.output : th.neutral;
+
+    // Bundled frame wires are horizontal: tap the bus at the y the wire needs
+    // on its other end. Spreading taps by signal order instead (the old
+    // behaviour) forced needless curves and made neighbouring wires cross on
+    // their way to and from the buses.
+    if (mode === 'bundled') {
+      if (from.bus && !to.bus) {
+        from.y = to.y;
+      } else if (to.bus) {
+        to.y = from.y;
+      }
+    }
 
     const x0 = from.x;
     const y0 = from.y;
