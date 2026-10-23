@@ -431,56 +431,64 @@ test('trace module up: a cursor on the module type at an instantiation ascends t
   assert.equal(path.basename(up.targets[0].file), 'chip_top.v');
 });
 
-test('trace module up: a connected signal at an instantiation ascends to the holding module', () => {
+test('trace module up: a connected signal at an instantiation is not a module trace', () => {
   const index = indexDir(FIXTURES);
   const file = path.join(FIXTURES, 'datapath.v');
   const src = fs.readFileSync(file, 'utf8');
-  // Cursor on the `alu_sum` net that the adder instance connects: the
-  // position belongs to the instantiated module, so the hop leaves it and
-  // lands on the implementation of the module that holds the instantiation.
+  // Cursor on the `alu_sum` net that the adder instance connects: the position
+  // sits inside the instantiation, but it names a net of this module, so the
+  // module trace refuses it and the signal trace owns it.
   const p = at(src, '.sum   (alu_sum)', '.sum   ('.length);
 
-  const up = traceModule(index, file, src, p.line, p.character, 'up')!;
-  assert.equal(up.name, 'adder');
-  assert.equal(up.module, 'adder');
-  assert.equal(up.targets.length, 1);
-  const step = up.targets[0];
-  assert.equal(step.kind, 'module-definition');
-  assert.equal(step.label, 'datapath');
-  assert.equal(path.basename(step.file), 'datapath.v');
-  assert.equal(srcFileLine(step.file, step.range.start.line), 'module datapath #(');
+  const up = traceModule(index, file, src, p.line, p.character, 'up');
+  assert.equal(up, undefined);
 });
 
-test('trace module down: a connected signal at an instantiation jumps to the instantiated module', () => {
+test('trace module down: a connected signal at an instantiation is not a module trace', () => {
   const index = indexDir(FIXTURES);
   const file = path.join(FIXTURES, 'datapath.v');
   const src = fs.readFileSync(file, 'utf8');
-  // The same connected net, traced down: it enters the instantiated module.
+  // The same connected net, traced down: it is still a signal of this module.
   const p = at(src, '.sum   (alu_sum)', '.sum   ('.length);
 
-  const down = traceModule(index, file, src, p.line, p.character, 'down')!;
-  assert.equal(down.name, 'adder');
-  assert.equal(down.module, 'adder');
-  assert.equal(down.targets.length, 1);
-  assert.equal(down.targets[0].kind, 'child-module');
-  assert.equal(down.targets[0].label, 'u_adder : adder');
-  assert.equal(path.basename(down.targets[0].file), 'adder.v');
+  const down = traceModule(index, file, src, p.line, p.character, 'down');
+  assert.equal(down, undefined);
 });
 
-test('trace at: a connected signal at an instantiation is a module trace', () => {
+test('trace at: a connected signal at an instantiation is a signal trace', () => {
   const index = indexDir(FIXTURES);
   const file = path.join(FIXTURES, 'datapath.v');
   const src = fs.readFileSync(file, 'utf8');
-  // The connected net is a signal of this module, but the position sits inside
-  // the instantiation, so the trace follows the hierarchy.
+  // The connected net is a signal of this module, so even though the position
+  // sits inside the instantiation, the trace follows the signal web and not the
+  // hierarchy.
   const p = at(src, '.sum   (alu_sum)', '.sum   ('.length);
 
   const down = traceAt(index, file, src, p.line, p.character, 'down')!;
-  assert.equal(down.name, 'adder');
+  assert.equal(down.name, 'alu_sum');
+  assert.equal(down.module, 'datapath');
+  const labels = down.targets.filter((t) => t.kind === 'child-connection').map((t) => t.label).sort();
+  assert.deepEqual(labels, ['u_adder.sum', 'u_regfile.wdata']);
   assert.ok(
-    down.targets.every((t) => t.kind === 'child-module'),
-    'the connected net is an instantiation position',
+    down.targets.every((t) => t.kind !== 'child-module'),
+    'the connected net is a signal, not an instantiation position',
   );
+});
+
+test('trace at: a connected signal traces up to its declaration in the same module', () => {
+  const index = indexDir(FIXTURES);
+  const file = path.join(FIXTURES, 'datapath.v');
+  const src = fs.readFileSync(file, 'utf8');
+  // Up from the connected net: the first hop is its declaration in datapath,
+  // not the module that holds the instantiation.
+  const p = at(src, '.sum   (alu_sum)', '.sum   ('.length);
+
+  const up = traceAt(index, file, src, p.line, p.character, 'up')!;
+  assert.equal(up.name, 'alu_sum');
+  assert.equal(up.module, 'datapath');
+  assert.equal(up.targets.length, 1);
+  assert.equal(up.targets[0].kind, 'declaration');
+  assert.equal(srcFileLine(up.targets[0].file, up.targets[0].range.start.line), '  wire [WIDTH-1:0] alu_sum;');
 });
 
 test('trace at: a port name at a connection keeps the signal trace', () => {

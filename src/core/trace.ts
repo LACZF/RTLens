@@ -90,6 +90,12 @@ export function traceAt(
     return undefined;
   }
   const kind = hit.resolution.ok ? hit.resolution.decl.kind : undefined;
+  // A connected net that resolves to a signal or port is a signal position even
+  // inside an instantiation: `.sum(alu_sum)` names `alu_sum`, so the cursor
+  // follows the signal web rather than the module it is wired into.
+  if ((kind === 'signal' || kind === 'port') && signalRefAt(hit.mod, line, character)) {
+    return signalFromHit(index, hit, line, character, direction);
+  }
   if (kind === 'instance' || kind === 'module' || instanceAt(hit.mod, line, character)) {
     return moduleTrace(index, hit.mod, direction, line, character);
   }
@@ -402,6 +408,10 @@ export function traceModule(
     return undefined;
   }
   const kind = hit.resolution.ok ? hit.resolution.decl.kind : undefined;
+  // A net or port wired into an instantiation is still a signal position.
+  if ((kind === 'signal' || kind === 'port') && signalRefAt(hit.mod, line, character)) {
+    return undefined;
+  }
   if (kind !== 'instance' && kind !== 'module' && !instanceAt(hit.mod, line, character)) {
     return undefined;
   }
@@ -581,9 +591,12 @@ function moduleTraceDown(
  *
  * Four positions belong to an instantiation: the instance name, the module type
  * it instantiates, a signal the instance connects, and the rest of the
- * statement - the parameter overrides and the text behind a connection. All of
- * them count as the instantiated module rather than as the module that holds
- * the instantiation.
+ * statement - the parameter overrides and the text behind a connection. They all
+ * count as the instantiated module rather than as the module that holds the
+ * instantiation. A connected net that resolves to a signal or port is the
+ * exception: the callers dispatch it to the signal trace before asking
+ * `instanceAt`, so the fallback below only sees unresolved names, parameters and
+ * the remaining statement text.
  */
 function instanceAt(
   mod: ModuleDef,
@@ -662,5 +675,12 @@ function connectedSignalAt(conn: PortConn, line: number, character: number): boo
       !r.fullPath.includes('.') &&
       !samePos(r.range, conn.nameRange) &&
       pointIn(r.range, line, character),
+  );
+}
+
+/** Whether the cursor sits on a net reference inside an instantiation connection. */
+function signalRefAt(mod: ModuleDef, line: number, character: number): boolean {
+  return mod.instances.some((inst) =>
+    inst.connections.some((conn) => connectedSignalAt(conn, line, character)),
   );
 }
