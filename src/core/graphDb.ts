@@ -28,6 +28,7 @@ export interface GraphDatabase {
   generatedAt: string;
   /** Fingerprint of the source files this was built from; empty means unknown. */
   source: string;
+  filterHash?: string;
   /** Top modules that have a graph, sorted by name. */
   tops: string[];
   graphs: Record<string, GraphDbEntry>;
@@ -51,18 +52,27 @@ export function buildGraphDatabase(
   options: GraphDbOptions,
   generatedAt: string,
   source: string,
+  filterModules: readonly string[] = [],
+  filterHash = '',
 ): GraphDatabase {
   const graphs: Record<string, GraphDbEntry> = {};
   const kept: string[] = [];
   for (const top of [...tops].sort()) {
-    const hierarchy = buildHierarchy(index, top, options.hierarchy);
+    const hierarchy = buildHierarchy(index, top, { ...options.hierarchy, filterModules });
     if (!hierarchy) {
       continue;
     }
     graphs[top] = { options: options.graph, graph: buildGraph(index, hierarchy.root, options.graph) };
     kept.push(top);
   }
-  return { version: GRAPH_DB_VERSION, generatedAt, source, tops: kept, graphs };
+  return {
+    version: GRAPH_DB_VERSION,
+    generatedAt,
+    source,
+    ...(filterHash ? { filterHash } : {}),
+    tops: kept,
+    graphs,
+  };
 }
 
 /** Compact, stable serialisation. `graphs` is inserted key-sorted. */
@@ -97,6 +107,9 @@ export function parseGraphDatabase(text: string): GraphDatabase | undefined {
     version: GRAPH_DB_VERSION,
     generatedAt: typeof value.generatedAt === 'string' ? value.generatedAt : '',
     source: typeof value.source === 'string' ? value.source : '',
+    ...(typeof value.filterHash === 'string' && value.filterHash
+      ? { filterHash: value.filterHash }
+      : {}),
     tops: value.tops as string[],
     graphs: value.graphs as Record<string, GraphDbEntry>,
   };

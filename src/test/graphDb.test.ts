@@ -76,3 +76,28 @@ test('graphDb: tops are stored sorted', () => {
   const sorted = [...db.tops].sort();
   assert.deepEqual(db.tops, sorted);
 });
+
+test('graphDb: filtered modules are absent from the precomputed graph', () => {
+  const db = buildGraphDatabase(libIndex(), ['chip_top'], OPTIONS, '', '', ['datapath'], 'fh');
+
+  assert.equal(db.filterHash, 'fh', 'the database records the filter it was built with');
+  const graph = db.graphs['chip_top'].graph;
+  assert.equal(
+    graph.nodes.some((node) => node.moduleName === 'datapath'),
+    false,
+    'the filtered module has no node',
+  );
+  assert.equal(
+    graph.edges.some((edge) => edge.from.includes('u_dpath') || edge.to.includes('u_dpath')),
+    false,
+    'no edge reaches the filtered module instance',
+  );
+});
+
+test('graphDb: a filtered top is skipped rather than recorded empty', () => {
+  const db = buildGraphDatabase(libIndex(), ['chip_top'], OPTIONS, '', '', ['chip_top']);
+
+  assert.deepEqual(db.tops, []);
+  assert.equal(db.graphs['chip_top'], undefined);
+});
+
