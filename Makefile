@@ -28,7 +28,10 @@ STAMP   := node_modules/.deps-ok
 NPM ?= npm
 NODE ?= node
 # Pinned to a major: a new major of vsce may add required flags.
-VSCE ?= npx --yes @vscode/vsce@4
+# --ignore-scripts: vsce's postinstall pulls @vscode/vsce-sign, whose script
+# aborts on platforms it does not ship (e.g. openharmony) and npx turns that
+# into a silent failure. Only `vsce sign` needs that binary; package does not.
+VSCE ?= npx --yes --ignore-scripts @vscode/vsce@4
 # This extension is not published from a public repository, so there is no URL
 # to put in package.json; and no LICENSE file exists yet (the manifest says
 # MIT). Both are vsce warnings, not errors - drop this variable once a

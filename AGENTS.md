@@ -10,7 +10,7 @@ VS Code extension **RTLens** (`package.json` name `rtlens`): Verilog/SystemVeril
 - **Tests run compiled JS in `out/`, not `src/`.** After editing, recompile. `npm test`/`make test` do it; a bare `node --test out/test/` does not.
 - Single test: `npx tsc -p ./ && node --test out/test/parser.test.js` (or `node --test --test-name-pattern="..." out/test/`).
 - No ESLint/Prettier/EditorConfig. Do not add or assume one.
-- `vsce` is not a devDependency: Makefile uses `npx --yes @vscode/vsce@4`; `npm run package` uses a bare `vsce`.
+- `vsce` is not a devDependency: Makefile uses `npx --yes --ignore-scripts @vscode/vsce@4`; `npm run package` uses a bare `vsce`. `--ignore-scripts` skips vsce's `@vscode/vsce-sign` postinstall, which exits 1 on platforms it does not ship (e.g. openharmony) and makes npx fail silently; `vsce package` does not need that binary.
 
 ## Layout
 
