@@ -96,6 +96,16 @@ export function traceAt(
   if ((kind === 'signal' || kind === 'port') && signalRefAt(hit.mod, line, character)) {
     return signalFromHit(index, hit, line, character, direction);
   }
+  const conn = connectionAt(hit.mod, line, character);
+  if (conn) {
+    if (direction === 'down') {
+      return connectionTrace(index, hit.mod, conn.inst, conn.conn, direction);
+    }
+    if (kind === 'port') {
+      return signalFromHit(index, hit, line, character, direction);
+    }
+    return connectionTrace(index, hit.mod, conn.inst, conn.conn, direction);
+  }
   if (kind === 'instance' || kind === 'module' || instanceAt(hit.mod, line, character)) {
     return moduleTrace(index, hit.mod, direction, line, character);
   }

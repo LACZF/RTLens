@@ -18,6 +18,7 @@ import type {
   TopoEdge,
   TopoEndpoint,
   TopoSignal,
+  TopoSide,
 } from './topology';
 
 export type SignalDisplay = 'all' | 'hidden' | 'bundled';
@@ -353,6 +354,240 @@ function findSignalIndex(signals: TopoSignal[], name: string): number {
 }
 
 /* ------------------------------------------------------------------ */
+/* display order                                                       */
+/* ------------------------------------------------------------------ */
+
+interface DisplayPorts {
+  left: TopoChildPort[];
+  right: TopoChildPort[];
+}
+
+interface DisplayLayout {
+  inputs: TopoSignal[];
+  outputs: TopoSignal[];
+  ports: Map<string, DisplayPorts>;
+}
+
+/** A separator that cannot appear in an identifier. */
+const ORDER_SEP = '\u0000';
+
+function portKey(childId: string, side: TopoSide, port: string): string {
+  return `p${ORDER_SEP}${childId}${ORDER_SEP}${side}${ORDER_SEP}${port}`;
+}
+
+function signalKey(side: 'i' | 'o', name: string): string {
+  return `${side}${ORDER_SEP}${name}`;
+}
+
+function signalKeys(side: 'i' | 'o', s: TopoSignal): string[] {
+  return s.declName && s.declName !== s.name
+    ? [signalKey(side, s.name), signalKey(side, s.declName)]
+    : [signalKey(side, s.name)];
+}
+
+/**
+ * Barycenter pass over the four independently ordered lists: each child's
+ * left ports, its right ports, the input rows and the output rows. Sorting
+ * the frame rows next to the ports they feed (and vice versa) keeps the
+ * wires between them from crossing, without touching the model order.
+ */
+function orderForDisplay(
+  inputs: TopoSignal[],
+  outputs: TopoSignal[],
+  children: TopoChild[],
+  childGeoms: { child: TopoChild; y: number; h: number }[],
+  edges: TopoEdge[],
+  mode: SignalDisplay,
+  contentTop: number,
+): DisplayLayout {
+  const ports = new Map<string, DisplayPorts>();
+  for (const c of children) {
+    const split = childPorts(c);
+    ports.set(c.id, { left: split.left.slice(), right: split.right.slice() });
+  }
+  if (mode === 'bundled') {
+    return { inputs, outputs, ports };
+  }
+
+  const geomById = new Map<string, { child: TopoChild; y: number; h: number }>();
+  for (const g of childGeoms) {
+    geomById.set(g.child.id, g);
+  }
+
+  const childSide = (ep: { child: string; port: string; side?: TopoSide }): TopoSide => {
+    if (ep.side === 'input' || ep.side === 'output') {
+      return ep.side;
+    }
+    const c = children.find((ch) => ch.id === ep.child);
+    const p = c ? (c.ports ?? []).find((pp) => pp.name === ep.port) : undefined;
+    return p && portSide(p) === 'right' ? 'output' : 'input';
+  };
+
+  const adj = new Map<string, Set<string>>();
+  const link = (a: string, b: string): void => {
+    if (a === b) {
+      return;
+    }
+    let sa = adj.get(a);
+    if (!sa) {
+      sa = new Set<string>();
+      adj.set(a, sa);
+    }
+    sa.add(b);
+    let sb = adj.get(b);
+    if (!sb) {
+      sb = new Set<string>();
+      adj.set(b, sb);
+    }
+    sb.add(a);
+  };
+  for (const e of edges) {
+    const a =
+      e.from.kind === 'signal'
+        ? signalKey('i', e.from.name)
+        : portKey(e.from.child, childSide(e.from), e.from.port);
+    const b =
+      e.to.kind === 'signal'
+        ? signalKey('o', e.to.name)
+        : portKey(e.to.child, childSide(e.to), e.to.port);
+    link(a, b);
+  }
+
+  let orderedInputs = inputs.slice();
+  let orderedOutputs = outputs.slice();
+
+  const originalInput = new Map<TopoSignal, number>();
+  inputs.forEach((s, i) => originalInput.set(s, i));
+  const originalOutput = new Map<TopoSignal, number>();
+  outputs.forEach((s, i) => originalOutput.set(s, i));
+
+  const originalPort = new Map<string, number>();
+  for (const [id, split] of ports) {
+    split.left.forEach((p, i) => originalPort.set(portKey(id, 'input', p.name), i));
+    split.right.forEach((p, i) => originalPort.set(portKey(id, 'output', p.name), i));
+  }
+
+  const positions = new Map<string, number>();
+
+  const recomputePorts = (): void => {
+    for (const [id, split] of ports) {
+      const g = geomById.get(id);
+      if (!g) {
+        continue;
+      }
+      const place = (side: TopoSide, list: TopoChildPort[]): void => {
+        list.forEach((p, i) => {
+          const y = Math.max(
+            g.y + CHILD_HEAD,
+            Math.min(g.y + g.h - 4, g.y + CHILD_HEAD + (i + 0.5) * CHILD_ROW),
+          );
+          positions.set(portKey(id, side, p.name), y);
+        });
+      };
+      place('input', split.left);
+      place('output', split.right);
+    }
+  };
+
+  const recomputeRows = (): void => {
+    const seenInput = new Set<string>();
+    orderedInputs.forEach((s, i) => {
+      const y = contentTop + i * (ROW_H + ROW_GAP) + ROW_H / 2;
+      for (const k of signalKeys('i', s)) {
+        if (!seenInput.has(k)) {
+          seenInput.add(k);
+          positions.set(k, y);
+        }
+      }
+    });
+    const seenOutput = new Set<string>();
+    orderedOutputs.forEach((s, i) => {
+      const y = contentTop + i * (ROW_H + ROW_GAP) + ROW_H / 2;
+      for (const k of signalKeys('o', s)) {
+        if (!seenOutput.has(k)) {
+          seenOutput.add(k);
+          positions.set(k, y);
+        }
+      }
+    });
+  };
+
+  interface Ranked<T> {
+    value: T;
+    b: number;
+    i: number;
+  }
+
+  const rank = <T>(
+    items: T[],
+    keysOf: (value: T) => string[],
+    indexOf: (value: T) => number,
+  ): T[] => {
+    const ranked: Ranked<T>[] = items.map((value) => {
+      const seen = new Set<string>();
+      let sum = 0;
+      let count = 0;
+      for (const k of keysOf(value)) {
+        for (const n of adj.get(k) ?? []) {
+          if (seen.has(n)) {
+            continue;
+          }
+          seen.add(n);
+          const y = positions.get(n);
+          if (y !== undefined) {
+            sum += y;
+            count += 1;
+          }
+        }
+      }
+      return {
+        value,
+        b: count > 0 ? sum / count : Number.POSITIVE_INFINITY,
+        i: indexOf(value),
+      };
+    });
+    ranked.sort((a, b) => {
+      if (a.b !== b.b) {
+        return a.b < b.b ? -1 : 1;
+      }
+      return a.i - b.i;
+    });
+    return ranked.map((r) => r.value);
+  };
+
+  recomputePorts();
+  recomputeRows();
+  for (let sweep = 0; sweep < 4; sweep++) {
+    for (const [id, split] of ports) {
+      split.left = rank(
+        split.left,
+        (p) => [portKey(id, 'input', p.name)],
+        (p) => originalPort.get(portKey(id, 'input', p.name)) ?? 0,
+      );
+      split.right = rank(
+        split.right,
+        (p) => [portKey(id, 'output', p.name)],
+        (p) => originalPort.get(portKey(id, 'output', p.name)) ?? 0,
+      );
+    }
+    recomputePorts();
+    orderedInputs = rank(
+      orderedInputs,
+      (s) => signalKeys('i', s),
+      (s) => originalInput.get(s) ?? 0,
+    );
+    orderedOutputs = rank(
+      orderedOutputs,
+      (s) => signalKeys('o', s),
+      (s) => originalOutput.get(s) ?? 0,
+    );
+    recomputeRows();
+  }
+
+  return { inputs: orderedInputs, outputs: orderedOutputs, ports };
+}
+
+/* ------------------------------------------------------------------ */
 /* main render                                                         */
 /* ------------------------------------------------------------------ */
 
@@ -452,30 +687,6 @@ export function renderFrameSvg(
   const contentTop = pad + HEADER_H;
   const contentBottom = contentTop + contentH;
 
-  /* ---------------- signal rows (mode `all`) ---------------- */
-
-  interface SignalRowGeom {
-    signal: TopoSignal;
-    x: number;
-    y: number;
-    w: number;
-    h: number;
-  }
-  const inputRows: SignalRowGeom[] = [];
-  const outputRows: SignalRowGeom[] = [];
-  if (mode === 'all') {
-    let y = contentTop;
-    for (const s of inputs) {
-      inputRows.push({ signal: s, x: leftColX, y, w: COL_W, h: ROW_H });
-      y += ROW_H + ROW_GAP;
-    }
-    let oy = contentTop;
-    for (const s of outputs) {
-      outputRows.push({ signal: s, x: rightColX, y: oy, w: COL_W, h: ROW_H });
-      oy += ROW_H + ROW_GAP;
-    }
-  }
-
   /* ---------------- child boxes ---------------- */
 
   interface ChildGeom {
@@ -502,6 +713,50 @@ export function renderFrameSvg(
       });
       y += h + CHILD_GAP;
     }
+  }
+
+  /* ---------------- display order ---------------- */
+
+  const layout = orderForDisplay(inputs, outputs, children, childGeoms, edges, mode, contentTop);
+
+  /* ---------------- signal rows (mode `all`) ---------------- */
+
+  interface SignalRowGeom {
+    signal: TopoSignal;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  }
+  const inputRows: SignalRowGeom[] = [];
+  const outputRows: SignalRowGeom[] = [];
+  if (mode === 'all') {
+    let y = contentTop;
+    for (const s of layout.inputs) {
+      inputRows.push({ signal: s, x: leftColX, y, w: COL_W, h: ROW_H });
+      y += ROW_H + ROW_GAP;
+    }
+    let oy = contentTop;
+    for (const s of layout.outputs) {
+      outputRows.push({ signal: s, x: rightColX, y: oy, w: COL_W, h: ROW_H });
+      oy += ROW_H + ROW_GAP;
+    }
+  }
+  const inputRowByName = new Map<string, SignalRowGeom>();
+  const outputRowByName = new Map<string, SignalRowGeom>();
+  const addRow = (map: Map<string, SignalRowGeom>, row: SignalRowGeom): void => {
+    if (!map.has(row.signal.name)) {
+      map.set(row.signal.name, row);
+    }
+    if (row.signal.declName && !map.has(row.signal.declName)) {
+      map.set(row.signal.declName, row);
+    }
+  };
+  for (const row of inputRows) {
+    addRow(inputRowByName, row);
+  }
+  for (const row of outputRows) {
+    addRow(outputRowByName, row);
   }
 
   /* ---------------- boundary rails (mode `hidden`) ---------------- */
@@ -537,8 +792,8 @@ export function renderFrameSvg(
         });
       }
     };
-    spread(inputs, 'input');
-    spread(outputs, 'output');
+    spread(layout.inputs, 'input');
+    spread(layout.outputs, 'output');
   }
 
   /* ---------------- bundles (mode `bundled`) ---------------- */
@@ -636,16 +891,16 @@ export function renderFrameSvg(
     if (ep.kind === 'signal') {
       const name = ep.name;
       if (side === 'left') {
-        const idx = findSignalIndex(inputs, name);
-        if (idx < 0) {
-          return null;
-        }
         if (mode === 'all') {
-          const row = inputRows[idx];
+          const row = inputRowByName.get(name);
           if (!row) {
             return null;
           }
           return { x: row.x + row.w, y: row.y + row.h / 2, role: 'input' };
+        }
+        const idx = findSignalIndex(inputs, name);
+        if (idx < 0) {
+          return null;
         }
         if (mode === 'bundled') {
           const sig = inputs.find((s) => s.name === name || s.declName === name);
@@ -675,16 +930,16 @@ export function renderFrameSvg(
         }
         return { x: tick.x, y: tick.y, role: 'input' };
       }
-      const idx = findSignalIndex(outputs, name);
-      if (idx < 0) {
-        return null;
-      }
       if (mode === 'all') {
-        const row = outputRows[idx];
+        const row = outputRowByName.get(name);
         if (!row) {
           return null;
         }
         return { x: row.x, y: row.y + row.h / 2, role: 'output' };
+      }
+      const idx = findSignalIndex(outputs, name);
+      if (idx < 0) {
+        return null;
       }
       if (mode === 'bundled') {
         const bar = bars.find((b) => b.cat === 'out');
@@ -729,7 +984,7 @@ export function renderFrameSvg(
       const x = ep.side === 'input' ? g.x : g.x + g.w;
       return { x, y, role: 'neutral' };
     }
-    const ports = childPorts(g.child);
+    const ports = layout.ports.get(g.child.id) ?? childPorts(g.child);
     const list = ep.side === 'input' ? ports.left : ports.right;
     let idx = list.findIndex((p) => p.name === ep.port);
     if (idx < 0) {
@@ -1181,7 +1436,7 @@ export function renderFrameSvg(
 
   const childParts: string[] = [];
   for (const g of childGeoms) {
-    childParts.push(childBox(g, navChildren[g.child.id], th, mode));
+    childParts.push(childBox(g, navChildren[g.child.id], th, mode, layout.ports));
   }
   parts.push(`<g class="children">${childParts.join('')}</g>`);
 
@@ -1267,6 +1522,7 @@ function childBox(
   nav: NavRef | undefined,
   th: Theme,
   mode: SignalDisplay,
+  displayPorts?: Map<string, DisplayPorts>,
 ): string {
   const c = g.child;
   const unresolved = c.resolved === false;
@@ -1397,7 +1653,7 @@ function childBox(
     drawGroups(groups.left, 'left');
     drawGroups(groups.right, 'right');
   } else {
-    const { left, right } = childPorts(c);
+    const { left, right } = displayPorts?.get(c.id) ?? childPorts(c);
     const drawPorts = (ports: TopoChildPort[], side: 'left' | 'right'): void => {
       const cap = ports.slice(0, PORT_CAP);
       const more = ports.length - cap.length;

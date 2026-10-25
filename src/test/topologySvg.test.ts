@@ -240,6 +240,80 @@ function mixedDirections(): ModuleTopology {
   };
 }
 
+/** A model whose declaration order makes the wires into the instance cross. */
+function crossingModel(): ModuleTopology {
+  const range = { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } };
+  const signal = (name: string, direction: PortDir): TopoSignal => ({
+    name,
+    declName: name,
+    side: direction === 'output' ? 'output' : 'input',
+    direction,
+    width: 1,
+    file: '/tmp/crossing.v',
+    range,
+    nameRange: range,
+  });
+  const port = (name: string, direction: PortDir): TopoChildPort => ({
+    name,
+    side: direction === 'output' ? 'output' : 'input',
+    direction,
+    width: 1,
+    connected: true,
+  });
+  return {
+    moduleName: 'crossing',
+    file: '/tmp/crossing.v',
+    nameRange: range,
+    path: 'crossing',
+    top: 'crossing',
+    ancestors: [],
+    inputs: [signal('b', 'input'), signal('a', 'input')],
+    outputs: [signal('out2', 'output'), signal('out1', 'output')],
+    children: [
+      {
+        id: 'u',
+        instName: 'u',
+        moduleName: 'leaf',
+        defFile: '/tmp/leaf.v',
+        file: '/tmp/crossing.v',
+        range,
+        nameRange: range,
+        moduleNameRange: range,
+        resolved: true,
+        ports: [
+          port('a', 'input'),
+          port('b', 'input'),
+          port('y1', 'output'),
+          port('y2', 'output'),
+        ],
+      },
+    ],
+    edges: [
+      {
+        from: { kind: 'signal', name: 'b' },
+        to: { kind: 'child', child: 'u', port: 'b', side: 'input' },
+        kind: 'port',
+      },
+      {
+        from: { kind: 'signal', name: 'a' },
+        to: { kind: 'child', child: 'u', port: 'a', side: 'input' },
+        kind: 'port',
+      },
+      {
+        from: { kind: 'child', child: 'u', port: 'y1', side: 'output' },
+        to: { kind: 'signal', name: 'out1' },
+        kind: 'port',
+      },
+      {
+        from: { kind: 'child', child: 'u', port: 'y2', side: 'output' },
+        to: { kind: 'signal', name: 'out2' },
+        kind: 'port',
+      },
+    ],
+    warnings: [],
+  };
+}
+
 function linkedPair(): ModuleTopology {
   const range = { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } };
   const port = (name: string, direction: PortDir): TopoChildPort => ({
@@ -884,4 +958,60 @@ test('svg: a set of frames is named after the modules it draws', () => {
     topologyFileNames(frames.map((f) => ({ key: f.key, moduleName: f.model.moduleName }))),
   );
   assert.equal(rendered[0].key, 'chip_top');
+});
+
+test('svg: signal rows are ordered so wires into one instance do not cross', () => {
+  const model = crossingModel();
+  const frame = input(model);
+  frame.children = {};
+  const svg = renderFrameSvg(frame, { signalMode: 'all' }).svg;
+
+  const signalNames = [...svg.matchAll(/<g class="signal"><title>([^<]*)<\/title>/g)].map(
+    (m) => m[1]!,
+  );
+  const inputNames = signalNames.slice(0, model.inputs.length);
+  const outputNames = signalNames.slice(model.inputs.length);
+  assert.equal(inputNames.length, model.inputs.length);
+  assert.equal(outputNames.length, model.outputs.length);
+
+  const titleAt = svg.indexOf('<title>u</title>');
+  assert.notEqual(titleAt, -1, 'the instance is drawn');
+  const child = svg.slice(titleAt, svg.indexOf('</g>', titleAt));
+  const labels = (anchor: 'start' | 'end'): string[] =>
+    [
+      ...child.matchAll(
+        new RegExp(
+          `<text[^>]*font-size="9"[^>]*text-anchor="${anchor}"[^>]*>([^<]*)</text>`,
+          'g',
+        ),
+      ),
+    ].map((m) => m[1]!);
+  const leftPorts = labels('start');
+  const rightPorts = labels('end');
+
+  const preserves = (
+    orderA: string[],
+    orderB: string[],
+    pairs: [string, string][],
+    side: string,
+  ): void => {
+    for (let i = 0; i < pairs.length; i++) {
+      for (let j = i + 1; j < pairs.length; j++) {
+        const a = pairs[i]!;
+        const b = pairs[j]!;
+        const ai = orderA.indexOf(a[0]);
+        const bi = orderA.indexOf(b[0]);
+        const aj = orderB.indexOf(a[1]);
+        const bj = orderB.indexOf(b[1]);
+        assert.ok(ai >= 0 && bi >= 0 && aj >= 0 && bj >= 0, `${side}: every name is drawn`);
+        assert.ok(
+          (ai - bi) * (aj - bj) >= 0,
+          `${side}: ${a.join('->')} and ${b.join('->')} keep their relative order`,
+        );
+      }
+    }
+  };
+
+  preserves(inputNames, leftPorts, [['b', 'b'], ['a', 'a']], 'left');
+  preserves(rightPorts, outputNames, [['y1', 'out1'], ['y2', 'out2']], 'right');
 });

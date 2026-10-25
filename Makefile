@@ -12,7 +12,7 @@
 # The test suite runs before packaging on purpose: a vsix is a release, and
 # shipping a red build is worse than a slow one.
 
-SHELL := /bin/bash
+# SHELL := /bin/bash
 # One thing at a time. `compile` is a phony prerequisite of both `check` and
 # `package`, so without this `make -j` could run tsc twice into the same out/.
 .NOTPARALLEL:
