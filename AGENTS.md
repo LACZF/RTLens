@@ -4,7 +4,7 @@ VS Code extension **RTLens** (`package.json` name `rtlens`): Verilog/SystemVeril
 
 ## Commands
 
-- `make` (default) = deps → `tsc` → unit tests → e2e → `vsce package` → `dist/rtlens-0.1.4.vsix`. `make check` stops before packaging; `make contents` lists vsix files; `make help`.
+- `make` (default) = deps → `tsc` → unit tests → e2e → `vsce package` → `dist/rtlens-0.1.5.vsix`. `make check` stops before packaging; `make contents` lists vsix files; `make help`.
 - `npm run compile` = `tsc -p ./` (emits CommonJS to `out/`).
 - `npm test` = compile **then** `node --test out/test/`. `npm run check` = compile then `node out/tools/e2e.js`.
 - **Tests run compiled JS in `out/`, not `src/`.** After editing, recompile. `npm test`/`make test` do it; a bare `node --test out/test/` does not.

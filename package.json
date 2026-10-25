@@ -2,7 +2,7 @@
   "name": "rtlens",
   "displayName": "RTLens",
   "description": "Read Verilog/SystemVerilog with syntax highlighting, signal & module go-to-definition, and visual connectivity / composition / wrapper generation.",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "local",
   "license": "MIT",
   "engines": {
