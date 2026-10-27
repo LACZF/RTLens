@@ -347,6 +347,12 @@ export type ModuleKind = 'module' | 'interface' | 'program' | 'package' | 'class
 export interface ModuleDef {
   name: string;
   kind: ModuleKind;
+  /**
+   * Superclass named by `class C extends B;` when `kind` is `class`. Kept so
+   * `super.m()` resolves to the parent's method instead of the override in the
+   * current class.
+   */
+  superClass?: string;
   /** Absolute file path. */
   file: string;
   range: Range;

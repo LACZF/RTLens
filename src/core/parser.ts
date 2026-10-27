@@ -65,7 +65,7 @@ const SCOPE_CLOSER: Record<string, string> = {
 const BLOCK_OPENERS = new Set<string>([
   'begin', 'generate', 'case', 'casex', 'casez', 'fork', 'function', 'task',
   'specify', 'table', 'property', 'sequence', 'covergroup', 'cover', 'clocking',
-  'randcase', 'randsequence', 'constraint', 'checker', 'rand',
+  'randcase', 'randsequence', 'constraint', 'checker',
 ]);
 
 const BLOCK_CLOSERS = new Set<string>([
@@ -907,6 +907,24 @@ export class Parser {
       c.pos++;
     }
     headerEnd = c.pos;
+    let superClass: string | undefined;
+    if (kind === 'class') {
+      for (let k = headerStart; k < headerEnd; k++) {
+        if (this.toks[k].text !== 'extends') {
+          continue;
+        }
+        for (let j = k + 1; j < headerEnd; j++) {
+          const n = this.toks[j];
+          if (n.text === '#' || n.text === '(' || n.text === ')' || n.text === ',') {
+            break;
+          }
+          if (n.kind === 'ident') {
+            superClass = n.text;
+          }
+        }
+        break;
+      }
+    }
     if (c.at(';')) {
       c.pos++;
     }
@@ -964,6 +982,9 @@ export class Parser {
       timeMs: 0,
       startLine: openerTok.range.start.line + 1,
     };
+    if (superClass) {
+      mod.superClass = superClass;
+    }
 
     const headerSlices = this.splitHeader(headerStart, headerEnd);
     const scope = new MapScope();
@@ -1248,7 +1269,35 @@ export class Parser {
   }
 
   private parseBodyItem(c: Cursor, mod: ModuleDef, ctx: ParseContext, isPackage: boolean): boolean {
-    const t = c.cur()!;
+    let t = c.cur()!;
+
+    // Skip modifiers like static, virtual, automatic, extern, protected, local, pure
+    if (t.kind === 'keyword' && (MODIFIERS.has(t.text) || t.text === 'extern' || t.text === 'pure')) {
+      const startPos = c.pos;
+      let accessQualified = false;
+      let memberQualified = false;
+      while (t && t.kind === 'keyword' && (MODIFIERS.has(t.text) || t.text === 'extern' || t.text === 'pure')) {
+        if (t.text === 'local' || t.text === 'protected') {
+          accessQualified = true;
+        }
+        if (mod.kind === 'class' && (t.text === 'rand' || t.text === 'randc')) {
+          memberQualified = true;
+        }
+        c.pos++;
+        t = c.cur()!;
+      }
+      if (t && t.kind === 'keyword' && (t.text === 'function' || t.text === 'task')) {
+        return this.parseBlock(c, mod, ctx, isPackage);
+      }
+      // `local int x;` / `protected foo_t x;` / `rand bit [7:0] x;` are member
+      // declarations, not a statement to skip: keep the cursor past the
+      // qualifier so the declaration below records the name. Other modifiers
+      // (`ref`, `unique`) belong to constructs handled after the reset.
+      if (!accessQualified && !memberQualified) {
+        c.pos = startPos;
+        t = c.cur()!;
+      }
+    }
 
     // --- nested block constructs: recurse into them ---
     if (t.kind === 'keyword' && (BLOCK_OPENERS.has(t.text) || GENERATE_KEYWORDS.has(t.text))) {
@@ -1392,13 +1441,24 @@ export class Parser {
    */
   private parseBlock(c: Cursor, mod: ModuleDef, ctx: ParseContext, isPackage: boolean): boolean {
     const toks = this.toks;
-    const t = c.cur()!;
+    let t = c.cur()!;
 
     if (t.kind === 'keyword' && t.text === 'generate') {
       const close = matchBlock(toks, c.pos, c.end);
       this.parseBody(c.slice(c.pos + 1, close), mod, { ...ctx, generate: ctx.generate ?? GENERATE_REGION }, isPackage);
       c.pos = Math.min(close + 1, c.end);
       return true;
+    }
+
+    // Skip modifiers like static, virtual, automatic, extern, protected, local
+    if (t.kind === 'keyword' && (MODIFIERS.has(t.text) || t.text === 'extern' || t.text === 'pure')) {
+      c.pos++;
+      t = c.cur()!;
+      // Could be multiple modifiers
+      while (t && t.kind === 'keyword' && (MODIFIERS.has(t.text) || t.text === 'extern' || t.text === 'pure')) {
+        c.pos++;
+        t = c.cur()!;
+      }
     }
 
     if (t.kind === 'keyword' && (t.text === 'function' || t.text === 'task')) {
@@ -2455,12 +2515,18 @@ export class Parser {
     }
   }
 
-  /** A typedef visible in `mod`, including one from a package in this file. */
+  /** A typedef or class visible in `mod`, including one from a package in this file. */
   private isTypedefName(mod: ModuleDef, name: string): boolean {
     if (mod.decls.some((d) => d.name === name && d.kind === 'typedef')) {
       return true;
     }
     if (this.fileTypedefs.some((d) => d.name === name)) {
+      return true;
+    }
+    // A class-typed member (`my_env env;`) is a declaration just like a
+    // typedef-typed one; classes are indexed before their members are parsed.
+    if (this.scopeKinds.get(name) === 'class' ||
+        this.modules.some((m) => m.name === name && m.kind === 'class')) {
       return true;
     }
     // `pkg::type` - the qualified name names a package and one of its typedefs.
@@ -3197,7 +3263,7 @@ export class Parser {
     // Name = last identifier before the argument list.
     let nameIdx = -1;
     for (let k = nameLimit - 1; k >= slice.from; k--) {
-      if (toks[k].kind === 'ident' && !MODIFIERS.has(toks[k].text)) {
+      if ((toks[k].kind === 'ident' || toks[k].text === 'new') && !MODIFIERS.has(toks[k].text)) {
         nameIdx = k;
         break;
       }
@@ -3359,6 +3425,14 @@ export class Parser {
       if (toks[i + 1]?.text === '::' && toks[i + 2]?.kind === 'ident') {
         nameIdx = i + 2;
         fullPath = `${t.text}::${toks[nameIdx].text}`;
+      } else if (
+        i - 2 >= from &&
+        toks[i - 1]?.text === '.' &&
+        (toks[i - 2]?.kind === 'ident' ||
+          (toks[i - 2]?.kind === 'keyword' &&
+            (toks[i - 2].text === 'this' || toks[i - 2].text === 'super')))
+      ) {
+        fullPath = `${toks[i - 2].text}.${t.text}`;
       }
       const nameTok = toks[nameIdx];
       if (declRanges.has(rangeKey(nameTok.range))) {
@@ -3435,9 +3509,21 @@ export class Parser {
       return false;
     }
     if (prev.kind === 'keyword') {
+      // Allow calls after 'this' and 'super'
+      if (prev.text === 'this' || prev.text === 'super') {
+        return true;
+      }
       return CALL_PREFIX_KEYWORDS.has(prev.text);
     }
     if (prev.text === '.' || prev.text === '.*') {
+      // Allow method calls like obj.method() and this.method()
+      const p2 = start - 2 >= lower ? toks[start - 2] : undefined;
+      if (p2 && p2.kind === 'ident') {
+        return true;
+      }
+      if (p2 && p2.kind === 'keyword' && (p2.text === 'this' || p2.text === 'super')) {
+        return true;
+      }
       return false;
     }
     if (prev.text === ')') {
@@ -3537,7 +3623,9 @@ export class Parser {
     // `sub u;` - an instantiation with no port list at all, which generated RTL
     // uses a lot. It is only read as one when the name really is a scope of this
     // file; `byte_t data;` has the same shape and is a declaration.
-    return toks[k]?.text === ';' && this.scopeNames.has(t0.text);
+    return toks[k]?.text === ';' &&
+      this.scopeNames.has(t0.text) &&
+      this.scopeKinds.get(t0.text) !== 'class';
   }
 
   private parseInstantiation(c: Cursor, mod: ModuleDef, ctx: ParseContext): boolean {

@@ -93,6 +93,10 @@ export const KEYWORDS = new Set<string>([
   'specify', 'endspecify', 'specparam', 'table', 'endtable', 'posedge', 'negedge', 'edge',
   // classes / constraints / coverage
   'class', 'endclass', 'extends', 'implements', 'constraint', 'endconstraint',
+  // class member access qualifiers. These are reserved words in IEEE 1800, and
+  // without them here `protected function` / `local task` lex as identifiers,
+  // so the body parser never sees a subroutine header and drops the method.
+  'local', 'protected',
   'covergroup', 'endgroup', 'coverpoint', 'cross', 'bins', 'ignore_bins',
   'illegal_bins', 'wildcard', 'binsof', 'intersect', 'within', 'throughout',
   'first_match', 'accept_on', 'reject_on', 'sync_accept_on', 'sync_reject_on',
