@@ -44,7 +44,7 @@ test('uvm fixture: the UVM test case parses across files', () => {
   assert.equal(myTest.kind, 'class');
   assert.equal(myTest.superClass, 'uvm_test');
   assert.equal(myTest.usesUnknownConstruct, false);
-  assert.deepEqual(myTest.funcs.map((f) => f.name), ['new', 'build_phase', 'run_phase', 'check_env']);
+  assert.deepEqual(myTest.funcs.map((f) => f.name), ['new', 'build_phase', 'run_phase', 'check_env', 'configure_test', 'finish_test']);
   assert.deepEqual(myTest.decls.map((d) => d.name), ['env', 'errors']);
 
   const item = index.resolveModule('my_item');
@@ -56,6 +56,18 @@ test('uvm fixture: the UVM test case parses across files', () => {
   assert.ok(driver);
   assert.deepEqual(driver.funcs.map((f) => f.name), ['new', 'run_phase', 'drive_one']);
   assert.deepEqual(driver.decls.map((d) => d.name), ['drives']);
+
+  const rm = index.resolveModule('my_rm');
+  assert.ok(rm);
+  assert.equal(rm.superClass, 'uvm_component');
+  assert.equal(rm.usesUnknownConstruct, false);
+  assert.deepEqual(rm.funcs.map((f) => f.name), ['new', 'build_phase', 'write_item', 'predict', 'check', 'reset', 'report_error']);
+  assert.deepEqual(rm.decls.map((d) => d.name), ['expected', 'observations']);
+
+  const env = index.resolveModule('my_env');
+  assert.ok(env);
+  assert.deepEqual(env.funcs.map((f) => f.name), ['new', 'build_phase', 'build_driver', 'build_rm']);
+  assert.deepEqual(env.decls.map((d) => d.name), ['drv', 'rm']);
 
   assert.deepEqual(uvmTest.funcs.map((f) => f.name), ['new', 'build_phase', 'report_summary']);
 });
@@ -73,7 +85,7 @@ test('uvm fixture: call hierarchy follows super and this calls', () => {
   );
   assert.deepEqual(
     calleesOf(index, myTest, myTestBuild.fn).map((h) => `${h.target.mod.name}.${h.target.fn.name}`),
-    ['uvm_test.build_phase', 'my_test.check_env'],
+    ['uvm_test.build_phase', 'my_test.check_env', 'my_test.configure_test'],
   );
   assert.deepEqual(
     calleesOf(index, uvmTest, uvmTestBuild.fn).map((h) => `${h.target.mod.name}.${h.target.fn.name}`).sort(),
@@ -83,7 +95,18 @@ test('uvm fixture: call hierarchy follows super and this calls', () => {
   const checkEnv = findFunction(index, myTest, 'check_env')!;
   assert.deepEqual(
     callersOf(index, myTest, checkEnv.fn).map((h) => `${h.owner?.name}:${h.site.fullPath}`),
-    ['build_phase:this.check_env'],
+    ['build_phase:this.check_env', 'run_phase:this.check_env', 'configure_test:this.check_env', 'finish_test:this.check_env'],
+  );
+
+  const myTestRun = findFunction(index, myTest, 'run_phase')!;
+  assert.deepEqual(
+    calleesOf(index, myTest, myTestRun.fn).map((h) => `${h.target.mod.name}.${h.target.fn.name}`),
+    ['my_test.check_env', 'my_test.finish_test'],
+  );
+  const finishTest = findFunction(index, myTest, 'finish_test')!;
+  assert.deepEqual(
+    calleesOf(index, myTest, finishTest.fn).map((h) => `${h.target.mod.name}.${h.target.fn.name}`),
+    ['my_test.check_env'],
   );
 
   const driver = index.resolveModule('my_driver')!;
@@ -97,6 +120,93 @@ test('uvm fixture: call hierarchy follows super and this calls', () => {
     callersOf(index, driver, driveOne.fn).map((h) => `${h.owner?.name}:${h.site.fullPath}`),
     ['run_phase:this.drive_one'],
   );
+});
+
+test('uvm fixture: the reference model chains function calls', () => {
+  const index = setup();
+  const rm = index.resolveModule('my_rm')!;
+  const env = index.resolveModule('my_env')!;
+  const rmBuild = findFunction(index, rm, 'build_phase')!;
+  const writeItem = findFunction(index, rm, 'write_item')!;
+  const check = findFunction(index, rm, 'check')!;
+
+  assert.deepEqual(
+    calleesOf(index, rm, rmBuild.fn).map((h) => `${h.target.mod.name}.${h.target.fn.name}`),
+    ['uvm_component.build_phase', 'my_rm.reset'],
+  );
+  assert.deepEqual(
+    calleesOf(index, rm, writeItem.fn).map((h) => `${h.target.mod.name}.${h.target.fn.name}`),
+    ['my_rm.predict', 'my_rm.check'],
+  );
+  assert.deepEqual(
+    calleesOf(index, rm, check.fn).map((h) => `${h.target.mod.name}.${h.target.fn.name}`),
+    ['my_rm.report_error'],
+  );
+
+  const predict = findFunction(index, rm, 'predict')!;
+  assert.deepEqual(
+    callersOf(index, rm, predict.fn).map((h) => `${h.owner?.name}:${h.site.fullPath}`),
+    ['write_item:this.predict'],
+  );
+  const reportError = findFunction(index, rm, 'report_error')!;
+  assert.deepEqual(
+    callersOf(index, rm, reportError.fn).map((h) => `${h.owner?.name}:${h.site.fullPath}`),
+    ['check:this.report_error'],
+  );
+
+  const envBuild = findFunction(index, env, 'build_phase')!;
+  assert.deepEqual(
+    calleesOf(index, env, envBuild.fn).map((h) => `${h.target.mod.name}.${h.target.fn.name}`),
+    ['uvm_env.build_phase', 'my_env.build_driver', 'my_env.build_rm'],
+  );
+  const envBuildRm = findFunction(index, env, 'build_rm')!;
+  assert.deepEqual(
+    callersOf(index, env, envBuildRm.fn).map((h) => `${h.owner?.name}:${h.site.fullPath}`),
+    ['build_phase:this.build_rm'],
+  );
+});
+
+test('uvm fixture: reference model calls trace and jump', () => {
+  const index = setup();
+  const rmStart = TEST_SRC.indexOf('class my_rm');
+  const writeItemLine = lineAt(TEST_SRC, 'virtual function void write_item', rmStart);
+  const checkLine = lineAt(TEST_SRC, 'function void check(', rmStart);
+  const predictLine = lineAt(TEST_SRC, 'function void predict(', rmStart);
+  const reportLine = lineAt(TEST_SRC, 'protected function void report_error', rmStart);
+
+  const predictPos = at(TEST_SRC, 'this.predict', 5, rmStart);
+  const predictDown = traceAt(index, TEST_FILE, TEST_SRC, predictPos.line, predictPos.character, 'down');
+  const predictUp = traceAt(index, TEST_FILE, TEST_SRC, predictPos.line, predictPos.character, 'up');
+  assert.ok(predictDown);
+  assert.ok(predictUp);
+  assert.equal(predictDown.targets[0].kind, 'callee-definition');
+  assert.equal(predictDown.targets[0].label, 'predict');
+  assert.equal(predictDown.targets[0].range.start.line, predictLine);
+  assert.equal(predictUp.targets[0].kind, 'caller-definition');
+  assert.equal(predictUp.targets[0].range.start.line, writeItemLine);
+
+  const reportPos = at(TEST_SRC, 'this.report_error', 5, rmStart);
+  const reportDown = traceAt(index, TEST_FILE, TEST_SRC, reportPos.line, reportPos.character, 'down');
+  const reportUp = traceAt(index, TEST_FILE, TEST_SRC, reportPos.line, reportPos.character, 'up');
+  assert.ok(reportDown);
+  assert.ok(reportUp);
+  assert.equal(reportDown.targets[0].kind, 'callee-definition');
+  assert.equal(reportDown.targets[0].label, 'report_error');
+  assert.equal(reportDown.targets[0].range.start.line, reportLine);
+  assert.equal(reportUp.targets[0].kind, 'caller-definition');
+  assert.equal(reportUp.targets[0].range.start.line, checkLine);
+
+  const predictEntry = index.lookupJump(TEST_FILE, TEST_SRC, predictPos.line, predictPos.character);
+  assert.ok(predictEntry);
+  assert.equal(predictEntry.kind, 'function');
+  assert.equal(predictEntry.target?.file, TEST_FILE);
+  assert.equal(predictEntry.target?.range.start.line, predictLine);
+
+  const reportEntry = index.lookupJump(TEST_FILE, TEST_SRC, reportPos.line, reportPos.character);
+  assert.ok(reportEntry);
+  assert.equal(reportEntry.kind, 'function');
+  assert.equal(reportEntry.target?.file, TEST_FILE);
+  assert.equal(reportEntry.target?.range.start.line, reportLine);
 });
 
 test('uvm fixture: trace walks the super and this calls', () => {
