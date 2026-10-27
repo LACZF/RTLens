@@ -49,7 +49,7 @@
 | `HDL: Generate Wrapper Module for Instance` | 由实例生成包装 module |
 | `HDL: Trace Up (signal, module or subroutine)` | 从光标处的信号、module 或 task/function 向顶层逐跳追踪（快捷键 `F3`） |
 | `HDL: Trace Down (signal, module or subroutine)` | 从光标处的信号、module 或 task/function 向叶子逐跳追踪（快捷键 `F4`） |
-| `HDL: Show Call Hierarchy` | 打开光标处 task/function 的原生调用层次，逐级展开调用者与被调用者 |
+| `HDL: Show Call Hierarchy` | 打开光标处 task/function 的原生调用层次，条目显示所在文件，逐级展开调用者与被调用者 |
 | `HDL: Reveal Current Module in Composition Tree` | 在组成树中定位当前 module |
 | `HDL: Copy Hierarchical Path of Current Instance` | 复制当前实例的层次路径 |
 | `HDL: Go to Module` | 调起系统「Go to Symbol in Workspace」框（`Ctrl+T` / macOS `Cmd+T`），全工作区 module 可模糊搜索并跳到实现文件 |
