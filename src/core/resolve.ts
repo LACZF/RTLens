@@ -97,7 +97,8 @@ export function wordAtToken(toks: Token[], idx: number): WordAtPosition | undefi
     !ident ||
     (ident.kind !== 'ident' &&
       ident.kind !== 'macroRef' &&
-      !(ident.kind === 'keyword' && ident.text.startsWith('$')))
+      !(ident.kind === 'keyword' && ident.text.startsWith('$')) &&
+      !(ident.kind === 'keyword' && (ident.text === 'this' || ident.text === 'super')))
   ) {
     return undefined;
   }
@@ -159,7 +160,7 @@ function expandChain(toks: Token[], idx: number): { toks: Token[]; parts: string
     }
     if (next?.text === '.') {
       const after = toks[end + 2];
-      if (after && (after.kind === 'ident' || (after.kind === 'keyword' && !isHardKeyword(after.text)))) {
+      if (after && (after.kind === 'ident' || (after.kind === 'keyword' && (!isHardKeyword(after.text) || after.text === 'this' || after.text === 'super')))) {
         end += 2;
         continue;
       }
@@ -209,7 +210,7 @@ function expandChain(toks: Token[], idx: number): { toks: Token[]; parts: string
       start -= 2;
       continue;
     }
-    if (prev?.text === '.' && prev2 && (prev2.kind === 'ident' || (prev2.kind === 'keyword' && !isHardKeyword(prev2.text)))) {
+    if (prev?.text === '.' && prev2 && (prev2.kind === 'ident' || (prev2.kind === 'keyword' && (!isHardKeyword(prev2.text) || prev2.text === 'this' || prev2.text === 'super')))) {
       start -= 2;
       continue;
     }
@@ -327,6 +328,15 @@ export function resolvePath(
   if (!mod || path.length === 0) {
     return { ok: false, reason: 'no module scope' };
   }
+  // `this.` names the current class; `super.` names its superclass when the
+  // parent is in the index, and falls back to the current class when it is not.
+  if (path.length > 1 && (path[0] === 'this' || path[0] === 'super')) {
+    const scope =
+      path[0] === 'super' && mod.superClass
+        ? index.resolveModule(mod.superClass, mod.file) ?? mod
+        : mod;
+    return descend(index, scope, path.slice(1), opts.path ? [opts.path] : [], 0);
+  }
   const maxDepth = opts.maxDepth ?? MAX_DESCENT;
   if (path.length > maxDepth) {
     return { ok: false, reason: 'reference too deep' };
@@ -409,6 +419,13 @@ function descend(
 
   // 5. A whole dotted remainder, e.g. `g_par[0].u_par.sig` in one step.
   const dotted = path.join('.');
+  // Try to resolve as method in current module/class
+  if (path.length === 2) {
+    const fn = resolveInScope(index, mod, path[1], scopePath);
+    if (fn.ok && fn.decl.kind === 'function') {
+      return fn;
+    }
+  }
   return resolveInScope(index, mod, dotted, scopePath);
 }
 

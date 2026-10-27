@@ -74,6 +74,10 @@ export function resolveCall(
   mod: ModuleDef,
   site: CallSite,
 ): FunctionRef | undefined {
+  if (site.fullPath.startsWith('super.')) {
+    const base = mod.superClass ? index.resolveModule(mod.superClass, mod.file) : undefined;
+    return findFunctionIn(index, base ?? mod, site.name, new Set());
+  }
   const sep = site.fullPath.lastIndexOf('::');
   if (sep >= 0) {
     const pkg = index.resolveModule(site.fullPath.slice(0, sep), mod.file);
