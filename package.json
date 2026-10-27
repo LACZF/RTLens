@@ -453,7 +453,7 @@
         },
         {
           "command": "hdl.connectView.showCallHierarchy",
-          "when": "editorLangId == verilog || editorLangId == systemverilog",
+          "when": "(editorLangId == verilog || editorLangId == systemverilog) && editorHasCallHierarchyProvider",
           "group": "hdl@9"
         },
         {
@@ -483,6 +483,12 @@
       {
         "command": "hdl.connectView.traceDown",
         "key": "f4",
+        "when": "editorTextFocus && (editorLangId == verilog || editorLangId == systemverilog)"
+      },
+      {
+        "command": "hdl.connectView.showCallHierarchy",
+        "key": "shift+alt+h",
+        "mac": "shift+alt+h",
         "when": "editorTextFocus && (editorLangId == verilog || editorLangId == systemverilog)"
       },
       {

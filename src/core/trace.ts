@@ -132,7 +132,25 @@ export function traceAt(
     }
     return connectionTrace(index, hit.mod, conn.inst, conn.conn, direction);
   }
-  if (kind === 'instance' || kind === 'module' || instanceAt(hit.mod, line, character)) {
+  const isModuleLike =
+    kind === 'instance' ||
+    kind === 'module' ||
+    instanceAt(hit.mod, line, character);
+  const isPackageOrIface =
+    hit.resolution.ok &&
+    hit.resolution.decl.kind === 'module' &&
+    (() => {
+      const def = index.resolveModule(hit.resolution.decl.name, hit.resolution.decl.file);
+      return def && (def.kind === 'interface' || def.kind === 'package' || def.kind === 'class' || def.kind === 'program');
+    })();
+  if (isModuleLike || isPackageOrIface) {
+    // For packages/interfaces, trace in their own context
+    if (isPackageOrIface && hit.resolution.ok) {
+      const def = index.resolveModule(hit.resolution.decl.name, hit.resolution.decl.file);
+      if (def) {
+        return moduleTrace(index, def, direction, line, character);
+      }
+    }
     return moduleTrace(index, hit.mod, direction, line, character);
   }
   return signalFromHit(index, hit, line, character, direction);
@@ -537,10 +555,23 @@ export function traceModule(
   if ((kind === 'signal' || kind === 'port') && signalRefAt(hit.mod, line, character)) {
     return undefined;
   }
-  if (kind !== 'instance' && kind !== 'module' && !instanceAt(hit.mod, line, character)) {
+  if (kind === 'instance') {
+    return moduleTrace(index, hit.mod, direction, line, character);
+  }
+  if (hit.resolution.ok && hit.resolution.decl.kind === 'module') {
+    const def = index.resolveModule(hit.resolution.decl.name, hit.resolution.decl.file);
+    if (def && (def.kind === 'interface' || def.kind === 'package' || def.kind === 'class' || def.kind === 'program')) {
+      return moduleTrace(index, def, direction, line, character);
+    }
+    return moduleTrace(index, hit.mod, direction, line, character);
+  }
+  if (instanceAt(hit.mod, line, character)) {
+    return moduleTrace(index, hit.mod, direction, line, character);
+  }
+  if (kind === 'signal' || kind === 'port' || kind === 'param' || kind === 'genvar' || kind === 'function' || kind === 'type' || kind === 'macro' || kind === 'arg') {
     return undefined;
   }
-  return moduleTrace(index, hit.mod, direction, line, character);
+  return undefined;
 }
 
 /**
