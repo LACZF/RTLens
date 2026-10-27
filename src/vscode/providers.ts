@@ -446,10 +446,10 @@ export class HdlDocumentSymbolProvider implements vscode.DocumentSymbolProvider 
 
 /**
  * The workspace-symbol feed for the system quick open (`#`, `Ctrl+T`,
- * `workbench.action.showAllSymbols`). One `SymbolInformation` per
- * module definition - not per name, so an RTL module and its black-box stub
- * stay distinguishable - with `location` pinned to `nameRange` so choosing a
- * row opens the declaration with the cursor on the name.
+ * `workbench.action.showAllSymbols`). Includes modules, interfaces, packages,
+ * classes and task/function declarations so Ctrl+T can jump to subroutines too.
+ * Location is pinned to `nameRange` so choosing a row opens the declaration
+ * with the cursor on the name.
  */
 export class HdlWorkspaceSymbolProvider implements vscode.WorkspaceSymbolProvider {
   constructor(private readonly svc: IndexService) {}
@@ -457,16 +457,41 @@ export class HdlWorkspaceSymbolProvider implements vscode.WorkspaceSymbolProvide
   async provideWorkspaceSymbols(query: string): Promise<vscode.SymbolInformation[]> {
     await this.svc.ensureReady();
     const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
-    const mods = this.svc.index
-      .allModules()
-      .sort((a, b) => a.name.localeCompare(b.name) || a.file.localeCompare(b.file));
-    const out: vscode.SymbolInformation[] = [];
+    const mods = this.svc.index.allModules();
+    type Entry = {
+      name: string;
+      kind: vscode.SymbolKind;
+      container: string;
+      file: string;
+      range: { start: { line: number; character: number }; end: { line: number; character: number } };
+    };
+    const entries: Entry[] = [];
     for (const m of mods) {
-      const rel = String(this.svc.relFile(m.file)).toLowerCase();
-      if (tokens.length && !tokens.every((t) => subsequence(m.name.toLowerCase(), t) || subsequence(rel, t))) {
+      entries.push({
+        name: m.name,
+        kind: moduleSymbolKind(m.kind),
+        container: m.kind,
+        file: m.file,
+        range: m.nameRange,
+      });
+      for (const f of m.funcs ?? []) {
+        entries.push({
+          name: f.name,
+          kind: f.kind === 'task' ? vscode.SymbolKind.Method : vscode.SymbolKind.Function,
+          container: `${f.kind} · ${m.name}`,
+          file: m.file,
+          range: f.nameRange,
+        });
+      }
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name) || a.file.localeCompare(b.file));
+    const out: vscode.SymbolInformation[] = [];
+    for (const e of entries) {
+      const rel = String(this.svc.relFile(e.file)).toLowerCase();
+      if (tokens.length && !tokens.every((t) => subsequence(e.name.toLowerCase(), t) || subsequence(rel, t))) {
         continue;
       }
-      out.push(new vscode.SymbolInformation(m.name, moduleSymbolKind(m.kind), m.kind, locationOf(m.file, m.nameRange)));
+      out.push(new vscode.SymbolInformation(e.name, e.kind, e.container, locationOf(e.file, e.range)));
     }
     return out;
   }

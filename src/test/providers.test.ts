@@ -200,6 +200,16 @@ test('workspace symbols: offers every indexed module, sorted, and matched on the
   assert.deepEqual(none, [], 'a query that matches nothing clears the list');
 });
 
+test('workspace symbols: includes functions and tasks', async () => {
+  const all = await workspaceSymbols().provideWorkspaceSymbols('');
+  const fn: any = all.find((s: any) => s.name === 'add2' || s.name === 'clamp8' || s.name === 'bump');
+  assert.ok(fn, 'task/function definitions are included');
+  assert.match(String(fn.containerName ?? fn.container ?? fn.detail ?? ''), /task|function/);
+
+  const hit = await workspaceSymbols().provideWorkspaceSymbols('add2');
+  assert.ok(hit.some((s: any) => s.name === 'add2'));
+});
+
 test('workspace symbols: a module points at its declaration with the cursor on the name', async () => {
   const all = await workspaceSymbols().provideWorkspaceSymbols('adder');
   const adder = all.find((s) => s.name === 'adder');
