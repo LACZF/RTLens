@@ -312,6 +312,11 @@ export function activate(context: vscode.ExtensionContext): void {
     if (!editor || !LANGUAGES.includes(editor.document.languageId)) {
       return;
     }
+    await vscode.window.showTextDocument(editor.document, {
+      viewColumn: editor.viewColumn,
+      preserveFocus: false,
+      selection: editor.selection,
+    });
     // VS Code's built-in ID is `editor.showCallHierarchy` (not
     // `editor.action.showCallHierarchy`); the latter is silently ignored.
     await vscode.commands.executeCommand('editor.showCallHierarchy');
