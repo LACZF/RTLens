@@ -52,6 +52,12 @@ module tb;
 endmodule`;
 
 const FILE = '/w/callhierarchy.sv';
+const OTHER_FILE = '/w/other.sv';
+const OTHER_SRC = `module other;
+  function automatic int twice(input int x);
+    return x + x;
+  endfunction
+endmodule`;
 const token = { isCancellationRequested: false };
 
 function at(source: string, needle: string, offset = 0): { line: number; character: number } {
@@ -83,6 +89,21 @@ test('call hierarchy: prepare on a function definition returns that function', a
   assert.ok(items);
   assert.equal(items[0].name, 'compute');
   assert.equal(items[0].kind, vscode.SymbolKind.Function);
+  assert.equal(items[0].detail, 'function · tb · callhierarchy.sv');
+});
+
+test('call hierarchy: item detail names the definition file', async () => {
+  const { index, provider } = await make();
+  index.addFile(OTHER_FILE, OTHER_SRC);
+  const document = documentFor(OTHER_FILE, OTHER_SRC);
+  const pos = at(OTHER_SRC, 'twice(input int x)');
+  const items = await provider.prepareCallHierarchy(
+    document as never,
+    new vscode.Position(pos.line, pos.character),
+    token as never,
+  );
+  assert.ok(items);
+  assert.equal(items[0].detail, 'function · other · other.sv');
 });
 
 test('call hierarchy: incoming calls are the callers, one level deep', async () => {
@@ -149,6 +170,7 @@ test('call hierarchy: module-scope calls appear as a module caller', async () =>
 
   const moduleItem = incoming.find((i) => i.from.name === 'tb')!.from;
   assert.equal(moduleItem.kind, vscode.SymbolKind.Module);
+  assert.equal(moduleItem.detail, 'module · callhierarchy.sv');
   assert.equal((await provider.provideCallHierarchyIncomingCalls(moduleItem, token as never)).length, 0);
   const outgoing = await provider.provideCallHierarchyOutgoingCalls(moduleItem, token as never);
   assert.deepEqual(outgoing.map((o) => o.to.name), ['check', 'fire']);

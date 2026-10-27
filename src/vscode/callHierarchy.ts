@@ -144,7 +144,7 @@ function functionItem(mod: ModuleDef, fn: FunctionDecl): vscode.CallHierarchyIte
   return new vscode.CallHierarchyItem(
     fn.kind === 'task' ? vscode.SymbolKind.Method : vscode.SymbolKind.Function,
     fn.name,
-    `${fn.kind} · ${mod.name}`,
+    `${fn.kind} · ${mod.name} · ${fileLabel(mod.file)}`,
     vscode.Uri.file(mod.file),
     toRange(fn.range),
     toRange(fn.nameRange),
@@ -155,11 +155,16 @@ function moduleItem(mod: ModuleDef): vscode.CallHierarchyItem {
   return new vscode.CallHierarchyItem(
     vscode.SymbolKind.Module,
     mod.name,
-    `${mod.kind} · ${basename(mod.file)}`,
+    `${mod.kind} · ${fileLabel(mod.file)}`,
     vscode.Uri.file(mod.file),
     toRange(mod.range),
     toRange(mod.nameRange),
   );
+}
+
+function fileLabel(file: string): string {
+  const rel = vscode.workspace.asRelativePath(file, false);
+  return rel === file ? basename(file) : rel;
 }
 
 function addGroup(
