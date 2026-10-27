@@ -13,6 +13,7 @@ import {
   selectionAt,
 } from './vscode/providers';
 import { HdlSemanticTokensProvider } from './vscode/semantic';
+import { HdlCallHierarchyProvider } from './vscode/callHierarchy';
 import {
   ProblemsTreeProvider,
   type CompositionItem,
@@ -87,6 +88,14 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.languages.registerRenameProvider(selector, new HdlRenameProvider(svc)),
     vscode.languages.registerDocumentSymbolProvider(selector, new HdlDocumentSymbolProvider()),
     vscode.languages.registerWorkspaceSymbolProvider(new HdlWorkspaceSymbolProvider(svc)),
+    vscode.languages.registerCallHierarchyProvider(
+      selector,
+      new HdlCallHierarchyProvider(async () => {
+        await svc.ensureReady();
+        svc.syncOpenDocuments();
+        return svc.index;
+      }),
+    ),
   );
 
   // --- editor tracking ---------------------------------------------------
@@ -297,6 +306,16 @@ export function activate(context: vscode.ExtensionContext): void {
   };
   reg('hdl.connectView.traceUp', () => trace('up'));
   reg('hdl.connectView.traceDown', () => trace('down'));
+
+  reg('hdl.connectView.showCallHierarchy', async () => {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || !LANGUAGES.includes(editor.document.languageId)) {
+      return;
+    }
+    // VS Code's built-in ID is `editor.showCallHierarchy` (not
+    // `editor.action.showCallHierarchy`); the latter is silently ignored.
+    await vscode.commands.executeCommand('editor.showCallHierarchy');
+  });
 
   reg('hdl.connectView.toggleWordHighlight', () => {
     if (!svc.config.wordHighlight) {

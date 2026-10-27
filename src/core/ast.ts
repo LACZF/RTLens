@@ -179,6 +179,12 @@ export interface FunctionDecl {
   nameRange: Range;
   /** Set when the body was a simple `return expr;` we could fold. */
   returnExpr?: ConstExpr;
+  /**
+   * Calls written in this subroutine's body (and, for a function, its header),
+   * in source order. Kept on the declaration as well as on the module so a
+   * caller/callee walk never has to re-scan tokens.
+   */
+  calls?: CallSite[];
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +232,28 @@ export interface RefSite {
   context?: 'event' | 'condition' | 'generate';
   /** Inside a function or task body: an automatic variable, not a signal. */
   local?: boolean;
+}
+
+/**
+ * A call to a function or task. `range` covers the callee name, so a trace and
+ * a call-hierarchy item land on the name rather than on the whole argument
+ * list; `callRange` keeps the full expression for displays.
+ */
+export interface CallSite {
+  /** Callee leaf name, e.g. `check`. */
+  name: string;
+  /** Callee as written, including a package qualifier: `pkg::check`. */
+  fullPath: string;
+  /** Range of the callee name. */
+  range: Range;
+  /** Whole call, arguments included. */
+  callRange: Range;
+  /** Enclosing subroutine, absent when the call sits at module scope. */
+  owner?: string;
+  /** Declaration range of `owner`, to disambiguate same-named subroutines. */
+  ownerRange?: Range;
+  /** Top-level argument count. */
+  argCount: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -329,6 +357,8 @@ export interface ModuleDef {
   params: ParamDecl[];
   decls: VarDecl[];
   funcs: FunctionDecl[];
+  /** Every call in this module, including those inside subroutine bodies. */
+  calls?: CallSite[];
   instances: InstanceSite[];
   assigns: AssignSite[];
   refs: RefSite[];

@@ -312,12 +312,17 @@
       },
       {
         "command": "hdl.connectView.traceUp",
-        "title": "HDL: Trace Up (signal or module)",
+        "title": "HDL: Trace Up (signal, module or subroutine)",
         "category": "HDL"
       },
       {
         "command": "hdl.connectView.traceDown",
-        "title": "HDL: Trace Down (signal or module)",
+        "title": "HDL: Trace Down (signal, module or subroutine)",
+        "category": "HDL"
+      },
+      {
+        "command": "hdl.connectView.showCallHierarchy",
+        "title": "HDL: Show Call Hierarchy",
         "category": "HDL"
       },
       {
@@ -445,6 +450,11 @@
           "command": "hdl.connectView.traceDown",
           "when": "editorLangId == verilog || editorLangId == systemverilog",
           "group": "hdl@4"
+        },
+        {
+          "command": "hdl.connectView.showCallHierarchy",
+          "when": "editorLangId == verilog || editorLangId == systemverilog",
+          "group": "hdl@9"
         },
         {
           "command": "hdl.connectView.toggleWordHighlight",

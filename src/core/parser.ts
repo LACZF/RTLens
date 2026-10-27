@@ -12,6 +12,7 @@
 import { tokenize, type Token, type Range, type Pos, GATE_KEYWORDS, KEYWORDS } from './lexer';
 import type {
   AssignSite,
+  CallSite,
   ConstExpr,
   DataType,
   DefParam,
@@ -109,6 +110,12 @@ const ZERO_RANGE: Range = {
 };
 
 const DIR_KEYWORDS = new Set<string>(['input', 'output', 'inout', 'ref']);
+/** Keywords a call can follow directly without being a declaration header. */
+const CALL_PREFIX_KEYWORDS = new Set<string>([
+  'return', 'else', 'begin', 'end', 'initial', 'final', 'always', 'always_comb',
+  'always_ff', 'always_latch', 'do', 'fork', 'join', 'join_any', 'join_none',
+  'forever', 'repeat', 'wait', 'assert', 'assume', 'cover', 'restrict',
+]);
 /** Statements whose bracket holds a condition that is read, not assigned. */
 const WAIT_KEYWORDS = new Set<string>(['wait', 'assert', 'assume', 'cover', 'restrict']);
 
@@ -326,6 +333,29 @@ export function matchBracket(toks: Token[], i: number, limit: number): number {
     if (t.text === open) {
       depth++;
     } else if (t.text === close) {
+      depth--;
+      if (depth === 0) {
+        return k;
+      }
+    }
+  }
+  return -1;
+}
+
+/** Index of the token that opens the bracket closed at `i` (toks[i] is the closer). */
+function matchOpenBracket(toks: Token[], i: number, lower: number): number {
+  const pairs: Record<string, string> = { ')': '(', ']': '[', '}': '{' };
+  const close = toks[i]?.text;
+  const open = close ? pairs[close] : undefined;
+  if (!open) {
+    return -1;
+  }
+  let depth = 0;
+  for (let k = i; k >= lower; k--) {
+    const t = toks[k];
+    if (t.text === close) {
+      depth++;
+    } else if (t.text === open) {
       depth--;
       if (depth === 0) {
         return k;
@@ -680,6 +710,7 @@ export class Parser {
       params: [],
       decls: [],
       funcs: [],
+      calls: [],
       instances: [],
       assigns: [],
       refs: [],
@@ -920,6 +951,7 @@ export class Parser {
       params: [],
       decls: [],
       funcs: [],
+      calls: [],
       instances: [],
       assigns: [],
       refs: [],
@@ -974,6 +1006,7 @@ export class Parser {
     mod.instances.forEach((inst) => this.classifyInstanceRefs(inst, mod));
     this.declareImplicitNets(mod);
     this.dropUndeclaredGateRefs(mod);
+    this.collectCalls(mod, bodyStart, bodyEnd);
     this.classifyRefs(mod);
     mod.timeMs = 0;
     return mod;
@@ -3312,6 +3345,128 @@ export class Parser {
     }
   }
 
+  private collectCalls(mod: ModuleDef, from: number, to: number): void {
+    const toks = this.toks;
+    const declRanges = new Set(mod.funcs.map((f) => rangeKey(f.nameRange)));
+    const tasks = new Set(mod.funcs.filter((f) => f.kind === 'task').map((f) => f.name));
+    for (let i = from; i < to; i++) {
+      const t = toks[i];
+      if (t.kind !== 'ident' || t.text.startsWith('$')) {
+        continue;
+      }
+      let nameIdx = i;
+      let fullPath = t.text;
+      if (toks[i + 1]?.text === '::' && toks[i + 2]?.kind === 'ident') {
+        nameIdx = i + 2;
+        fullPath = `${t.text}::${toks[nameIdx].text}`;
+      }
+      const nameTok = toks[nameIdx];
+      if (declRanges.has(rangeKey(nameTok.range))) {
+        continue;
+      }
+      const next = toks[nameIdx + 1];
+      const bare = next?.text === ';';
+      if (next?.text !== '(' && !bare) {
+        continue;
+      }
+      if (this.isCallHeader(toks, i, from) || !this.callPositionAllowed(toks, i, from, bare)) {
+        continue;
+      }
+      if (bare && !tasks.has(nameTok.text)) {
+        continue;
+      }
+      let close = nameIdx;
+      let argCount = 0;
+      if (!bare) {
+        close = matchBracket(toks, nameIdx + 1, to);
+        if (close < 0) {
+          continue;
+        }
+        argCount = splitTopLevel(toks, nameIdx + 2, close).length;
+      }
+      const owner = this.enclosingFunction(mod.funcs, nameTok.range.start);
+      const site: CallSite = {
+        name: nameTok.text,
+        fullPath,
+        range: nameTok.range,
+        callRange: rangeOf(toks, i, close + 1),
+        owner: owner?.name,
+        ownerRange: owner?.range,
+        argCount,
+      };
+      (mod.calls ??= []).push(site);
+      if (owner) {
+        (owner.calls ??= []).push(site);
+      }
+      if (nameIdx !== i) {
+        i = nameIdx;
+      }
+    }
+  }
+
+  private isCallHeader(toks: Token[], start: number, lower: number): boolean {
+    for (let k = start - 1; k >= lower && start - k <= 60; k--) {
+      const t = toks[k];
+      if (
+        t.text === ';' || t.text === 'begin' || t.text === 'end' || t.text === 'else' ||
+        t.text === ')' || t.text === '}' || t.text === ']' || t.text === ':' ||
+        t.text === ',' || t.text === '='
+      ) {
+        return false;
+      }
+      if (
+        t.kind === 'keyword' &&
+        (t.text === 'function' || t.text === 'task' || t.text === 'module' ||
+          t.text === 'macromodule' || t.text === 'interface' || t.text === 'program' ||
+          t.text === 'package' || t.text === 'class' || t.text === 'primitive')
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private callPositionAllowed(toks: Token[], start: number, lower: number, bare: boolean): boolean {
+    const prev = start > lower ? toks[start - 1] : undefined;
+    if (!prev) {
+      return true;
+    }
+    if (prev.kind === 'ident') {
+      return false;
+    }
+    if (prev.kind === 'keyword') {
+      return CALL_PREFIX_KEYWORDS.has(prev.text);
+    }
+    if (prev.text === '.' || prev.text === '.*') {
+      return false;
+    }
+    if (prev.text === ')') {
+      const open = matchOpenBracket(toks, start - 1, lower);
+      if (open > lower + 1 && toks[open - 1]?.text === '#' && toks[open - 2]?.kind === 'ident') {
+        return false;
+      }
+    }
+    if (!bare) {
+      return true;
+    }
+    return (
+      prev.text === ';' || prev.text === 'begin' || prev.text === 'end' ||
+      prev.text === 'else' || prev.text === ')' || prev.text === ':' ||
+      prev.text === 'fork' || prev.text === 'join' || prev.text === 'join_any' ||
+      prev.text === 'join_none'
+    );
+  }
+
+  private enclosingFunction(funcs: FunctionDecl[], pos: Pos): FunctionDecl | undefined {
+    let best: FunctionDecl | undefined;
+    for (const f of funcs) {
+      if (positionIn(f.range, pos) && (!best || rangeSpan(f.range) < rangeSpan(best.range))) {
+        best = f;
+      }
+    }
+    return best;
+  }
+
   private looksLikeDeclaration(c: Cursor): boolean {
     const t = c.cur()!;
     if (t.kind !== 'ident') {
@@ -4020,6 +4175,20 @@ function qualifiedNameAt(toks: Token[], i: number, to: number): { text: string; 
     return { text: `${toks[i].text}::${toks[i + 2].text}`, tokens: 3 };
   }
   return { text: toks[i].text, tokens: 1 };
+}
+
+function positionIn(r: Range, p: Pos): boolean {
+  const afterStart = p.line > r.start.line || (p.line === r.start.line && p.character >= r.start.character);
+  const beforeEnd = p.line < r.end.line || (p.line === r.end.line && p.character <= r.end.character);
+  return afterStart && beforeEnd;
+}
+
+function rangeSpan(r: Range): number {
+  return (r.end.line - r.start.line) * 1_000_000 + (r.end.character - r.start.character);
+}
+
+function rangeKey(r: Range): string {
+  return `${r.start.line}:${r.start.character}:${r.end.line}:${r.end.character}`;
 }
 
 function isTypeStart(toks: Token[], i: number): boolean {

@@ -1,7 +1,14 @@
-import type { InstanceSite, ModuleDef, PortConn, Pos, Range, RefSite } from './ast';
+import type { CallSite, FunctionDecl, InstanceSite, ModuleDef, PortConn, Pos, Range, RefSite } from './ast';
 import type { HdlIndex } from './index';
 import { generateScopes, generateScopedName } from './index';
 import { instancesOf, resolveAt, type ResolvedDecl } from './resolve';
+import {
+  callSiteAt,
+  callersOf,
+  calleesOf,
+  ownerOfCall,
+  resolveCall,
+} from './calls';
 
 /**
  * Signal tracing through the hierarchy, one hop per invocation.
@@ -42,7 +49,13 @@ export type TraceStepKind =
   /** A module traces down to a child module's definition. */
   | 'child-module'
   /** A module trace lands on the module's own definition. */
-  | 'module-definition';
+  | 'module-definition'
+  /** A function/task definition jumps to a place that calls it. */
+  | 'call-site'
+  /** A call jumps to the definition of the subroutine that contains it. */
+  | 'caller-definition'
+  /** A call jumps to the definition of the subroutine it names. */
+  | 'callee-definition';
 
 export interface TraceStep {
   file: string;
@@ -79,6 +92,11 @@ export function traceAt(
   character: number,
   direction: TraceDirection,
 ): TraceResult | undefined {
+  const cursorMod = index.moduleAtLine(file, line);
+  const call = cursorMod ? callSiteAt(cursorMod, line, character) : undefined;
+  if (cursorMod && call) {
+    return functionCallTrace(index, cursorMod, call, direction);
+  }
   const hit = resolveAt(index, file, source, line, character);
   if (!hit) {
     // No symbol under the cursor: an empty line or the space between two
@@ -88,6 +106,14 @@ export function traceAt(
   }
   if (!hit.mod) {
     return undefined;
+  }
+  if (hit.resolution.ok && hit.resolution.decl.kind === 'function') {
+    const decl = hit.resolution.decl;
+    const owner = index.moduleAtLine(decl.file, decl.nameRange.start.line);
+    const fn = owner?.funcs.find((f) => samePos(f.nameRange, decl.nameRange));
+    if (owner && fn && samePos(hit.word.nameRange, fn.nameRange)) {
+      return functionDefinitionTrace(index, owner, fn, direction);
+    }
   }
   const kind = hit.resolution.ok ? hit.resolution.decl.kind : undefined;
   // A connected net that resolves to a signal or port is a signal position even
@@ -125,6 +151,95 @@ export function traceSignal(
     return undefined;
   }
   return signalFromHit(index, hit, line, character, direction);
+}
+
+function functionCallTrace(
+  index: HdlIndex,
+  mod: ModuleDef,
+  site: CallSite,
+  direction: TraceDirection,
+): TraceResult {
+  const targets: TraceStep[] = [];
+  if (direction === 'up') {
+    const caller = ownerOfCall(mod, site).fn;
+    if (caller) {
+      add(targets, {
+        file: mod.file,
+        range: caller.nameRange,
+        kind: 'caller-definition',
+        label: caller.name,
+        detail: `${caller.kind} · ${mod.name}`,
+      });
+    } else {
+      add(targets, {
+        file: mod.file,
+        range: mod.nameRange,
+        kind: 'caller-definition',
+        label: mod.name,
+        detail: `${mod.kind} scope`,
+      });
+    }
+  } else {
+    const callee = resolveCall(index, mod, site);
+    if (callee) {
+      add(targets, {
+        file: callee.mod.file,
+        range: callee.fn.nameRange,
+        kind: 'callee-definition',
+        label: callee.fn.name,
+        detail: `${callee.fn.kind} · ${callee.mod.name}`,
+      });
+    }
+  }
+  return {
+    name: site.name,
+    module: mod.name,
+    direction,
+    file: mod.file,
+    range: site.range,
+    targets,
+  };
+}
+
+function functionDefinitionTrace(
+  index: HdlIndex,
+  mod: ModuleDef,
+  fn: FunctionDecl,
+  direction: TraceDirection,
+): TraceResult {
+  const targets: TraceStep[] = [];
+  if (direction === 'up') {
+    for (const hit of callersOf(index, mod, fn)) {
+      const caller = hit.owner;
+      add(targets, {
+        file: hit.mod.file,
+        range: hit.site.range,
+        kind: 'call-site',
+        label: `${hit.site.fullPath}()`,
+        detail: caller
+          ? `${caller.kind} ${caller.name} · ${hit.mod.name}`
+          : `${hit.mod.kind} · ${hit.mod.name}`,
+      });
+    }
+  } else {
+    for (const hit of calleesOf(index, mod, fn)) {
+      add(targets, {
+        file: hit.mod.file,
+        range: hit.site.range,
+        kind: 'call-site',
+        label: `${hit.site.fullPath}()`,
+        detail: `${hit.target.fn.kind} ${hit.target.fn.name} · ${hit.target.mod.name}`,
+      });
+    }
+  }
+  return {
+    name: fn.name,
+    module: mod.name,
+    direction,
+    file: mod.file,
+    range: fn.nameRange,
+    targets,
+  };
 }
 
 function signalFromHit(

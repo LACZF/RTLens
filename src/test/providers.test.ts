@@ -219,3 +219,30 @@ test('go to module: reuses the system symbol search instead of a second input bo
   await vscode.commands.executeCommand('hdl.connectView.goToModule');
   assert.equal(calls, 1, 'the command opens the built-in `#` box');
 });
+
+test('show call hierarchy: forwards to the built-in editor command', async () => {
+  const seen: string[] = [];
+  const commands = vscode.commands as unknown as {
+    executeCommand: (id: string, ...args: unknown[]) => unknown;
+  };
+  const original = commands.executeCommand;
+  commands.executeCommand = async (id, ...args) => {
+    seen.push(id);
+    return original(id, ...args);
+  };
+  const previous = vscode.window.activeTextEditor;
+  vscode.window.activeTextEditor = {
+    document: doc('lib/chip_top.v'),
+    selection: { active: new vscode.Position(0, 0) },
+  } as never;
+  try {
+  await commands.executeCommand('hdl.connectView.showCallHierarchy');
+  assert.deepEqual(seen.filter((id) => id !== 'hdl.connectView.showCallHierarchy'), [
+    'editor.showCallHierarchy',
+  ]);
+  assert.ok(seen.includes('editor.showCallHierarchy'));
+  } finally {
+    commands.executeCommand = original;
+    vscode.window.activeTextEditor = previous;
+  }
+});

@@ -101,6 +101,25 @@ class SymbolInformation {
   ) {}
 }
 
+class CallHierarchyItem {
+  constructor(
+    public kind: number,
+    public name: string,
+    public detail: string,
+    public uri: Uri,
+    public range: Range,
+    public selectionRange: Range,
+  ) {}
+}
+
+class CallHierarchyIncomingCall {
+  constructor(public from: CallHierarchyItem, public fromRanges: Range[]) {}
+}
+
+class CallHierarchyOutgoingCall {
+  constructor(public to: CallHierarchyItem, public fromRanges: Range[]) {}
+}
+
 class MarkdownString {
   value = '';
   isTrusted = false;
@@ -181,6 +200,9 @@ const api: Record<string, any> = {
   TreeItem,
   DocumentSymbol,
   SymbolInformation,
+  CallHierarchyItem,
+  CallHierarchyIncomingCall,
+  CallHierarchyOutgoingCall,
   Hover,
   MarkdownString,
   ThemeIcon,
@@ -374,6 +396,10 @@ const api: Record<string, any> = {
       api.__workspaceSymbols = p;
       return noop;
     },
+    registerCallHierarchyProvider: (_sel: unknown, p: unknown) => {
+      api.__callHierarchy = p;
+      return noop;
+    },
   },
   SemanticTokensBuilder: class {
     private tokens: number[] = [];
@@ -406,7 +432,7 @@ export function fireClose(doc: StubDocument): void {
 }
 
 /** The providers the extension registered, by name. */
-export function provider(name: 'definition' | 'hover' | 'references' | 'rename' | 'symbols' | 'workspaceSymbols') {
+export function provider(name: 'definition' | 'hover' | 'references' | 'rename' | 'symbols' | 'workspaceSymbols' | 'callHierarchy') {
   return api[`__${name}`];
 }
 
