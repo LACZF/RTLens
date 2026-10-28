@@ -24,6 +24,10 @@ package my_test_pkg;
 
     virtual task run_phase(int phase);
       this.drive_one();
+      uvm_component::report_static(1);
+      uvm_component::run_static();
+      uvm_queue#(int)::push(1);
+      this.init();
     endtask
 
     local task drive_one();

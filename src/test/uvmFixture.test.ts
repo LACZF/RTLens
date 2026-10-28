@@ -113,7 +113,7 @@ test('uvm fixture: call hierarchy follows super and this calls', () => {
   const driverRun = findFunction(index, driver, 'run_phase')!;
   assert.deepEqual(
     calleesOf(index, driver, driverRun.fn).map((h) => `${h.target.mod.name}.${h.target.fn.name}`),
-    ['my_driver.drive_one'],
+    ['my_driver.drive_one', 'uvm_component.report_static', 'uvm_component.run_static', 'uvm_queue.push', 'uvm_component.init'],
   );
   const driveOne = findFunction(index, driver, 'drive_one')!;
   assert.deepEqual(

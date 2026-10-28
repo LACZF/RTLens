@@ -52,6 +52,16 @@ function findFunctionIn(
   if (local) {
     return { mod, fn: local };
   }
+  if (mod.superClass) {
+    const base = index.resolveModule(mod.superClass, mod.file);
+    if (base && !seen.has(base)) {
+      seen.add(base);
+      const hit = findFunctionIn(index, base, name, seen);
+      if (hit) {
+        return hit;
+      }
+    }
+  }
   for (const imp of mod.imports) {
     if (!imp.wildcard && !imp.names.some((n) => n.name === name)) {
       continue;
@@ -78,15 +88,60 @@ export function resolveCall(
     const base = mod.superClass ? index.resolveModule(mod.superClass, mod.file) : undefined;
     return findFunctionIn(index, base ?? mod, site.name, new Set());
   }
-  const sep = site.fullPath.lastIndexOf('::');
-  if (sep >= 0) {
-    const pkg = index.resolveModule(site.fullPath.slice(0, sep), mod.file);
-    if (!pkg) {
-      return undefined;
-    }
-    return findFunctionIn(index, pkg, site.name, new Set([pkg]));
+  if (site.fullPath.includes('::')) {
+    return resolveQualifiedCall(index, mod, site.fullPath);
   }
   return findFunction(index, mod, site.name);
+}
+
+function resolveQualifiedCall(
+  index: HdlIndex,
+  mod: ModuleDef,
+  fullPath: string,
+): FunctionRef | undefined {
+  const parts = splitQualifiedPath(fullPath);
+  if (parts.length < 2) {
+    return undefined;
+  }
+  let scope: ModuleDef | undefined;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const name = qualifierName(parts[i]);
+    if (!name) {
+      return undefined;
+    }
+    scope = index.resolveModule(name, scope?.file ?? mod.file);
+    if (!scope) {
+      return undefined;
+    }
+  }
+  const leaf = qualifierName(parts[parts.length - 1]);
+  return leaf && scope ? findFunctionIn(index, scope, leaf, new Set([scope])) : undefined;
+}
+
+/** Split `pkg::Class#(T)::f` at `::` only outside a parameter list. */
+function splitQualifiedPath(path: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < path.length; i++) {
+    const ch = path[i];
+    if (ch === '(') {
+      depth++;
+    } else if (ch === ')') {
+      depth = Math.max(0, depth - 1);
+    } else if (ch === ':' && path[i + 1] === ':' && depth === 0) {
+      out.push(path.slice(start, i));
+      i++;
+      start = i + 1;
+    }
+  }
+  out.push(path.slice(start));
+  return out;
+}
+
+function qualifierName(segment: string): string {
+  const at = segment.indexOf('#');
+  return at < 0 ? segment : segment.slice(0, at);
 }
 
 export function ownerOfCall(
@@ -126,11 +181,26 @@ export function functionPositionAt(
   line: number,
   character: number,
 ): FunctionPosition | undefined {
-  const mod = index.moduleAtLine(file, line);
+  let mod = index.moduleAtLine(file, line);
+  if (!mod) {
+    for (const m of index.allModules()) {
+      if (m.file === file && m.range.start.line <= line && m.range.end.line >= line) {
+        mod = m;
+        break;
+      }
+    }
+  }
   if (!mod) {
     return undefined;
   }
-  const site = callSiteAt(mod, line, character);
+  let site = callSiteAt(mod, line, character);
+  if (!site) {
+    for (const m of index.allModules()) {
+      if (m.file !== file) continue;
+      const s2 = callSiteAt(m, line, character);
+      if (s2) { mod = m; site = s2; break; }
+    }
+  }
   if (site) {
     const target = resolveCall(index, mod, site);
     if (!target) {

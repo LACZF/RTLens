@@ -92,17 +92,35 @@ export function traceAt(
   character: number,
   direction: TraceDirection,
 ): TraceResult | undefined {
-  const cursorMod = index.moduleAtLine(file, line);
+  let cursorMod = index.moduleAtLine(file, line);
   const call = cursorMod ? callSiteAt(cursorMod, line, character) : undefined;
   if (cursorMod && call) {
     return functionCallTrace(index, cursorMod, call, direction);
+  }
+  // Try call at any module that owns the site (e.g. out-of-body class methods)
+  if (!call) {
+    for (const m of index.allModules()) {
+      if (m.file !== file) continue;
+      const c2 = callSiteAt(m, line, character);
+      if (c2) {
+        return functionCallTrace(index, m, c2, direction);
+      }
+    }
   }
   const hit = resolveAt(index, file, source, line, character);
   if (!hit) {
     // No symbol under the cursor: an empty line or the space between two
     // tokens names neither a signal nor a module, so the trace follows the
     // module the cursor sits in.
-    return blankTrace(index, file, line, character, direction);
+    if (!cursorMod) {
+      for (const m of index.allModules()) {
+        if (m.file === file && m.range.start.line <= line && m.range.end.line >= line) {
+          cursorMod = m;
+          break;
+        }
+      }
+    }
+    return cursorMod ? blankTrace(index, file, line, character, direction) : undefined;
   }
   if (!hit.mod) {
     return undefined;

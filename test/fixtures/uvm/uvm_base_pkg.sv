@@ -26,7 +26,21 @@ package uvm_base_pkg;
 
     virtual task run_phase(int phase);
     endtask
+
+    static function void report_static(int value);
+      value = value;
+    endfunction
+
+    static task run_static();
+    endtask
+
+    function void init();
+    endfunction
   endclass
+
+  function void uvm_component::init();
+    this.depth = 1;
+  endfunction
 
   class uvm_test extends uvm_component;
     local int unsigned errors;
@@ -66,6 +80,11 @@ package uvm_base_pkg;
 
     virtual task drive();
     endtask
+  endclass
+
+  class uvm_queue #(type T = int);
+    static function void push(T v);
+    endfunction
   endclass
 
   class uvm_sequence_item extends uvm_object;

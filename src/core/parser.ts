@@ -670,6 +670,82 @@ export class Parser {
         }
         continue;
       }
+      if (t.kind === 'keyword' && (t.text === 'function' || t.text === 'task')) {
+        // Skip modifiers
+        let k = c.pos;
+        while (k < c.end && this.toks[k].kind === 'keyword' && MODIFIERS.has(this.toks[k].text)) k++;
+        if (this.toks[k]?.text === 'function' || this.toks[k]?.text === 'task') {
+          // Look ahead for qualified name
+          let p = k + 1;
+          while (p < c.end && (this.toks[p].kind === 'keyword' && (MODIFIERS.has(this.toks[p].text) || this.toks[p].text === 'void'))) p++;
+          // skip return type tokens roughly
+          // find name
+          let found = false;
+          for (let x = p; x < Math.min(p + 20, c.end); x++) {
+            if (this.toks[x].text === '::' && this.toks[x + 1]?.kind === 'ident') {
+              found = true; break;
+            }
+          }
+          if (found) {
+            const dummy: ModuleDef = {
+              name: '__rtlens_file__',
+              kind: 'module',
+              file: this.file,
+              range: ZERO_RANGE,
+              nameRange: ZERO_RANGE,
+              portOrder: [],
+              ports: [],
+              params: [],
+              decls: [],
+              funcs: [],
+              calls: [],
+              instances: [],
+              assigns: [],
+              refs: [],
+              includes: [],
+              imports: [],
+              directives: [],
+              defparams: [],
+              conditionalRegions: 0,
+              usesUnknownConstruct: false,
+              timeMs: 0,
+              startLine: 0,
+            };
+            const ctx: ParseContext = { file: this.file, scope: new MapScope(), inProcedural: false };
+            this.parseFunction(c, dummy, ctx, false);
+            continue;
+          }
+        }
+      }
+      if (t.kind === 'keyword' && (t.text === 'function' || t.text === 'task')) {
+        const dummy: ModuleDef = {
+          name: '__rtlens_file__',
+          kind: 'module',
+          file: this.file,
+          range: ZERO_RANGE,
+          nameRange: ZERO_RANGE,
+          portOrder: [],
+          ports: [],
+          params: [],
+          decls: [],
+          funcs: [],
+          calls: [],
+          instances: [],
+          assigns: [],
+          refs: [],
+          includes: [],
+          imports: [],
+          directives: [],
+          defparams: [],
+          conditionalRegions: 0,
+          usesUnknownConstruct: false,
+          timeMs: 0,
+          startLine: 0,
+        };
+        const ctx: ParseContext = { file: this.file, scope: new MapScope(), inProcedural: false };
+        this.parseFunction(c, dummy, ctx, false);
+        continue;
+      }
       c.pos++;
     }
 
@@ -3274,6 +3350,15 @@ export class Parser {
       return true;
     }
     const nameTok = toks[nameIdx];
+    // Detect qualification Class::method
+    let targetMod = mod;
+    if (toks[nameIdx - 1]?.text === '::' && toks[nameIdx - 2]?.kind === 'ident') {
+      const className = toks[nameIdx - 2].text;
+      const found = this.modules.find((m) => m.name === className && m.file === this.file);
+      if (found) {
+        targetMod = found;
+      }
+    }
 
     // Return type = everything between the qualifiers and the name.
     let typeStart = slice.from;
@@ -3305,12 +3390,22 @@ export class Parser {
       range: rangeOf(toks, c.pos, close > 0 ? close : c.end),
       nameRange: nameTok.range,
     };
-    mod.funcs.push(f);
-    mod.refs.push({
-      name: f.name,
+    // If method already declared in class, merge into existing declaration
+    const existing = targetMod.funcs.find((x) => x.name === f.name && x.kind === f.kind);
+    const func = existing ?? f;
+    if (existing) {
+      if (!existing.returnType && f.returnType) existing.returnType = f.returnType;
+      if (existing.args.length === 0 && f.args.length > 0) existing.args = f.args;
+      existing.range = f.range;
+      existing.nameRange = f.nameRange;
+    } else {
+      targetMod.funcs.push(func);
+    }
+    targetMod.refs.push({
+      name: func.name,
       pathSuffix: '',
-      fullPath: f.name,
-      range: f.nameRange,
+      fullPath: func.name,
+      range: func.nameRange,
       isWrite: false,
       isDecl: true,
       kind: 'function',
@@ -3318,7 +3413,7 @@ export class Parser {
 
     // Body: non-ANSI argument declarations, locals and the return expression.
     if (close > hdrEnd) {
-      this.scanFunctionBody(new Cursor(toks, hdrEnd + 1, close), mod, f, localCtx, isPackage);
+      this.scanFunctionBody(new Cursor(toks, hdrEnd + 1, close), targetMod, func, localCtx, isPackage);
     }
     c.pos = Math.min(close + 1, c.end);
     return true;
@@ -3411,10 +3506,52 @@ export class Parser {
     }
   }
 
+  /**
+   * Read a callee path starting at `start`: a name, an optional `#(...)`
+   * parameter list, then any number of `::name` steps. The full path is kept
+   * as written so call-hierarchy labels and package scoping see the qualifier;
+   * the leaf index is where the call itself starts.
+   */
+  private qualifiedCallee(
+    toks: Token[],
+    start: number,
+    to: number,
+  ): { nameIdx: number; fullPath: string } | undefined {
+    if (toks[start]?.kind !== 'ident') {
+      return undefined;
+    }
+    let k = start;
+    let nameIdx = start;
+    let fullPath = toks[k].text;
+    k++;
+    for (;;) {
+      if (toks[k]?.text === '#' && toks[k + 1]?.text === '(') {
+        const close = matchBracket(toks, k + 1, to);
+        if (close < 0) {
+          break;
+        }
+        fullPath += `#${toks.slice(k + 1, close + 1).map((x) => x.text).join('')}`;
+        k = close + 1;
+      }
+      if (toks[k]?.text !== '::' || toks[k + 1]?.kind !== 'ident') {
+        break;
+      }
+      nameIdx = k + 1;
+      fullPath += `::${toks[nameIdx].text}`;
+      k = nameIdx + 1;
+    }
+    return { nameIdx, fullPath };
+  }
+
   private collectCalls(mod: ModuleDef, from: number, to: number): void {
     const toks = this.toks;
     const declRanges = new Set(mod.funcs.map((f) => rangeKey(f.nameRange)));
     const tasks = new Set(mod.funcs.filter((f) => f.kind === 'task').map((f) => f.name));
+    const seen = new Set<string>();
+    if (!mod.calls) mod.calls = [];
+    for (const c of mod.calls) {
+      seen.add(`${c.callRange.start.line},${c.callRange.start.character},${c.name}`);
+    }
     for (let i = from; i < to; i++) {
       const t = toks[i];
       if (t.kind !== 'ident' || t.text.startsWith('$')) {
@@ -3422,9 +3559,10 @@ export class Parser {
       }
       let nameIdx = i;
       let fullPath = t.text;
-      if (toks[i + 1]?.text === '::' && toks[i + 2]?.kind === 'ident') {
-        nameIdx = i + 2;
-        fullPath = `${t.text}::${toks[nameIdx].text}`;
+      const qualified = this.qualifiedCallee(toks, i, to);
+      if (qualified && qualified.fullPath.includes('::')) {
+        nameIdx = qualified.nameIdx;
+        fullPath = qualified.fullPath;
       } else if (
         i - 2 >= from &&
         toks[i - 1]?.text === '.' &&
@@ -3468,6 +3606,12 @@ export class Parser {
         ownerRange: owner?.range,
         argCount,
       };
+      const key = `${site.callRange.start.line},${site.callRange.start.character},${site.name}`;
+      if (seen.has(key)) {
+        if (nameIdx !== i) i = nameIdx;
+        continue;
+      }
+      seen.add(key);
       (mod.calls ??= []).push(site);
       if (owner) {
         (owner.calls ??= []).push(site);

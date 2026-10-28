@@ -150,6 +150,14 @@ function expandChain(toks: Token[], idx: number): { toks: Token[]; parts: string
 
   for (;;) {
     const next = toks[end + 1];
+    if (next?.text === '#' && toks[end + 2]?.text === '(') {
+      const close = findCloseParen(toks, end + 2);
+      if (close < 0) {
+        break;
+      }
+      end = close;
+      continue;
+    }
     if (next?.text === '::') {
       // Scope qualification: `cfg::UNROLL` is walked as `cfg` then `UNROLL`.
       if (toks[end + 2] && (toks[end + 2].kind === 'ident' || toks[end + 2].kind === 'keyword')) {
@@ -206,6 +214,14 @@ function expandChain(toks: Token[], idx: number): { toks: Token[]; parts: string
       }
       break;
     }
+    if (prev?.text === '::' && prev2?.text === ')') {
+      const open = findOpenParen(toks, start - 2);
+      if (open > 0 && toks[open - 1]?.text === '#' && toks[open - 2]?.kind === 'ident') {
+        start = open - 2;
+        continue;
+      }
+      break;
+    }
     if (prev?.text === '::' && prev2 && (prev2.kind === 'ident' || prev2.kind === 'keyword')) {
       start -= 2;
       continue;
@@ -224,6 +240,13 @@ function expandChain(toks: Token[], idx: number): { toks: Token[]; parts: string
     const t = toks[k];
     if (t.text === '.') {
       continue;
+    }
+    if (t.text === '#' && toks[k + 1]?.text === '(') {
+      const close = findCloseParen(toks, k + 1);
+      if (close >= 0) {
+        k = close;
+        continue;
+      }
     }
     if (t.text === '[') {
       const close = findClose(toks, k);
@@ -276,6 +299,36 @@ function findOpen(toks: Token[], close: number): number {
     if (toks[k].text === ']') {
       depth++;
     } else if (toks[k].text === '[') {
+      depth--;
+      if (depth === 0) {
+        return k;
+      }
+    }
+  }
+  return -1;
+}
+
+function findCloseParen(toks: Token[], open: number): number {
+  let depth = 0;
+  for (let k = open; k < toks.length; k++) {
+    if (toks[k].text === '(') {
+      depth++;
+    } else if (toks[k].text === ')') {
+      depth--;
+      if (depth === 0) {
+        return k;
+      }
+    }
+  }
+  return -1;
+}
+
+function findOpenParen(toks: Token[], close: number): number {
+  let depth = 0;
+  for (let k = close; k >= 0; k--) {
+    if (toks[k].text === ')') {
+      depth++;
+    } else if (toks[k].text === '(') {
       depth--;
       if (depth === 0) {
         return k;
