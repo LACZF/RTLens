@@ -304,6 +304,10 @@ export class HdlIndex {
     return out;
   }
 
+  resolveInclude(fromFile: string, include: string): string | undefined {
+    return this.resolveIncludeFile(include, fromFile);
+  }
+
   private resolveIncludeFile(include: string, fromFile: string): string | undefined {
     if (this.parsed.has(include)) {
       return include;
@@ -754,6 +758,16 @@ export class HdlIndex {
     const arg = ix.args.get(name);
     if (arg) {
       return { kind: 'arg', decl: arg, owner: mod };
+    }
+    if (mod.kind === 'class' && mod.superClass) {
+      const base = this.resolveModule(mod.superClass, mod.file);
+      if (base && !seen.has(base)) {
+        seen.add(base);
+        const hit = this.findDeclIn(base, name, seen);
+        if (hit) {
+          return hit;
+        }
+      }
     }
     for (const imp of mod.imports) {
       if (!imp.wildcard && !imp.names.some((n) => n.name === name)) {

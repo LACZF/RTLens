@@ -1352,6 +1352,7 @@ export class Parser {
       const startPos = c.pos;
       let accessQualified = false;
       let memberQualified = false;
+      let sawExternOrPure = false;
       while (t && t.kind === 'keyword' && (MODIFIERS.has(t.text) || t.text === 'extern' || t.text === 'pure')) {
         if (t.text === 'local' || t.text === 'protected') {
           accessQualified = true;
@@ -1359,10 +1360,17 @@ export class Parser {
         if (mod.kind === 'class' && (t.text === 'rand' || t.text === 'randc')) {
           memberQualified = true;
         }
+        if (t.text === 'extern' || t.text === 'pure') {
+          sawExternOrPure = true;
+        }
         c.pos++;
         t = c.cur()!;
       }
       if (t && t.kind === 'keyword' && (t.text === 'function' || t.text === 'task')) {
+        // For class/package methods (especially extern) parse as function/task block
+        if (mod.kind === 'class' || mod.kind === 'package' || sawExternOrPure) {
+          return this.parseFunction(c, mod, ctx, isPackage);
+        }
         return this.parseBlock(c, mod, ctx, isPackage);
       }
       // `local int x;` / `protected foo_t x;` / `rand bit [7:0] x;` are member

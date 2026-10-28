@@ -472,9 +472,61 @@ function descend(
 
   // 5. A whole dotted remainder, e.g. `g_par[0].u_par.sig` in one step.
   const dotted = path.join('.');
-  // Try to resolve as method in current module/class
+  // Try to resolve as method in current module/class/interface/package
   if (path.length === 2) {
-    const fn = resolveInScope(index, mod, path[1], scopePath);
+    const head2 = path[0];
+    const name2 = path[1];
+    // try class var
+    const ix2 = scopeIndexOf(mod);
+    const vdecl = mod.decls?.find((d: any) => d.name === head2) || ix2.decls?.get?.(head2);
+    if (vdecl && vdecl.dataType) {
+      const tname = vdecl.dataType.t === 'user' ? vdecl.dataType.name : undefined;
+      if (tname) {
+        const cls = index.resolveModule(tname, mod.file);
+        if (cls && (cls.kind === 'class' || cls.kind === 'interface')) {
+          const f = (index as any).findDecl ? (index as any).findDecl(cls, name2) : undefined;
+          if (f && f.kind === 'function') {
+            return declResolution(name2, f, scopePath);
+          }
+          // also search directly
+          const mf = cls.funcs?.find((x: any) => x.name === name2);
+          if (mf) {
+            return {
+              ok: true,
+              decl: {
+                kind: 'function',
+                name: mf.name,
+                file: cls.file,
+                range: mf.range,
+                nameRange: mf.nameRange,
+                moduleName: cls.name,
+                path: scopePath.join('.'),
+              },
+            };
+          }
+        }
+      }
+    }
+    // try package/class/instance
+    const maybe = index.resolveModule(head2, mod.file) || (index as any).resolveInterface?.(head2);
+    if (maybe && (maybe.kind === 'package' || maybe.kind === 'class' || maybe.kind === 'interface')) {
+      const f = maybe.funcs?.find((x: any) => x.name === name2);
+      if (f) {
+        return {
+          ok: true,
+          decl: {
+            kind: 'function',
+            name: f.name,
+            file: maybe.file,
+            range: f.range,
+            nameRange: f.nameRange,
+            moduleName: maybe.name,
+            path: scopePath.join('.'),
+          },
+        };
+      }
+    }
+    const fn = resolveInScope(index, mod, name2, scopePath);
     if (fn.ok && fn.decl.kind === 'function') {
       return fn;
     }

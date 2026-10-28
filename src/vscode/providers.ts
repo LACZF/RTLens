@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
+import * as fs from 'fs';
 
 import type { IndexService } from './indexService';
 import {
@@ -18,6 +20,7 @@ import type { ModuleDef, PortDecl, VarDecl, ParamDecl, InstanceSite, AssignSite 
 import { typeWidth, rangeWidth } from '../core/fold';
 import { basename } from '../core/index';
 import { parseSource } from '../core/parser';
+import { tokenize } from '../core/lexer';
 
 export function pos(line: number, character: number): vscode.Position {
   return new vscode.Position(line, character);
@@ -74,6 +77,14 @@ export class HdlDefinitionProvider implements vscode.DefinitionProvider {
     this.svc.syncOpenDocuments();
     const source = document.getText();
 
+    // Handle `include directly
+    const inc = this.findIncludeTarget(document, position);
+    if (inc) {
+      try {
+        return new vscode.Location(vscode.Uri.file(inc), new vscode.Position(0, 0));
+      } catch {}
+    }
+
     // The relation is saved when the file is indexed, so this is a lookup: no
     // re-tokenisation of the buffer, and no resolution work repeated per press.
     const jump = this.svc.index.lookupJump(file, source, position.line, position.character);
@@ -94,6 +105,99 @@ export class HdlDefinitionProvider implements vscode.DefinitionProvider {
       return def ? locationOf(def.file, def.nameRange) : undefined;
     }
     return locationOf(d.file, d.nameRange);
+  }
+
+  private findIncludeTarget(document: vscode.TextDocument, position: vscode.Position): string | undefined {
+    try {
+      const text = document.getText();
+      // regex first - more robust
+      const line = text.split('\n')[position.line] || '';
+      const re = /`include\s+["<]([^">]+)[">]/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(line)) !== null) {
+        const inc = m[1];
+        // if cursor on the line and near include, or just on include
+        if (line.includes('`include')) {
+          const idx: any = (this.svc as any).index;
+          if (idx && typeof idx.resolveInclude === 'function') {
+            const hit = idx.resolveInclude(document.fileName, inc);
+            if (hit && fs.existsSync(hit)) return hit;
+          }
+          const dir = path.dirname(document.fileName);
+          const candidates = [
+            path.join(dir, inc),
+            path.resolve(dir, inc),
+          ];
+          const cfg: any = (this.svc as any).config;
+          if (cfg?.includeDirs) {
+            for (const d of cfg.includeDirs) {
+              if (path.isAbsolute(d)) {
+                candidates.push(path.join(d, inc));
+              } else {
+                candidates.push(path.join(dir, d, inc));
+                candidates.push(path.resolve(dir, d, inc));
+              }
+            }
+          }
+          const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+          if (ws) {
+            candidates.push(path.join(ws, inc));
+            candidates.push(path.join(ws, 'src', inc));
+          }
+          for (const c of candidates) {
+            if (fs.existsSync(c)) return c;
+          }
+          if (idx && typeof idx.allFiles === 'function') {
+            const want = path.basename(inc);
+            for (const f of idx.allFiles()) {
+              if (path.basename(f) === want) return f;
+            }
+          }
+          // even if not exists, return first candidate so VS Code can try to open
+          return candidates[0];
+        }
+      }
+      const toks = tokenize(text).filter((t) => t.kind !== 'comment' && t.kind !== 'eof');
+      for (let i = 0; i < toks.length; i++) {
+        const t = toks[i];
+        if (t.kind === 'directive' && t.name === 'include') {
+          for (let j = i + 1; j < toks.length && j < i + 8; j++) {
+            const s = toks[j];
+            if (s.kind === 'string') {
+              if (position.line < s.range.start.line || (position.line === s.range.start.line && position.character < s.range.start.character)) continue;
+              if (position.line > s.range.end.line || (position.line === s.range.end.line && position.character > s.range.end.character)) continue;
+              let inc2 = s.text;
+              if ((inc2.startsWith('"') && inc2.endsWith('"')) || (inc2.startsWith('<') && inc2.endsWith('>'))) {
+                inc2 = inc2.slice(1, -1);
+              }
+              const idx: any = (this.svc as any).index;
+              if (idx && typeof idx.resolveInclude === 'function') {
+                const hit = idx.resolveInclude(document.fileName, inc2);
+                if (hit && fs.existsSync(hit)) return hit;
+              }
+              const dir = path.dirname(document.fileName);
+              const cands = [path.join(dir, inc2)];
+              const cfg: any = (this.svc as any).config;
+              if (cfg?.includeDirs) {
+                for (const d of cfg.includeDirs) {
+                  if (path.isAbsolute(d)) cands.push(path.join(d, inc2));
+                  else cands.push(path.join(dir, d, inc2));
+                }
+              }
+              const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+              if (ws) { cands.push(path.join(ws, inc2)); cands.push(path.join(ws, 'src', inc2)); }
+              for (const c of cands) if (fs.existsSync(c)) return c;
+              if (idx && typeof idx.allFiles === 'function') {
+                const want = path.basename(inc2);
+                for (const f of idx.allFiles()) if (path.basename(f) === want) return f;
+              }
+              return cands[0];
+            }
+          }
+        }
+      }
+    } catch {}
+    return undefined;
   }
 
   /** Turn a saved relation into a location, honouring `followDefinition`. */

@@ -107,6 +107,14 @@ export function traceAt(
       }
     }
   }
+  if (!call) {
+    for (const m of index.allModules()) {
+      const c2 = callSiteAt(m, line, character);
+      if (c2) {
+        return functionCallTrace(index, m, c2, direction);
+      }
+    }
+  }
   const hit = resolveAt(index, file, source, line, character);
   if (!hit) {
     // No symbol under the cursor: an empty line or the space between two
@@ -127,9 +135,25 @@ export function traceAt(
   }
   if (hit.resolution.ok && hit.resolution.decl.kind === 'function') {
     const decl = hit.resolution.decl;
-    const owner = index.moduleAtLine(decl.file, decl.nameRange.start.line);
+    let owner = index.moduleAtLine(decl.file, decl.nameRange.start.line);
+    if (!owner) {
+      for (const m of index.allModules()) {
+        if (m.file === decl.file && m.funcs.some((f) => samePos(f.nameRange, decl.nameRange))) {
+          owner = m;
+          break;
+        }
+      }
+    }
+    if (!owner) {
+      for (const m of index.allModules()) {
+        if (m.funcs.some((f) => samePos(f.nameRange, decl.nameRange))) {
+          owner = m;
+          break;
+        }
+      }
+    }
     const fn = owner?.funcs.find((f) => samePos(f.nameRange, decl.nameRange));
-    if (owner && fn && samePos(hit.word.nameRange, fn.nameRange)) {
+    if (owner && fn) {
       return functionDefinitionTrace(index, owner, fn, direction);
     }
   }

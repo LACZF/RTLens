@@ -39,7 +39,16 @@ export function findFunction(
   mod: ModuleDef,
   name: string,
 ): FunctionRef | undefined {
-  return findFunctionIn(index, mod, name, new Set());
+  const hit = findFunctionIn(index, mod, name, new Set());
+  if (hit) return hit;
+  // global search across all modules/packages/classes
+  try {
+    for (const m of index.allModules()) {
+      const f = m.funcs?.find((x) => x.name === name);
+      if (f) return { mod: m, fn: f };
+    }
+  } catch {}
+  return undefined;
 }
 
 function findFunctionIn(
@@ -76,6 +85,18 @@ function findFunctionIn(
       return hit;
     }
   }
+  // UVM/global functions often live in packages imported elsewhere or at package scope
+  try {
+    for (const p of index.allModules()) {
+      if (seen.has(p)) continue;
+      if (p.kind === 'package' || p.kind === 'module') {
+        const f = p.funcs?.find((x) => x.name === name);
+        if (f) {
+          return { mod: p, fn: f };
+        }
+      }
+    }
+  } catch {}
   return undefined;
 }
 
@@ -90,6 +111,46 @@ export function resolveCall(
   }
   if (site.fullPath.includes('::')) {
     return resolveQualifiedCall(index, mod, site.fullPath);
+  }
+  if (site.fullPath.includes('.')) {
+    const parts = site.fullPath.split('.');
+    if (parts.length >= 2) {
+      const methodName = parts[parts.length - 1];
+      const instName = parts[0];
+      // Try interface instance
+      const ix = (index as any).scopeIndexOf ? (index as any).scopeIndexOf(mod) : undefined;
+      const inst = mod.instances?.find((i: any) => i.name === instName) || ix?.instances?.get?.(instName)?.inst;
+      if (inst && inst.moduleName) {
+        const child = index.resolveModule(inst.moduleName, mod.file) || (index as any).resolveInterface?.(inst.moduleName);
+        if (child && (child.kind === 'interface' || child.kind === 'class')) {
+          const hit = findFunctionIn(index, child, methodName, new Set([child]));
+          if (hit) return hit;
+        }
+      }
+      // Try interface port
+      const port = mod.ports?.find((p: any) => p.name === instName);
+      if (port && (port.interfaceName || (port.dataType?.t === 'interface' && (port.dataType as any)?.name))) {
+        const iname = port.interfaceName || (port.dataType as any).name;
+        const iface = (index as any).resolveInterface?.(iname) || index.resolveModule(iname, mod.file);
+        if (iface && (iface.kind === 'interface' || iface.kind === 'class')) {
+          const hit = findFunctionIn(index, iface, methodName, new Set([iface]));
+          if (hit) return hit;
+        }
+      }
+      // Try var of class type
+      const vdecl = (mod as any).decls?.find?.((d: any) => d.name === instName) || ix?.decls?.get?.(instName);
+      if (vdecl && vdecl.dataType) {
+        const tname = vdecl.dataType.t === 'user' ? vdecl.dataType.name : undefined;
+        if (tname) {
+          const cls = index.resolveModule(tname, mod.file);
+          if (cls && cls.kind === 'class') {
+            const hit = findFunctionIn(index, cls, methodName, new Set([cls]));
+            if (hit) return hit;
+          }
+        }
+      }
+    }
+    return findFunction(index, mod, site.name);
   }
   return findFunction(index, mod, site.name);
 }

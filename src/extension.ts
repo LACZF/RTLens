@@ -32,6 +32,7 @@ import { findByPath } from './core/hierarchy';
 import { basename } from './core/index';
 import { traceAt, type TraceDirection, type TraceStep } from './core/trace';
 import { WordHighlighter } from './vscode/wordHighlight';
+import { HdlIncludeLinkProvider } from './vscode/includeLinks';
 
 const LANGUAGES = ['verilog', 'systemverilog'];
 
@@ -83,6 +84,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.languages.registerDocumentSemanticTokensProvider(selector, new HdlSemanticTokensProvider(svc), legend),
     vscode.languages.registerDefinitionProvider(selector, new HdlDefinitionProvider(svc)),
+    vscode.languages.registerDocumentLinkProvider(selector, new HdlIncludeLinkProvider(svc)),
     vscode.languages.registerHoverProvider(selector, new HdlHoverProvider(svc)),
     vscode.languages.registerReferenceProvider(selector, new HdlReferenceProvider(svc)),
     vscode.languages.registerRenameProvider(selector, new HdlRenameProvider(svc)),

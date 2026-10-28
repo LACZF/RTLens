@@ -400,6 +400,9 @@ const api: Record<string, any> = {
       api.__callHierarchy = p;
       return noop;
     },
+    registerDocumentLinkProvider: (_sel: unknown, _p: unknown) => {
+      return noop;
+    },
   },
   SemanticTokensBuilder: class {
     private tokens: number[] = [];
