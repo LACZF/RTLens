@@ -4,7 +4,6 @@ import * as vscode from 'vscode';
 
 import {
   databaseStats,
-  hashText,
   parseDatabase,
   serializeDatabase,
   updateDatabase,
@@ -72,7 +71,7 @@ export function collectInputs(svc: IndexService, folder: vscode.Uri): FileInput[
       continue;
     }
     const rel = path.relative(base, file).split(path.sep).join('/');
-    out.push({ file, rel, hash: hashText(svc.indexedText(file) ?? '') });
+    out.push({ file, rel, hash: svc.indexedHash(file) });
   }
   out.sort((a, b) => a.rel.localeCompare(b.rel));
   return out;

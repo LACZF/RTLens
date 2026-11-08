@@ -130,6 +130,12 @@
           "minimum": 100,
           "description": "Maximum number of hierarchy nodes materialised in one expansion."
         },
+        "hdl.connectView.maxFiles": {
+          "type": "number",
+          "default": 20000,
+          "minimum": 1,
+          "description": "Maximum number of files the workspace scan indexes. Files beyond the budget are skipped and a notice is shown, which keeps a very large tree from exhausting the extension host's memory. Raise it if your design needs more."
+        },
         "hdl.connectView.composition.maxDepth": {
           "type": "number",
           "default": 0,

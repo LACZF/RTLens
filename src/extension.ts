@@ -41,9 +41,29 @@ const LANGUAGES = ['verilog', 'systemverilog'];
  * database - covers. A change to any of these rebuilds the database even when
  * `hdl.connectView.autoUpdateDatabase` is off, because the file set moved.
  */
-const SCAN_SETTINGS = ['files', 'includeDirs', 'exclude', 'databasePaths', 'databasePathsOnly'];
+const SCAN_SETTINGS = ['files', 'includeDirs', 'exclude', 'databasePaths', 'databasePathsOnly', 'maxFiles'];
 
 export function activate(context: vscode.ExtensionContext): void {
+  try {
+    activateUnsafe(context);
+  } catch (e) {
+    // Throwing out of activate marks the extension as failed to start, and a
+    // workspace that trips the same path on every restart can leave the user
+    // with no working extension host at all. Report and stay out of the way.
+    const message = e instanceof Error ? e.message : String(e);
+    try {
+      const log = vscode.window.createOutputChannel('RTLens');
+      log.appendLine(`RTLens activation failed: ${e instanceof Error ? (e.stack ?? e.message) : message}`);
+      log.show(true);
+      context.subscriptions.push(log);
+    } catch {
+      // The host itself is in trouble; there is nowhere left to report to.
+    }
+    void vscode.window.showErrorMessage(`RTLens failed to activate: ${message}`);
+  }
+}
+
+function activateUnsafe(context: vscode.ExtensionContext): void {
   const log = vscode.window.createOutputChannel('RTLens');
   context.subscriptions.push(log);
   log.appendLine('RTLens activating');
@@ -157,9 +177,13 @@ export function activate(context: vscode.ExtensionContext): void {
       databasesLoaded = true;
       void (async () => {
         const started = Date.now();
-        await database.load();
-        await catalog.load();
-        log.appendLine(`[db] loaded existing databases in ${Date.now() - started}ms`);
+        try {
+          await database.load();
+          await catalog.load();
+          log.appendLine(`[db] loaded existing databases in ${Date.now() - started}ms`);
+        } catch (e) {
+          log.appendLine(`[db] load failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
       })();
     }),
     catalog.onDidChangeDatabase(() => void composition.refresh()),
@@ -167,7 +191,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Let activation return first: composition reads and parses the active
   // buffer, and doing that inline delays every other extension's activation.
-  setTimeout(() => syncEditor(vscode.window.activeTextEditor), 0);
+  setTimeout(() => {
+    try {
+      syncEditor(vscode.window.activeTextEditor);
+    } catch (e) {
+      log.appendLine(`[view] initial sync failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, 0);
 
   // --- commands ----------------------------------------------------------
   // Commands receive their arguments from the manifest, so the handlers take

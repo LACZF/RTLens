@@ -64,6 +64,7 @@
 | `hdl.connectView.topModules` | `[]` | 显式顶层 module 名；为空时自动推断（从未被例化的 module）。设置后组成树从该顶层展开整个设计；为空则从当前所在 module 开始 |
 | `hdl.connectView.maxDepth` | `32` | 层次展开的最大深度（防止递归 generate 死循环）。作用于连接图、wrapper 等全局层次 |
 | `hdl.connectView.maxInstances` | `20000` | 单次展开实例化的层次节点上限 |
+| `hdl.connectView.maxFiles` | `20000` | 工作区扫描最多索引的文件数；超出后停止扫描并在状态栏提示，防止超大工作区耗尽扩展宿主内存。需要索引更多文件时调大 |
 | `hdl.connectView.composition.maxDepth` | `0` | 组成树（左侧层次）自己的展开最大深度，独立于 `maxDepth`；`0` = 不限制（自例化的递归 module 仍由环检测拦下） |
 | `hdl.connectView.composition.maxInstances` | `0` | 组成树单次展开的实例行上限，独立于 `maxInstances`；`0` = 不限制 |
 | `hdl.connectView.composition.filterModules` | `[]` | 要从组成树里过滤掉的条目：module 名（优先）、文件路径（该文件内定义的所有 module）或目录路径（其下递归定义的所有 module）；相对路径按 workspace folder 解析，绝对路径原样使用；配合 `composition.filterMode` 决定隐藏范围 |

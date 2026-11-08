@@ -438,6 +438,27 @@ test('index: removing a file twice is a no-op and frees the name', () => {
   assert.equal(index.resolveModule('a')!.file, '/w/other.v');
 });
 
+test('index: stats are maintained incrementally across add, reindex and remove', () => {
+  const index = new HdlIndex();
+  index.addFile('/w/a.v', 'module a; endmodule\nmodule b; missing u (); endmodule\n');
+  index.addFile('/w/c.v', 'module c; a u; endmodule\n');
+  assert.equal(index.stats.modules, 3);
+  assert.equal(index.stats.files, 2);
+  assert.equal(index.stats.unresolvedInstances, 1, 'missing is unresolved, a is not');
+
+  index.addFile('/w/a.v', 'module a; endmodule\n');
+  assert.equal(index.stats.modules, 2, 'the reindexed file keeps its remaining module');
+  assert.equal(index.stats.unresolvedInstances, 0, 'the removed instance stops counting');
+
+  index.removeFile('/w/a.v');
+  assert.equal(index.stats.modules, 1);
+  assert.equal(index.stats.files, 1);
+  assert.equal(index.stats.unresolvedInstances, 0);
+
+  index.clear();
+  assert.deepEqual(index.stats, { files: 0, modules: 0, unresolvedInstances: 0, parseMs: 0 });
+});
+
 test('parentsOf: reverse edges list every instantiation site of a module', () => {
   const index = new HdlIndex();
   index.addFile('/w/a.v', 'module leaf (); endmodule\nmodule top (); leaf u0 (); leaf u1 (); endmodule\n');

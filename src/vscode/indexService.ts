@@ -13,6 +13,7 @@ import {
 import { buildGraph, type Graph, type GraphOptions } from '../core/graph';
 import type { HierarchyNode, ModuleDef } from '../core/ast';
 import type { HierarchyResult } from '../core/hierarchy';
+import { hashText } from '../core/relations';
 import { isExcluded, readConfig, scanGlob, type HdlConfig } from './config';
 
 export type IndexState = 'idle' | 'indexing' | 'ready' | 'error';
@@ -43,8 +44,10 @@ export class IndexService implements vscode.Disposable {
   private watchers: vscode.Disposable[] = [];
   private configValue: HdlConfig;
   private readonly saveTimers = new Map<string, NodeJS.Timeout>();
-  /** Text last handed to the index per file, so an unchanged buffer is not re-parsed. */
-  private readonly synced = new Map<string, string>();
+  /** Hash of the text last handed to the index per file, so an unchanged buffer is not re-parsed. */
+  private readonly hashes = new Map<string, string>();
+  /** Files whose text is currently in the index (as opposed to merely opened once). */
+  private readonly ingested = new Set<string>();
   private readonly includedFiles = new Set<string>();
   /** Files named directly by `hdl.connectView.databasePaths`; exclude rules do not apply. */
   private explicitFiles = new Set<string>();
@@ -67,11 +70,12 @@ export class IndexService implements vscode.Disposable {
   }
 
   get stats(): { files: number; modules: number; parseMs: number; unresolved: number } {
+    const s = this.index.stats;
     return {
-      files: this.index.stats.files,
-      modules: this.index.stats.modules,
-      parseMs: Math.round(this.index.stats.parseMs),
-      unresolved: this.index.stats.unresolvedInstances,
+      files: s.files,
+      modules: s.modules,
+      parseMs: Math.round(s.parseMs),
+      unresolved: s.unresolvedInstances,
     };
   }
 
@@ -99,7 +103,8 @@ export class IndexService implements vscode.Disposable {
     this.stopWatchers();
     this.includedFiles.clear();
     this.explicitFiles.clear();
-    this.synced.clear();
+    this.hashes.clear();
+    this.ingested.clear();
     this.index.clear();
     this.changeEmitter.fire();
     await this.ensureReady();
@@ -124,20 +129,40 @@ export class IndexService implements vscode.Disposable {
         this.finishScan(started, 0);
         return;
       }
+      const budget = Math.max(1, this.configValue.maxFiles);
       const uris: vscode.Uri[] = [];
+      let truncated = false;
       for (const dir of targets.dirs) {
+        const remaining = budget - uris.length;
+        if (remaining <= 0) {
+          truncated = true;
+          break;
+        }
+        // Ask for one more than the budget: a list that long proves the
+        // directory holds more matches, so the log can say the scan was cut
+        // instead of pretending the workspace ends there.
         const found = await vscode.workspace.findFiles(
           new vscode.RelativePattern(vscode.Uri.file(dir), scanGlob(this.configValue)),
           this.configValue.exclude.length ? `{${this.configValue.exclude.join(',')}}` : null,
-          undefined,
+          remaining + 1,
         );
+        if (found.length > remaining) {
+          truncated = true;
+          uris.push(...found.slice(0, remaining));
+          break;
+        }
         uris.push(...found);
       }
       for (const file of targets.files) {
+        if (uris.length >= budget) {
+          truncated = true;
+          break;
+        }
         uris.push(vscode.Uri.file(file));
       }
       const seen = new Set<string>();
       let parsed = 0;
+      let lastYield = Date.now();
       for (const uri of uris) {
         const file = uri.fsPath;
         if (seen.has(file)) {
@@ -147,15 +172,28 @@ export class IndexService implements vscode.Disposable {
         if (!this.explicitFiles.has(file) && isExcluded(file, this.configValue)) {
           continue;
         }
-        this.ingestFile(file);
-        parsed++;
-        // Yield periodically so the workbench stays responsive. A microtask
-        // does not count: it only runs once the stack is already empty, so a
-        // scheduler that hands control back at every file still starves the
-        // host's message loop for the whole scan.
-        if (parsed % 80 === 0) {
-          await new Promise((r) => setImmediate(r));
+        try {
+          this.ingestFile(file);
+          parsed++;
+        } catch (e) {
+          // One pathological file (a stack overflow in the parser, an
+          // unreadable directory entry) must not abort the whole workspace
+          // scan: the rest of the index is still useful.
+          this.log.appendLine(`[index] skipped ${file}: ${e instanceof Error ? e.message : String(e)}`);
         }
+        // Yield by elapsed time, not every N files: a few large files can hold
+        // the host for seconds while thousands of small ones need no pause.
+        if (Date.now() - lastYield >= 12) {
+          await new Promise((r) => setImmediate(r));
+          lastYield = Date.now();
+        }
+      }
+      if (truncated) {
+        this.log.appendLine(`[index] file budget reached (maxFiles = ${budget}); scan truncated`);
+        void vscode.window.setStatusBarMessage(
+          `RTLens: indexed the first ${budget} file(s) (hdl.connectView.maxFiles); raise it to index more.`,
+          8000,
+        );
       }
       this.syncOpenDocuments();
       this.startWatchers();
@@ -186,7 +224,8 @@ export class IndexService implements vscode.Disposable {
       return;
     }
     this.index.addFile(file, text);
-    this.synced.set(file, text);
+    this.hashes.set(file, hashText(text));
+    this.ingested.add(file);
     this.followIncludes(file);
   }
 
@@ -321,7 +360,8 @@ export class IndexService implements vscode.Disposable {
   private remove(file: string): void {
     this.index.removeFile(file);
     this.includedFiles.delete(file);
-    this.synced.delete(file);
+    this.hashes.delete(file);
+    this.ingested.delete(file);
     this.changeEmitter.fire();
   }
 
@@ -335,7 +375,7 @@ export class IndexService implements vscode.Disposable {
     // has to be resolvable all the same: without its modules in the index,
     // nothing inside it can be jumped to, hovered or listed in Nets. Exclusion
     // stays a decision about the workspace scan, not about this file.
-    if (!this.synced.has(file)) {
+    if (!this.ingested.has(file)) {
       this.ingestFile(file);
       this.changeEmitter.fire();
     }
@@ -354,8 +394,10 @@ export class IndexService implements vscode.Disposable {
           if (!doc.isDirty) {
             return;
           }
-          this.index.addFile(file, doc.getText());
-          this.synced.set(file, doc.getText());
+          const text = doc.getText();
+          this.index.addFile(file, text);
+          this.hashes.set(file, hashText(text));
+          this.ingested.add(file);
           this.changeEmitter.fire();
         }, 400),
       );
@@ -381,7 +423,7 @@ export class IndexService implements vscode.Disposable {
     if (!this.explicitFiles.has(file) && isExcluded(file, this.configValue)) {
       // Only indexed because it was open: closing it puts the workspace back
       // to what the exclude patterns asked for.
-      if (this.synced.has(file)) {
+      if (this.ingested.has(file)) {
         this.remove(file);
       }
       return;
@@ -395,18 +437,18 @@ export class IndexService implements vscode.Disposable {
       return;
     }
     this.index.addFile(file, text);
-    this.synced.set(file, text);
+    this.hashes.set(file, hashText(text));
+    this.ingested.add(file);
     this.followIncludes(file);
     this.changeEmitter.fire();
   }
 
-  /** Re-parse every open HDL document so lookups match unsaved text. */
   /**
    * Re-parse every dirty HDL document so lookups match unsaved text.
    *
-   * The last synced text is remembered per file: this runs on every hover and
-   * every cursor movement, and re-parsing a file that has not changed since the
-   * last sync is the most expensive thing in the extension's hot path.
+   * The hash of the last synced text is remembered per file: this runs on every
+   * hover and every cursor movement, and re-parsing a file that has not changed
+   * since the last sync is the most expensive thing in the extension's hot path.
    */
   syncOpenDocuments(): void {
     for (const doc of vscode.workspace.textDocuments) {
@@ -414,24 +456,30 @@ export class IndexService implements vscode.Disposable {
         continue;
       }
       const text = doc.getText();
-      if (this.synced.get(doc.fileName) === text) {
+      const hash = hashText(text);
+      if (this.hashes.get(doc.fileName) === hash) {
         continue;
       }
       this.index.addFile(doc.fileName, text);
-      this.synced.set(doc.fileName, text);
+      this.hashes.set(doc.fileName, hash);
+      this.ingested.add(doc.fileName);
     }
   }
 
   // ------------------------------------------------------------------ queries
 
   /**
-   * Text as the index holds it, so consumers hash the very bytes the index was
-   * built from instead of re-reading the file. Falls back to disk only for a
-   * file that was indexed without ever being synced (added directly to the
-   * index, or dropped from `synced` by a refresh).
+   * Content hash as the index holds it, so consumers fingerprint the very
+   * bytes the index was built from instead of re-reading the file. Falls back
+   * to disk only for a file that was indexed without passing through this
+   * service (added directly to the index, or dropped by a refresh).
    */
-  indexedText(file: string): string | undefined {
-    return this.synced.get(file) ?? this.textSync(file);
+  indexedHash(file: string): string {
+    const known = this.hashes.get(file);
+    if (known !== undefined) {
+      return known;
+    }
+    return hashText(this.textSync(file) ?? '');
   }
 
   /** Current text of a file: the editor buffer when open, else disk. */

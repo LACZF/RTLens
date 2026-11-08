@@ -124,13 +124,38 @@ export class HdlIndex {
   private fileEdges = new Map<string, ParentRef[]>();
   /** Bumped whenever the instance edges change, so derived caches can invalidate. */
   private edgeEpochValue = 0;
+  /** Modules registered, maintained as files are added and removed. */
+  private moduleCount = 0;
+  /**
+   * Unresolved-instance count, computed on first read after a change.
+   *
+   * Counting it inside `addFile` would rescan every module and every instance
+   * of the workspace per file - quadratic over a scan, and the extension host
+   * runs that scan synchronously. Nothing reads the number during the scan, so
+   * it is paid once, on demand, and invalidated by the next change.
+   */
+  private unresolvedCache: number | undefined;
+  /** Time spent in the parser, accumulated per file. */
+  private parseMs = 0;
 
-  stats: IndexStats = { files: 0, modules: 0, unresolvedInstances: 0, parseMs: 0 };
+  get stats(): IndexStats {
+    if (this.unresolvedCache === undefined) {
+      this.unresolvedCache = this.countUnresolvedInstances();
+    }
+    return {
+      files: this.files.size,
+      modules: this.moduleCount,
+      unresolvedInstances: this.unresolvedCache,
+      parseMs: this.parseMs,
+    };
+  }
 
   /** Parse and register a file. Returns the modules found. */
   addFile(file: string, source: string): ModuleDef[] {
     this.removeFile(file);
+    const parseStart = Date.now();
     const res = parseSource(file, source);
+    this.parseMs += Date.now() - parseStart;
     const mods = res.modules;
     this.parsed.add(file);
     if (res.includes.length > 0) {
@@ -181,9 +206,8 @@ export class HdlIndex {
       }
     }
     this.addEdges(file, mods);
-    this.stats.files = this.files.size;
-    this.stats.modules = this.countModules();
-    this.stats.unresolvedInstances = this.countUnresolvedInstances();
+    this.moduleCount += mods.length;
+    this.unresolvedCache = undefined;
     for (const m of mods) {
       this.classifyImportedRefs(m);
     }
@@ -395,8 +419,8 @@ export class HdlIndex {
     }
     this.byFile.delete(file);
     this.files.delete(file);
-    this.stats.files = this.files.size;
-    this.stats.modules = this.countModules();
+    this.moduleCount -= mods.length;
+    this.unresolvedCache = undefined;
   }
 
   clear(): void {
@@ -412,7 +436,9 @@ export class HdlIndex {
     this.parentIndex.clear();
     this.fileEdges.clear();
     this.edgeEpochValue++;
-    this.stats = { files: 0, modules: 0, unresolvedInstances: 0, parseMs: 0 };
+    this.moduleCount = 0;
+    this.unresolvedCache = undefined;
+    this.parseMs = 0;
   }
 
   /**
@@ -501,14 +527,6 @@ export class HdlIndex {
 
   get indexedFiles(): string[] {
     return [...this.files];
-  }
-
-  private countModules(): number {
-    let n = 0;
-    for (const list of this.byName.values()) {
-      n += list.length;
-    }
-    return n;
   }
 
   private countUnresolvedInstances(): number {

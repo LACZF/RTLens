@@ -12,6 +12,8 @@ export interface HdlConfig {
   topModules: string[];
   maxDepth: number;
   maxInstances: number;
+  /** Upper bound on files the workspace scan may index; minimum 1. */
+  maxFiles: number;
   /** Composition-tree depth cap; 0 means no limit. */
   compositionMaxDepth: number;
   /** Composition-tree node budget; 0 means no limit. */
@@ -70,6 +72,7 @@ export function readConfig(scope?: vscode.Uri): HdlConfig {
     topModules: strArray(cfg, 'topModules', []),
     maxDepth: cfg.get<number>('maxDepth') ?? 32,
     maxInstances: cfg.get<number>('maxInstances') ?? 20000,
+    maxFiles: cfg.get<number>('maxFiles') ?? 20000,
     compositionMaxDepth: cfg.get<number>('composition.maxDepth') ?? 0,
     compositionMaxInstances: cfg.get<number>('composition.maxInstances') ?? 0,
     compositionFilterModules: strArray(cfg, 'composition.filterModules', []),
