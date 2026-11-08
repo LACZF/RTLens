@@ -394,6 +394,58 @@ test('composition webview: opening an unloaded level asks the host, then splices
   assert.equal(ui.posted.filter((m) => m.type === 'expand').length, 1, 'no extra expand message');
 });
 
+test('composition webview: a first highlight keeps an unloaded level folded and opens it with one click', () => {
+  const ui = start([
+    row('top', '', '', 'top', 0, 2),
+    row('top.u_mid', 'top', 'u_mid', 'mid', 1, 1),
+    row('top.u_top', 'top', 'u_top', 'leaf', 1, 0),
+  ]);
+  ui.message({ type: 'highlightPath', path: 'top.u_mid', collapseOthers: true });
+  let rows = drawn(ui.list);
+  assert.deepEqual(rows.map(rowText), ['top', 'u_mid : mid', 'u_top : leaf']);
+  assert.equal(chevron(rows[1]).textContent, '\u25B6', 'an unloaded level is not drawn open');
+  assert.ok(rows[1].classList.contains('sel'), 'the target row is selected');
+  assert.equal(ui.posted.filter((m) => m.type === 'expand').length, 0, 'a highlight alone does not materialise children');
+
+  fire(chevron(rows[1]), 'click');
+  assert.deepEqual(
+    ui.posted.filter((m) => m.type === 'expand'),
+    [{ type: 'expand', path: 'top.u_mid' }],
+    'the first click asks for the level',
+  );
+  assert.equal(drawn(ui.list).length, 3, 'the row stays folded until its children arrive');
+
+  ui.message({
+    type: 'children',
+    parentPath: 'top.u_mid',
+    rows: [row('top.u_mid.u_a', 'top.u_mid', 'u_a', 'leaf', 2, 0)],
+  });
+  rows = drawn(ui.list);
+  assert.deepEqual(rows.map(rowText), ['top', 'u_mid : mid', 'u_a : leaf', 'u_top : leaf']);
+  assert.equal(chevron(rows[1]).textContent, '\u25BC', 'the level opens when its children arrive');
+});
+
+test('composition webview: a file-open highlight on the root keeps the first level open', () => {
+  const ui = start(ROWS);
+  ui.message({ type: 'highlightPath', path: 'top', collapseOthers: true });
+  const rows = drawn(ui.list);
+  assert.deepEqual(rows.map(rowText), ['top', 'u_mid : mid', 'u_top : leaf']);
+  assert.equal(chevron(rows[0]).textContent, '\u25BC', 'the root stays open');
+  assert.ok(rows[0].classList.contains('sel'), 'the root row is selected');
+});
+
+test('composition webview: a reveal keeps an unloaded level folded', () => {
+  const ui = start([
+    row('top', '', '', 'top', 0, 2),
+    row('top.u_mid', 'top', 'u_mid', 'mid', 1, 1),
+    row('top.u_top', 'top', 'u_top', 'leaf', 1, 0),
+  ]);
+  ui.message({ type: 'revealPath', path: 'top.u_mid' });
+  const rows = drawn(ui.list);
+  assert.equal(chevron(rows[1]).textContent, '\u25B6', 'an unloaded level is not drawn open');
+  assert.equal(ui.scrollCount(), 1, 'the revealed row is scrolled into view');
+});
+
 test('composition webview: a level streamed in chunks renders once, in order', () => {
   const ui = start([row('top', '', '', 'top', 0, 4)]);
   ui.message({ type: 'children', parentPath: 'top', rows: [row('top.a', 'top', 'a', 'leaf', 1, 0)], more: true });

@@ -1025,17 +1025,16 @@ export const SCRIPT = String.raw`
   }
 
   function toggle(path) {
-    if (collapsed[path]) {
-      // Opening a level the host has not sent yet: ask for it and keep the row
-      // folded until its children arrive (the 'children' handler opens it).
-      if (!loaded[path]) {
-        vscode.postMessage({ type: 'expand', path: path });
-        return;
-      }
-      delete collapsed[path];
-    } else {
-      collapsed[path] = true;
+    // The host has not sent this level yet: ask for it and keep the row folded
+    // until its children arrive (the 'children' handler opens it). This must
+    // run before the collapsed check: a row can be force-opened while its
+    // children are still absent, and the first click must not just fold it.
+    if (!loaded[path]) {
+      vscode.postMessage({ type: 'expand', path: path });
+      return;
     }
+    if (collapsed[path]) delete collapsed[path];
+    else collapsed[path] = true;
     render();
   }
 
@@ -1066,11 +1065,17 @@ export const SCRIPT = String.raw`
   }
 
   // A file was opened/switched: the reader's other expanded branches fold,
-  // and only the path down to the revealed row stays open.
+  // and only the path down to the revealed row stays open. The target row
+  // itself is not on that path, so it stays folded unless it is the root.
   function collapseExcept(path) {
     foldEveryBranch();
     expandAncestors(path);
-    delete collapsed[path];
+    openRoot(path);
+  }
+
+  function openRoot(path) {
+    var r = byPath[path];
+    if (r && !r.parentPath) delete collapsed[path];
   }
 
   // Tell the host which way the title button should read: a single open branch
@@ -1219,7 +1224,7 @@ export const SCRIPT = String.raw`
     if (!m) return;
     if (m.type === 'revealPath' && m.path) {
       expandAncestors(m.path);
-      delete collapsed[m.path];
+      openRoot(m.path);
       render();
       var target = els[m.path];
       if (target && target.scrollIntoView) target.scrollIntoView({ block: 'center' });
@@ -1244,7 +1249,7 @@ export const SCRIPT = String.raw`
         collapseExcept(selected);
       } else if (selected) {
         expandAncestors(selected);
-        delete collapsed[selected];
+        openRoot(selected);
       }
       render();
       var mark = els[selected];
