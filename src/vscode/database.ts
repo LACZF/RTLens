@@ -14,6 +14,7 @@ import {
 } from '../core/relations';
 import type { IndexService } from './indexService';
 import { resolveModuleFilter } from './moduleFilter';
+import { MAX_DB_BYTES, autoRefreshAllowed, oversizedDatabase } from './safeMode';
 
 /**
  * The signal ↔ module relation database, persisted under each workspace
@@ -43,9 +44,21 @@ export function databasePath(folder: vscode.Uri): string {
   return path.join(folder.fsPath, DB_DIR, DB_FILE);
 }
 
-export async function readDatabase(folder: vscode.Uri): Promise<RelationDatabase | undefined> {
+export async function readDatabase(
+  folder: vscode.Uri,
+  log?: (line: string) => void,
+  maxBytes = MAX_DB_BYTES,
+): Promise<RelationDatabase | undefined> {
+  const target = databasePath(folder);
   try {
-    const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(databasePath(folder)));
+    const stat = fs.statSync(target);
+    if (oversizedDatabase(stat.size, maxBytes)) {
+      log?.(
+        `[db] not loading ${target}: ${Math.round(stat.size / (1024 * 1024))} MB exceeds the ${Math.round(maxBytes / (1024 * 1024))} MB limit`,
+      );
+      return undefined;
+    }
+    const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(target));
     return parseDatabase(Buffer.from(bytes).toString('utf8'));
   } catch {
     return undefined;
@@ -111,6 +124,7 @@ export class DatabaseService implements vscode.Disposable {
   private autoTimer: ReturnType<typeof setTimeout> | undefined;
   private autoRunning = false;
   private autoPending = false;
+  private autoSkipReason: string | undefined;
   /**
    * Auto-update starts only after `load()`, so the activation scan - which
    * fires the same index event as an edit - does not rewrite the databases.
@@ -131,8 +145,9 @@ export class DatabaseService implements vscode.Disposable {
   /** Read the databases already on disk. Never writes. */
   async load(): Promise<void> {
     this.databases.clear();
+    this.autoSkipReason = undefined;
     for (const folder of vscode.workspace.workspaceFolders ?? []) {
-      const db = await readDatabase(folder.uri);
+      const db = await readDatabase(folder.uri, (line) => this.log.appendLine(line));
       if (db) {
         this.databases.set(folder.uri.fsPath, db);
       }
@@ -143,9 +158,20 @@ export class DatabaseService implements vscode.Disposable {
 
   /** A file edit (or reindex) landed: keep the database current if asked to. */
   private onIndexChange(): void {
-    if (this.autoStarted && this.svc.config.autoUpdateDatabase) {
-      this.scheduleAutoRefresh();
+    if (!(this.autoStarted && this.svc.config.autoUpdateDatabase)) {
+      return;
     }
+    const files = this.svc.index.fileCount;
+    if (!autoRefreshAllowed(files, this.svc.safeMode)) {
+      const reason = this.svc.safeMode ? 'safe mode' : `${files} indexed files`;
+      if (this.autoSkipReason !== reason) {
+        this.autoSkipReason = reason;
+        this.log.appendLine(`[db] automatic refresh skipped (${reason}); use the RTLens DB button`);
+      }
+      return;
+    }
+    this.autoSkipReason = undefined;
+    this.scheduleAutoRefresh();
   }
 
   /**
@@ -193,6 +219,9 @@ export class DatabaseService implements vscode.Disposable {
     // button. `finally` restores the resting label even when a folder throws.
     this.status.text = '$(sync~spin) RTLens: refreshing database…';
     try {
+      if (this.svc.safeMode) {
+        throw new Error('RTLens is in safe mode after a failed indexing run; run "HDL: Retry Full Index" first.');
+      }
       await this.svc.ensureReady();
       const folders = vscode.workspace.workspaceFolders ?? [];
       const started = Date.now();
@@ -201,7 +230,9 @@ export class DatabaseService implements vscode.Disposable {
 
       for (const folder of folders) {
         const inputs = collectInputs(this.svc, folder.uri);
-        const previous = this.databases.get(folder.uri.fsPath) ?? (await readDatabase(folder.uri));
+        const previous =
+          this.databases.get(folder.uri.fsPath) ??
+          (await readDatabase(folder.uri, (line) => this.log.appendLine(line)));
         const result = updateDatabase(
           this.svc.index,
           previous,
@@ -221,6 +252,7 @@ export class DatabaseService implements vscode.Disposable {
       }
 
       summary.ms = Date.now() - started;
+      this.autoSkipReason = undefined;
       this.log.appendLine(
         `[db] ${mode} refresh: ${summary.files} file(s) over ${summary.folders} folder(s), ` +
           `${summary.changed} recomputed, ${summary.reused} reused, ${summary.removed} removed in ${summary.ms}ms`,

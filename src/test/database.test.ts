@@ -206,3 +206,14 @@ test('database: the status bar announces a running refresh and settles afterward
   assert.match(bar.text, /RTLens DB/, 'the button shows the built database');
   db.dispose();
 });
+
+test('database: an oversized relations file is not read into memory', async () => {
+  const { mod } = await setup();
+  fs.mkdirSync(path.dirname(DB_FILE_ON_DISK), { recursive: true });
+  fs.writeFileSync(DB_FILE_ON_DISK, '{}' + ' '.repeat(64));
+
+  const lines: string[] = [];
+  const loaded = await mod.readDatabase(vscode.Uri.file(TEMP), (line: string) => lines.push(line), 4);
+  assert.equal(loaded, undefined);
+  assert.ok(lines.some((l) => l.includes('not loading')), 'the skip is logged');
+});

@@ -40,6 +40,7 @@ import { sourceFingerprint } from '../core/relations';
 import { DB_DIR, collectInputs, type RefreshMode } from './database';
 import type { IndexService } from './indexService';
 import { moduleFilterKey, resolveModuleFilter } from './moduleFilter';
+import { MAX_DB_BYTES, autoRefreshAllowed, oversizedDatabase } from './safeMode';
 
 /**
  * The classified catalog: the databases the §5.6 design splits out besides the
@@ -79,9 +80,22 @@ function dbPath(folder: vscode.Uri, name: string): string {
   return path.join(folder.fsPath, DB_DIR, name);
 }
 
-async function readJson<T>(folder: vscode.Uri, name: string, parse: (text: string) => T | undefined): Promise<T | undefined> {
+async function readJson<T>(
+  folder: vscode.Uri,
+  name: string,
+  parse: (text: string) => T | undefined,
+  log?: (line: string) => void,
+): Promise<T | undefined> {
+  const target = dbPath(folder, name);
   try {
-    const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(dbPath(folder, name)));
+    const stat = fs.statSync(target);
+    if (oversizedDatabase(stat.size)) {
+      log?.(
+        `[catalog] not loading ${target}: ${Math.round(stat.size / (1024 * 1024))} MB exceeds the ${Math.round(MAX_DB_BYTES / (1024 * 1024))} MB limit`,
+      );
+      return undefined;
+    }
+    const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(target));
     return parse(Buffer.from(bytes).toString('utf8'));
   } catch {
     return undefined;
@@ -102,9 +116,20 @@ function hierarchyBase(folder: vscode.Uri): string {
   return path.join(folder.fsPath, DB_DIR, HIERARCHY_DIR);
 }
 
-function readHierarchyManifest(folder: vscode.Uri): HierarchyManifest | undefined {
+function readHierarchyManifest(
+  folder: vscode.Uri,
+  log?: (line: string) => void,
+): HierarchyManifest | undefined {
+  const target = path.join(hierarchyBase(folder), CURRENT_MANIFEST_FILE);
   try {
-    return parseManifest(fs.readFileSync(path.join(hierarchyBase(folder), CURRENT_MANIFEST_FILE), 'utf8'));
+    const stat = fs.statSync(target);
+    if (oversizedDatabase(stat.size)) {
+      log?.(
+        `[catalog] not loading ${target}: ${Math.round(stat.size / (1024 * 1024))} MB exceeds the ${Math.round(MAX_DB_BYTES / (1024 * 1024))} MB limit`,
+      );
+      return undefined;
+    }
+    return parseManifest(fs.readFileSync(target, 'utf8'));
   } catch {
     return undefined;
   }
@@ -166,6 +191,7 @@ export class CatalogService implements vscode.Disposable {
   private autoTimer: ReturnType<typeof setTimeout> | undefined;
   private autoRunning = false;
   private autoPending = false;
+  private autoSkipReason: string | undefined;
   /**
    * Auto-update starts only after `load()`, so activation - which does not
    * scan at all - cannot rewrite the databases before the first index exists.
@@ -182,14 +208,16 @@ export class CatalogService implements vscode.Disposable {
   /** Read the databases already on disk and check them against the sources. */
   async load(): Promise<void> {
     this.dbs.clear();
+    this.autoSkipReason = undefined;
+    const log = (line: string) => this.log.appendLine(line);
     const filterHash = moduleFilterKey(
       resolveModuleFilter(this.svc.index, this.svc.config.compositionFilterModules),
     );
     for (const folder of vscode.workspace.workspaceFolders ?? []) {
       const fingerprint = sourceFingerprint(collectInputs(this.svc, folder.uri));
-      const index = await readJson(folder.uri, INDEX_DB_FILE, parseIndexDatabase);
-      const hierarchy = readHierarchyManifest(folder.uri);
-      const graph = await readJson(folder.uri, GRAPH_DB_FILE, parseGraphDatabase);
+      const index = await readJson(folder.uri, INDEX_DB_FILE, parseIndexDatabase, log);
+      const hierarchy = readHierarchyManifest(folder.uri, log);
+      const graph = await readJson(folder.uri, GRAPH_DB_FILE, parseGraphDatabase, log);
       const fresh =
         !!index && index.source === fingerprint &&
         !!hierarchy && hierarchy.source === fingerprint &&
@@ -206,9 +234,20 @@ export class CatalogService implements vscode.Disposable {
     for (const dbs of this.dbs.values()) {
       dbs.fresh = false;
     }
-    if (this.autoStarted && this.svc.config.autoUpdateDatabase) {
-      this.scheduleAutoRefresh();
+    if (!(this.autoStarted && this.svc.config.autoUpdateDatabase)) {
+      return;
     }
+    const files = this.svc.index.fileCount;
+    if (!autoRefreshAllowed(files, this.svc.safeMode)) {
+      const reason = this.svc.safeMode ? 'safe mode' : `${files} indexed files`;
+      if (this.autoSkipReason !== reason) {
+        this.autoSkipReason = reason;
+        this.log.appendLine(`[catalog] automatic refresh skipped (${reason}); use the RTLens DB button`);
+      }
+      return;
+    }
+    this.autoSkipReason = undefined;
+    this.scheduleAutoRefresh();
   }
 
   /**
@@ -248,6 +287,9 @@ export class CatalogService implements vscode.Disposable {
 
   /** Rebuild and write every classified database for every workspace folder. */
   async refresh(_mode: RefreshMode): Promise<CatalogRefreshSummary> {
+    if (this.svc.safeMode) {
+      throw new Error('RTLens is in safe mode after a failed indexing run; run "HDL: Retry Full Index" first.');
+    }
     await this.svc.ensureReady();
     const folders = vscode.workspace.workspaceFolders ?? [];
     const started = Date.now();

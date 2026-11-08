@@ -627,6 +627,10 @@ export class HdlIndex {
     this.edgeEpochValue++;
   }
 
+  get fileCount(): number {
+    return this.files.size;
+  }
+
   /** Every indexed file path. */
   allFiles(): string[] {
     return [...this.files];

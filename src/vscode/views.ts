@@ -250,6 +250,7 @@ export class ProblemsTreeProvider implements vscode.TreeDataProvider<ProblemsIte
   readonly onDidChangeTreeData = this.emitter.event;
 
   private issues: ProblemsItem[] = [];
+  private dirty = true;
 
   constructor(private readonly svc: IndexService) {
     this.svc.onDidChange(() => this.rebuild());
@@ -261,6 +262,15 @@ export class ProblemsTreeProvider implements vscode.TreeDataProvider<ProblemsIte
   }
 
   private rebuild(): void {
+    this.dirty = true;
+    this.emitter.fire(undefined);
+  }
+
+  private compute(): void {
+    if (!this.dirty) {
+      return;
+    }
+    this.dirty = false;
     this.issues = collectProblems(this.svc.index).map(
       (p) =>
         new ProblemsItem(
@@ -274,10 +284,10 @@ export class ProblemsTreeProvider implements vscode.TreeDataProvider<ProblemsIte
           p.moduleName,
         ),
     );
-    this.emitter.fire(undefined);
   }
 
   get count(): number {
+    this.compute();
     return this.issues.length;
   }
 
@@ -297,6 +307,7 @@ export class ProblemsTreeProvider implements vscode.TreeDataProvider<ProblemsIte
   }
 
   getChildren(): ProblemsItem[] {
+    this.compute();
     return this.issues;
   }
 }
