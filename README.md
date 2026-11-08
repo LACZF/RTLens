@@ -36,6 +36,7 @@
 | 命令 | 说明 |
 |------|------|
 | `HDL: Refresh Index` | 重建工作区索引 |
+| `HDL: Retry Full Index (clear safe mode)` | 清除安全模式并重新扫描整个工作区；上次索引在扫描/加载数据库时被宿主杀死后，启动会进入安全模式（最多 500 个文件、跳过数据库） |
 
 | `HDL: Refresh Signal/Module Database` | 刷新分类数据库（`.vscode/rtlens/` 下的 `index.json` / `hierarchy/` / `graph.json` / `relations.json`），支持增量或全量 |
 | `HDL: Show Connectivity Graph` | 打开选中实例的连接关系图 |
@@ -84,7 +85,7 @@
 
 ## 快速开始
 
-1. 用 VS Code 打开包含 `.v` / `.sv` 源文件的工作区。扩展在打开 HDL 文件时激活；打开文件只解析该文件供大纲使用，工作区索引等到首次跨文件功能（定义 / 悬停 / 引用 / Nets / 组成树 / 问题）才建立，不在启动时扫描整个工作区。组成视图隐藏时只记住当前文件与光标，不解析缓冲区；点开视图后才解析并定位到当前 module。
+1. 用 VS Code 打开包含 `.v` / `.sv` 源文件的工作区。扩展在打开 HDL 文件时激活；打开文件只解析该文件供大纲使用，工作区索引等到首次跨文件功能（定义 / 悬停 / 引用 / Nets / 组成树 / 问题）才建立，不在启动时扫描整个工作区。若上次索引在扫描或加载数据库时被宿主杀死，下次激活会进入安全模式（最多 500 个文件、跳过数据库读取与自动刷新），确认工作区规模后执行 `HDL: Retry Full Index` 退出。组成视图隐藏时只记住当前文件与光标，不解析缓冲区；点开视图后才解析并定位到当前 module。
 2. 在编辑器中把光标放到某个 module 或实例上，按 `Ctrl+Alt+G` 打开连接关系图。
 3. 或在 **Composition** 视图里点击某行跳到源码，再用命令面板的 `HDL: Show Connectivity Graph` / `HDL: Generate Wrapper Module`。
 4. 若默认排除规则不适用，调整 `hdl.connectView.files` / `hdl.connectView.exclude` 后执行 `HDL: Refresh Index`。

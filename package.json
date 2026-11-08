@@ -267,6 +267,11 @@
         "category": "HDL"
       },
       {
+        "command": "hdl.connectView.retryIndex",
+        "title": "HDL: Retry Full Index (clear safe mode)",
+        "category": "HDL"
+      },
+      {
         "command": "hdl.connectView.refreshDatabase",
         "title": "HDL: Refresh Signal/Module Database",
         "category": "HDL",

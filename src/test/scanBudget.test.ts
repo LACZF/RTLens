@@ -12,6 +12,7 @@ import * as path from 'node:path';
 import { Module } from 'node:module';
 
 import { vscode } from './vscodeStub';
+import { SAFE_MODE_KEY, SAFE_MODE_MAX_FILES, ScanGuard } from '../vscode/safeMode';
 
 const loader = Module as unknown as { _load: (request: string, ...rest: unknown[]) => unknown };
 const originalLoad = loader._load;
@@ -51,13 +52,31 @@ function reset(): void {
   };
 }
 
-async function makeService(settings: Record<string, unknown>, lines: string[]) {
+class FakeState {
+  private readonly values = new Map<string, unknown>();
+
+  constructor(initial: Record<string, unknown> = {}) {
+    for (const [key, value] of Object.entries(initial)) {
+      this.values.set(key, value);
+    }
+  }
+
+  get<T>(key: string): T | undefined {
+    return this.values.get(key) as T | undefined;
+  }
+
+  async update(key: string, value: unknown): Promise<void> {
+    this.values.set(key, value);
+  }
+}
+
+async function makeService(settings: Record<string, unknown>, lines: string[], guard?: ScanGuard) {
   reset();
   (vscode.workspace as { getConfiguration: unknown }).getConfiguration = () => ({
     get: (key: string, fallback: unknown) => (key in settings ? settings[key] : fallback),
   });
   const { IndexService } = await import('../vscode/indexService');
-  return new IndexService({ appendLine: (line: string) => lines.push(line) } as never);
+  return new IndexService({ appendLine: (line: string) => lines.push(line) } as never, guard);
 }
 
 after(() => fs.rmSync(ROOT, { recursive: true, force: true }));
@@ -94,4 +113,54 @@ test('scan budget: explicit databasePaths files are capped by the same budget', 
 
   assert.equal(svc.index.allFiles().length, 2);
   assert.ok(lines.some((l) => l.includes('file budget reached')));
+});
+
+test('scan budget: safe mode caps the scan at SAFE_MODE_MAX_FILES', async () => {
+  const lines: string[] = [];
+  const guard = new ScanGuard(new FakeState({ [SAFE_MODE_KEY]: true }), () => {});
+  const svc = await makeService({ maxFiles: 20000 }, lines, guard);
+  const many = Array.from({ length: SAFE_MODE_MAX_FILES + 1 }, (_, i) => path.join(WS, `s${i}.v`));
+  for (const file of many) {
+    fs.writeFileSync(file, `module s${path.basename(file, '.v')}; endmodule\n`);
+  }
+  (vscode.workspace as { findFiles: unknown }).findFiles = async (
+    pattern: { base?: { fsPath: string } },
+    _exclude: unknown,
+    maxResults?: number,
+  ) => {
+    findCalls.push({ maxResults });
+    const base = pattern?.base?.fsPath;
+    const found = base === WS ? many.map((f) => vscode.Uri.file(f)) : [];
+    return maxResults === undefined ? found : found.slice(0, maxResults);
+  };
+  await svc.refresh();
+  svc.dispose();
+
+  assert.equal(findCalls[0].maxResults, SAFE_MODE_MAX_FILES + 1);
+  assert.equal(svc.index.allFiles().length, SAFE_MODE_MAX_FILES);
+  assert.ok(lines.some((l) => l.includes('safe mode budget reached')));
+});
+
+test('scan budget: a file above the per-file limit is skipped', async () => {
+  const lines: string[] = [];
+  const svc = await makeService({ maxFiles: 10 }, lines);
+  const { MAX_FILE_CHARS } = await import('../vscode/indexService');
+  const big = path.join(WS, 'big.v');
+  fs.writeFileSync(big, 'module big; endmodule\n' + ' '.repeat(MAX_FILE_CHARS));
+  const all = [...FILES, big];
+  (vscode.workspace as { findFiles: unknown }).findFiles = async (
+    pattern: { base?: { fsPath: string } },
+    _exclude: unknown,
+    maxResults?: number,
+  ) => {
+    findCalls.push({ maxResults });
+    const base = pattern?.base?.fsPath;
+    const found = base === WS ? all.map((f) => vscode.Uri.file(f)) : [];
+    return maxResults === undefined ? found : found.slice(0, maxResults);
+  };
+  await svc.refresh();
+  svc.dispose();
+
+  assert.equal(svc.index.allFiles().length, FILES.length, 'the oversized file is not indexed');
+  assert.ok(lines.some((l) => l.includes('per-file limit')));
 });

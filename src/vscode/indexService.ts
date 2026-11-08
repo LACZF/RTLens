@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as v8 from 'v8';
 import * as vscode from 'vscode';
 
 import { HdlIndex, basename, dirname } from '../core/index';
@@ -15,10 +16,17 @@ import type { HierarchyNode, ModuleDef } from '../core/ast';
 import type { HierarchyResult } from '../core/hierarchy';
 import { hashText } from '../core/relations';
 import { isExcluded, readConfig, scanGlob, type HdlConfig } from './config';
+import { SAFE_MODE_MAX_FILES, ScanGuard, overHeapBudget } from './safeMode';
 
 export type IndexState = 'idle' | 'indexing' | 'ready' | 'error';
 
 const INCLUDE_EXT = /\.(v|sv|svh|vh|vlt)$/i;
+
+/** A single file above this many UTF-16 units is not parsed. */
+export const MAX_FILE_CHARS = 8 * 1024 * 1024;
+
+/** Total source text a single scan may keep in the index. */
+export const MAX_SOURCE_CHARS = 256 * 1024 * 1024;
 
 /**
  * Owns the workspace-wide {@link HdlIndex}.
@@ -52,8 +60,13 @@ export class IndexService implements vscode.Disposable {
   /** Files named directly by `hdl.connectView.databasePaths`; exclude rules do not apply. */
   private explicitFiles = new Set<string>();
   private lastError: string | undefined;
+  /** Source characters ingested since the current scan started. */
+  private sourceChars = 0;
 
-  constructor(private readonly log: vscode.OutputChannel) {
+  constructor(
+    private readonly log: vscode.OutputChannel,
+    private readonly guard?: ScanGuard,
+  ) {
     this.configValue = readConfig();
   }
 
@@ -67,6 +80,10 @@ export class IndexService implements vscode.Disposable {
 
   get error(): string | undefined {
     return this.lastError;
+  }
+
+  get safeMode(): boolean {
+    return this.guard?.safeMode === true;
   }
 
   get stats(): { files: number; modules: number; parseMs: number; unresolved: number } {
@@ -120,7 +137,10 @@ export class IndexService implements vscode.Disposable {
   private async scan(): Promise<void> {
     this.setState('indexing');
     this.lastError = undefined;
+    this.sourceChars = 0;
+    await this.guard?.begin();
     const started = Date.now();
+    const heapLimit = v8.getHeapStatistics().heap_size_limit;
     try {
       this.configValue = readConfig();
       const targets = this.scanTargets();
@@ -129,7 +149,8 @@ export class IndexService implements vscode.Disposable {
         this.finishScan(started, 0);
         return;
       }
-      const budget = Math.max(1, this.configValue.maxFiles);
+      const configured = Math.max(1, this.configValue.maxFiles);
+      const budget = this.safeMode ? Math.min(configured, SAFE_MODE_MAX_FILES) : configured;
       const uris: vscode.Uri[] = [];
       let truncated = false;
       for (const dir of targets.dirs) {
@@ -162,6 +183,7 @@ export class IndexService implements vscode.Disposable {
       }
       const seen = new Set<string>();
       let parsed = 0;
+      let memoryTruncated = false;
       let lastYield = Date.now();
       for (const uri of uris) {
         const file = uri.fsPath;
@@ -171,6 +193,10 @@ export class IndexService implements vscode.Disposable {
         seen.add(file);
         if (!this.explicitFiles.has(file) && isExcluded(file, this.configValue)) {
           continue;
+        }
+        if (this.sourceChars > MAX_SOURCE_CHARS || overHeapBudget(process.memoryUsage().heapUsed, heapLimit)) {
+          memoryTruncated = true;
+          break;
         }
         try {
           this.ingestFile(file);
@@ -189,9 +215,24 @@ export class IndexService implements vscode.Disposable {
         }
       }
       if (truncated) {
-        this.log.appendLine(`[index] file budget reached (maxFiles = ${budget}); scan truncated`);
+        if (this.safeMode) {
+          this.log.appendLine(`[index] safe mode budget reached (${budget} file(s)); scan truncated`);
+          void vscode.window.setStatusBarMessage(
+            `RTLens: safe mode indexed the first ${budget} file(s); run "HDL: Retry Full Index" to scan the whole workspace.`,
+            8000,
+          );
+        } else {
+          this.log.appendLine(`[index] file budget reached (maxFiles = ${budget}); scan truncated`);
+          void vscode.window.setStatusBarMessage(
+            `RTLens: indexed the first ${budget} file(s) (hdl.connectView.maxFiles); raise it to index more.`,
+            8000,
+          );
+        }
+      }
+      if (memoryTruncated) {
+        this.log.appendLine(`[index] memory budget reached after ${parsed} file(s); scan truncated to protect the extension host`);
         void vscode.window.setStatusBarMessage(
-          `RTLens: indexed the first ${budget} file(s) (hdl.connectView.maxFiles); raise it to index more.`,
+          'RTLens: stopped indexing to protect the extension host; narrow hdl.connectView.files or databasePaths.',
           8000,
         );
       }
@@ -202,6 +243,7 @@ export class IndexService implements vscode.Disposable {
       this.lastError = e instanceof Error ? e.message : String(e);
       this.log.appendLine(`[index] scan failed: ${this.lastError}`);
       this.setState('error');
+      await this.guard?.finish();
     }
   }
 
@@ -223,6 +265,13 @@ export class IndexService implements vscode.Disposable {
     if (text === undefined) {
       return;
     }
+    if (text.length > MAX_FILE_CHARS) {
+      this.log.appendLine(
+        `[index] skipped ${file}: ${text.length} characters exceeds the per-file limit (${MAX_FILE_CHARS})`,
+      );
+      return;
+    }
+    this.sourceChars += text.length;
     this.index.addFile(file, text);
     this.hashes.set(file, hashText(text));
     this.ingested.add(file);

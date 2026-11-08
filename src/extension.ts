@@ -33,8 +33,11 @@ import { basename } from './core/index';
 import { traceAt, type TraceDirection, type TraceStep } from './core/trace';
 import { WordHighlighter } from './vscode/wordHighlight';
 import { HdlIncludeLinkProvider } from './vscode/includeLinks';
+import { ScanGuard } from './vscode/safeMode';
 
 const LANGUAGES = ['verilog', 'systemverilog'];
+
+let scanGuard: ScanGuard | undefined;
 
 /**
  * Settings that change *which* files the index - and therefore the relation
@@ -68,7 +71,23 @@ function activateUnsafe(context: vscode.ExtensionContext): void {
   context.subscriptions.push(log);
   log.appendLine('RTLens activating');
 
-  const svc = new IndexService(log);
+  const guard = new ScanGuard(context.workspaceState, (line) => log.appendLine(line));
+  scanGuard = guard;
+  if (guard.safeMode) {
+    log.appendLine('[safe] starting in safe mode; the previous indexing run did not finish');
+    void vscode.window
+      .showWarningMessage(
+        'RTLens: the previous indexing run did not finish, so it started in safe mode (small file budget, databases off). Narrow hdl.connectView.files, or retry the full index.',
+        'Retry Full Index',
+      )
+      .then((choice) => {
+        if (choice) {
+          void vscode.commands.executeCommand('hdl.connectView.retryIndex');
+        }
+      });
+  }
+
+  const svc = new IndexService(log, guard);
   context.subscriptions.push(svc);
 
   // The signal/module relation database and its status-bar refresh button.
@@ -172,6 +191,11 @@ function activateUnsafe(context: vscode.ExtensionContext): void {
           (stats.unresolved ? `, ${stats.unresolved} unresolved instance(s)` : ''),
       );
       if (databasesLoaded) {
+        void guard.finish();
+        return;
+      }
+      if (svc.safeMode) {
+        log.appendLine('[safe] database load skipped in safe mode');
         return;
       }
       databasesLoaded = true;
@@ -183,6 +207,8 @@ function activateUnsafe(context: vscode.ExtensionContext): void {
           log.appendLine(`[db] loaded existing databases in ${Date.now() - started}ms`);
         } catch (e) {
           log.appendLine(`[db] load failed: ${e instanceof Error ? e.message : String(e)}`);
+        } finally {
+          await guard.finish();
         }
       })();
     }),
@@ -213,6 +239,12 @@ function activateUnsafe(context: vscode.ExtensionContext): void {
     await composition.refresh();
     problems.refresh();
     syncEditor(vscode.window.activeTextEditor);
+  });
+
+  reg('hdl.connectView.retryIndex', async () => {
+    await guard.reset();
+    log.appendLine('[safe] safe mode cleared; retrying the full workspace index');
+    await vscode.commands.executeCommand('hdl.connectView.refreshIndex');
   });
 
   reg('hdl.connectView.refreshDatabase', async () => {
@@ -439,9 +471,10 @@ function activateUnsafe(context: vscode.ExtensionContext): void {
   );
 }
 
-export function deactivate(): void {
+export function deactivate(): Thenable<void> | undefined {
   GraphPanel.disposeAll();
   TopologyPanel.disposeAll();
+  return scanGuard?.abort();
 }
 
 // ---------------------------------------------------------------------------
