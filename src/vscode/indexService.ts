@@ -29,6 +29,14 @@ export const MAX_FILE_CHARS = 8 * 1024 * 1024;
 export const MAX_SOURCE_CHARS = 256 * 1024 * 1024;
 
 /**
+ * Documents parsed immediately when they are opened before the first scan.
+ * VS Code can restore many editors at once; parsing every one of them before
+ * the scan guard is armed is exactly the unbounded startup path safe mode
+ * cannot see. The active editor is always allowed; the rest wait for the scan.
+ */
+export const MAX_PRE_SCAN_OPEN_FILES = 8;
+
+/**
  * Owns the workspace-wide {@link HdlIndex}.
  *
  * Parsing is synchronous and fast enough for typical RTL folders (a few
@@ -56,12 +64,18 @@ export class IndexService implements vscode.Disposable {
   private readonly hashes = new Map<string, string>();
   /** Files whose text is currently in the index (as opposed to merely opened once). */
   private readonly ingested = new Set<string>();
+  /** Opened documents waiting for the first scan to finish. */
+  private readonly pendingOpen = new Set<string>();
   private readonly includedFiles = new Set<string>();
   /** Files named directly by `hdl.connectView.databasePaths`; exclude rules do not apply. */
   private explicitFiles = new Set<string>();
   private lastError: string | undefined;
-  /** Source characters ingested since the current scan started. */
+  /** Source characters currently held by the index. */
   private sourceChars = 0;
+  /** Per-file character counts, so replacing a file adjusts the source budget. */
+  private readonly fileChars = new Map<string, number>();
+  private readonly heapLimit = v8.getHeapStatistics().heap_size_limit;
+  private budgetLogged = false;
 
   constructor(
     private readonly log: vscode.OutputChannel,
@@ -122,6 +136,9 @@ export class IndexService implements vscode.Disposable {
     this.explicitFiles.clear();
     this.hashes.clear();
     this.ingested.clear();
+    this.fileChars.clear();
+    this.sourceChars = 0;
+    this.budgetLogged = false;
     this.index.clear();
     this.changeEmitter.fire();
     await this.ensureReady();
@@ -137,15 +154,16 @@ export class IndexService implements vscode.Disposable {
   private async scan(): Promise<void> {
     this.setState('indexing');
     this.lastError = undefined;
-    this.sourceChars = 0;
+    this.budgetLogged = false;
     await this.guard?.begin();
     const started = Date.now();
-    const heapLimit = v8.getHeapStatistics().heap_size_limit;
     try {
       this.configValue = readConfig();
       const targets = this.scanTargets();
       this.explicitFiles = new Set(targets.files);
       if (targets.dirs.length === 0 && targets.files.length === 0) {
+        this.syncOpenDocuments();
+        this.flushPendingOpen();
         this.finishScan(started, 0);
         return;
       }
@@ -194,12 +212,12 @@ export class IndexService implements vscode.Disposable {
         if (!this.explicitFiles.has(file) && isExcluded(file, this.configValue)) {
           continue;
         }
-        if (this.sourceChars > MAX_SOURCE_CHARS || overHeapBudget(process.memoryUsage().heapUsed, heapLimit)) {
+        if (this.sourceChars > MAX_SOURCE_CHARS || overHeapBudget(process.memoryUsage().heapUsed, this.heapLimit)) {
           memoryTruncated = true;
           break;
         }
         try {
-          this.ingestFile(file);
+          this.ingestFile(file, false);
           parsed++;
         } catch (e) {
           // One pathological file (a stack overflow in the parser, an
@@ -237,6 +255,7 @@ export class IndexService implements vscode.Disposable {
         );
       }
       this.syncOpenDocuments();
+      this.flushPendingOpen();
       this.startWatchers();
       this.finishScan(started, parsed);
     } catch (e) {
@@ -260,32 +279,86 @@ export class IndexService implements vscode.Disposable {
 
   // ------------------------------------------------------------------ updates
 
-  private ingestFile(file: string): void {
+  private ingestFile(file: string, enforceBudget = true): void {
     const text = this.textSync(file);
     if (text === undefined) {
       return;
     }
+    if (!this.addText(file, text, enforceBudget)) {
+      return;
+    }
+    this.followIncludes(file, enforceBudget);
+  }
+
+  /**
+   * Put one text into the index after the limits that protect the extension
+   * host. The scan checks its own file budget before calling here; every other
+   * path (open documents, dirty buffers, revert, include targets) comes through
+   * this one gate.
+   */
+  private addText(file: string, text: string, enforceBudget: boolean): boolean {
     if (text.length > MAX_FILE_CHARS) {
       this.log.appendLine(
         `[index] skipped ${file}: ${text.length} characters exceeds the per-file limit (${MAX_FILE_CHARS})`,
       );
-      return;
+      return false;
     }
-    this.sourceChars += text.length;
+    const previous = this.fileChars.get(file) ?? 0;
+    const next = this.sourceChars - previous + text.length;
+    if (enforceBudget && next > MAX_SOURCE_CHARS) {
+      this.noteBudget(`source budget reached (${MAX_SOURCE_CHARS} characters); further files are not indexed`);
+      return false;
+    }
+    if (enforceBudget && overHeapBudget(process.memoryUsage().heapUsed, this.heapLimit)) {
+      this.noteBudget('heap budget reached; further files are not indexed');
+      return false;
+    }
+    this.sourceChars = next;
+    this.fileChars.set(file, text.length);
+    this.pendingOpen.delete(file);
     this.index.addFile(file, text);
     this.hashes.set(file, hashText(text));
     this.ingested.add(file);
-    this.followIncludes(file);
+    return true;
+  }
+
+  private noteBudget(reason: string): void {
+    if (this.budgetLogged) {
+      return;
+    }
+    this.budgetLogged = true;
+    this.log.appendLine(`[index] ${reason}`);
+  }
+
+  private flushPendingOpen(): void {
+    if (this.pendingOpen.size === 0) {
+      return;
+    }
+    const pending = [...this.pendingOpen];
+    this.pendingOpen.clear();
+    let changed = false;
+    for (const file of pending) {
+      if (this.ingested.has(file)) {
+        continue;
+      }
+      this.ingestFile(file);
+      if (this.ingested.has(file)) {
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.changeEmitter.fire();
+    }
   }
 
   /** `\`include` targets are indexed as separate files so their modules resolve. */
-  private followIncludes(file: string): void {
+  private followIncludes(file: string, enforceBudget = true): void {
     for (const mod of this.index.modulesInFile(file)) {
       for (const inc of mod.includes) {
         const target = this.resolveInclude(file, inc);
         if (target && this.index.modulesInFile(target).length === 0) {
           this.includedFiles.add(target);
-          this.ingestFile(target);
+          this.ingestFile(target, enforceBudget);
         }
       }
     }
@@ -407,6 +480,10 @@ export class IndexService implements vscode.Disposable {
   }
 
   private remove(file: string): void {
+    const chars = this.fileChars.get(file) ?? 0;
+    this.sourceChars = Math.max(0, this.sourceChars - chars);
+    this.fileChars.delete(file);
+    this.pendingOpen.delete(file);
     this.index.removeFile(file);
     this.includedFiles.delete(file);
     this.hashes.delete(file);
@@ -425,8 +502,17 @@ export class IndexService implements vscode.Disposable {
     // nothing inside it can be jumped to, hovered or listed in Nets. Exclusion
     // stays a decision about the workspace scan, not about this file.
     if (!this.ingested.has(file)) {
-      this.ingestFile(file);
-      this.changeEmitter.fire();
+      const active = vscode.window.activeTextEditor?.document === doc;
+      const defer =
+        !active &&
+        (this.stateValue === 'indexing' ||
+          (this.stateValue === 'idle' && this.ingested.size >= MAX_PRE_SCAN_OPEN_FILES));
+      if (defer) {
+        this.pendingOpen.add(file);
+      } else {
+        this.ingestFile(file);
+        this.changeEmitter.fire();
+      }
     }
     const sub = vscode.workspace.onDidChangeTextDocument((e) => {
       if (e.document !== doc || e.contentChanges.length === 0) {
@@ -444,9 +530,12 @@ export class IndexService implements vscode.Disposable {
             return;
           }
           const text = doc.getText();
-          this.index.addFile(file, text);
-          this.hashes.set(file, hashText(text));
-          this.ingested.add(file);
+          const hash = hashText(text);
+          if (!this.addText(file, text, true)) {
+            this.remove(file);
+            this.hashes.set(file, hash);
+            return;
+          }
           this.changeEmitter.fire();
         }, 400),
       );
@@ -469,6 +558,7 @@ export class IndexService implements vscode.Disposable {
     if (!INCLUDE_EXT.test(file)) {
       return;
     }
+    this.pendingOpen.delete(file);
     if (!this.explicitFiles.has(file) && isExcluded(file, this.configValue)) {
       // Only indexed because it was open: closing it puts the workspace back
       // to what the exclude patterns asked for.
@@ -485,9 +575,12 @@ export class IndexService implements vscode.Disposable {
       this.remove(file);
       return;
     }
-    this.index.addFile(file, text);
-    this.hashes.set(file, hashText(text));
-    this.ingested.add(file);
+    if (!this.addText(file, text, true)) {
+      if (this.ingested.has(file)) {
+        this.remove(file);
+      }
+      return;
+    }
     this.followIncludes(file);
     this.changeEmitter.fire();
   }
@@ -509,9 +602,11 @@ export class IndexService implements vscode.Disposable {
       if (this.hashes.get(doc.fileName) === hash) {
         continue;
       }
-      this.index.addFile(doc.fileName, text);
-      this.hashes.set(doc.fileName, hash);
-      this.ingested.add(doc.fileName);
+      if (!this.addText(doc.fileName, text, true)) {
+        this.remove(doc.fileName);
+        this.hashes.set(doc.fileName, hash);
+        continue;
+      }
     }
   }
 
