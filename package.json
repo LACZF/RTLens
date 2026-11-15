@@ -638,7 +638,9 @@
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.81.0",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "vscode-oniguruma": "^2.0.1",
+    "vscode-textmate": "^9.3.2"
   },
   "icon": "resources/icon.png"
 }
