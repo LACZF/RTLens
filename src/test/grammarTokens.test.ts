@@ -126,9 +126,20 @@ test('grammar: @(*) stays a sensitivity list instead of swallowing the rest of t
 });
 
 test('grammar: attributes still highlight their own contents', async () => {
-  const lines = tokenize(await grammar('source.verilog'), '(* keep = "true" *) wire w;\nmodule top;\nendmodule\n');
-  expectScope(lines, 0, 'keep', /^entity\.other\.attribute-name\./);
-  expectScope(lines, 0, 'wire', /^support\.type\./);
+  const lines = tokenize(
+    await grammar('source.verilog'),
+    '(* multstyle = "logic" *) logic signed [DW-1:0] z_ln2;\nmodule top;\nendmodule\n',
+  );
+  expectScope(lines, 0, '(*', /^punctuation\.definition\.attribute\.begin\./);
+  expectScope(lines, 0, '*)', /^punctuation\.definition\.attribute\.end\./);
+  expectScope(lines, 0, 'multstyle', /^entity\.other\.attribute-name\./);
+  expectScope(lines, 0, 'logic', /^support\.type\./);
+  expectScope(lines, 0, 'signed', /^keyword\.declaration\./);
+  for (const token of lines[0]) {
+    if (token.text.trim()) {
+      assert.ok(hasOwnScope(token), `line 1: ${JSON.stringify(token.text)} has no colour scope`);
+    }
+  }
   expectScope(lines, 1, 'module', /^keyword\.control\.module\./);
 });
 

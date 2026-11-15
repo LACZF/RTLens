@@ -99,7 +99,13 @@
       "name": "meta.attribute.verilog",
       "comment": "`(*` opens an attribute, but `@(*)` is a sensitivity list, not an attribute. Without the negative lookahead the rule never closes and the rest of the file renders with no colour.",
       "begin": "\\(\\*(?!\\s*\\))",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.attribute.begin.verilog" }
+      },
       "end": "\\*\\)",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.attribute.end.verilog" }
+      },
       "patterns": [
         { "include": "#comments" },
         { "include": "#strings" },
