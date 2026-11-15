@@ -238,3 +238,78 @@ endmodule`,
   // port has everywhere else.
   assert.equal(at(tokens, 3, 9)?.type, 'hdlPort');
 });
+
+const CONN = `
+module child #(parameter int W = 2) (
+  input  wire         clk,
+  input  wire [W-1:0] din,
+  output wire [W-1:0] dout
+);
+endmodule
+
+module top (input wire clk, output wire [3:0] q);
+  wire [3:0] bus;
+  child u_named (.clk(clk), .din(bus), .dout(q));
+  child u_empty (.clk(), .din(), .dout());
+  child u_short (.clk, .din, .dout);
+  child u_wild  (.*);
+  child u_pos   (clk, 4'd1, q);
+  ghost u_missing (.p(clk));
+  child u_undeclared (.nosuch(clk));
+  child #(.W(4)) u_params (.clk(clk), .din(bus), .dout(q));
+  child #(.nosuch_param(1)) u_badparam (.clk(clk), .din(bus), .dout(q));
+endmodule
+`;
+
+function connTokens() {
+  const index = new HdlIndex();
+  index.addFile('/w/c.sv', CONN);
+  return { index, tokens: computeTokens(index, index.modulesInFile('/w/c.sv')) };
+}
+
+test('tokens: the port name in a connection is coloured as the port it is', () => {
+  // `.din(bus)` is two names: the port of the child module, and the signal of this
+  // one. Only the second one is a reference, so the first one used to fall through
+  // to the grammar and render in the theme's plain foreground.
+  const { tokens } = connTokens();
+  const named = CONN.split('\n').findIndex((l) => l.includes('u_named ('));
+  assert.equal(at(tokens, named, CONN.split('\n')[named].indexOf('.clk') + 1)?.type, 'hdlPort');
+  assert.equal(at(tokens, named, CONN.split('\n')[named].indexOf('.din') + 1)?.type, 'hdlPort');
+  assert.equal(at(tokens, named, CONN.split('\n')[named].indexOf('.dout') + 1)?.type, 'hdlPort');
+  // The argument on the other side keeps the type of what it names.
+  assert.equal(at(tokens, named, CONN.split('\n')[named].indexOf('(clk)') + 1)?.type, 'hdlPort');
+  assert.equal(at(tokens, named, CONN.split('\n')[named].indexOf('(bus)') + 1)?.type, 'hdlSignal');
+  // `.p()` leaves the port unconnected but still names it; `.p` shorthand names it
+  // too, and its implicit signal reference must not win the de-duplication.
+  const empty = CONN.split('\n').findIndex((l) => l.includes('u_empty ('));
+  assert.equal(at(tokens, empty, CONN.split('\n')[empty].indexOf('.din') + 1)?.type, 'hdlPort');
+  const short = CONN.split('\n').findIndex((l) => l.includes('u_short ('));
+  assert.equal(at(tokens, short, CONN.split('\n')[short].indexOf('.din') + 1)?.type, 'hdlPort');
+  assert.equal(at(tokens, short, CONN.split('\n')[short].indexOf('.dout') + 1)?.type, 'hdlPort');
+  // The override in `#(.W(4))` is the same kind of name on the port side of the
+  // instance: a parameter of the child module, not a signal here.
+  const params = CONN.split('\n').findIndex((l) => l.includes('u_params ('));
+  assert.equal(at(tokens, params, CONN.split('\n')[params].indexOf('.W') + 1)?.type, 'hdlParameter');
+});
+
+test('tokens: a connection name the child module does not declare stays plain', () => {
+  // The rule the editor follows everywhere else: colour what resolves, never guess.
+  const { tokens } = connTokens();
+  const wild = CONN.split('\n').findIndex((l) => l.includes('u_wild'));
+  assert.equal(at(tokens, wild, CONN.split('\n')[wild].indexOf('.*')), undefined, '`.*` names no port');
+  const missing = CONN.split('\n').findIndex((l) => l.includes('u_missing ('));
+  assert.equal(at(tokens, missing, CONN.split('\n')[missing].indexOf('.p') + 1), undefined, 'the module is not in the index');
+  const undeclared = CONN.split('\n').findIndex((l) => l.includes('u_undeclared ('));
+  assert.equal(at(tokens, undeclared, CONN.split('\n')[undeclared].indexOf('.nosuch') + 1), undefined, 'no such port');
+  const badParam = CONN.split('\n').findIndex((l) => l.includes('u_badparam ('));
+  assert.equal(at(tokens, badParam, CONN.split('\n')[badParam].indexOf('.nosuch_param') + 1), undefined, 'no such parameter');
+  // A positional connection writes no port name, so it adds no token of its own.
+  const pos = CONN.split('\n').findIndex((l) => l.includes('u_pos'));
+  assert.deepEqual(
+    tokens
+      .filter((t) => t.line === pos && (t.type === 'hdlPort' || t.type === 'hdlSignal'))
+      .map((t) => CONN.split('\n')[pos].slice(t.character, t.character + t.length)),
+    ['clk', 'q'],
+    'only the expressions are coloured',
+  );
+});

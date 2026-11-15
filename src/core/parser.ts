@@ -3802,6 +3802,7 @@ export class Parser {
               const pClose = matchBracket(toks, dot, s.to);
               paramOverrides.push({
                 name: nameTok?.text,
+                nameRange: nameTok?.range,
                 expr: exprFromTokens(toks.slice(dot + 1, pClose > 0 ? pClose : s.to), ctx.scope),
                 byPosition: false,
                 range: rangeOf(toks, s.from, s.to),

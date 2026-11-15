@@ -89,6 +89,9 @@ export function computeTokens(index: HdlIndex, mods: ModuleDef[]): HdlToken[] {
 
   for (const mod of mods) {
     declarationTokens(mod, push);
+    // Before the references: an implicit `.name` connection also produces a ref,
+    // and the port wins the de-duplication.
+    connectionTokens(index, mod, push);
     referenceTokens(index, mod, push);
   }
 
@@ -135,6 +138,63 @@ function declarationTokens(mod: ModuleDef, push: Push): void {
     // The module type in front of the instance label, and the label itself.
     add(i.moduleNameRange, 'hdlModule');
     add(i.nameRange, 'hdlInstance');
+  }
+}
+
+/**
+ * The names in an instance's header that belong to the child module: the ports of
+ * `.din(bus)` and the parameters of `#(.W(8))`.
+ *
+ * The parser keeps them out of `mod.refs` - they name something in the child, not
+ * in this module - so without this they would be the only defined identifiers left
+ * to the grammar, which colours them only if the theme happens to style a bare
+ * `variable.other.verilog`. Only the child module can say whether the name is a
+ * port or a parameter at all: a name it does not declare, or a child that is not
+ * in the index, is left uncoloured exactly like any other name that resolves to
+ * nothing.
+ */
+function connectionTokens(index: HdlIndex, mod: ModuleDef, push: Push): void {
+  const declared = new Map<string, { ports: Set<string>; params: Set<string> }>();
+  const childDeclares = (name: string) => {
+    let hit = declared.get(name);
+    if (!hit) {
+      const ports = new Set<string>();
+      const params = new Set<string>();
+      for (const def of index.allDefs(name)) {
+        for (const p of def.ports) {
+          ports.add(p.name);
+        }
+        for (const order of def.portOrder) {
+          ports.add(order);
+        }
+        for (const p of def.params) {
+          params.add(p.name);
+        }
+      }
+      hit = { ports, params };
+      declared.set(name, hit);
+    }
+    return hit;
+  };
+  const add = (
+    r: { start: { line: number; character: number }; end: { line: number; character: number } },
+    t: TokenType,
+  ): void => push(r.start.line, r.start.character, r.end.character - r.start.character, t);
+
+  for (const inst of mod.instances) {
+    const child = childDeclares(inst.moduleName);
+    for (const conn of inst.connections) {
+      // `*` and a positional connection name no port; `portName` is empty for the
+      // positional form.
+      if (conn.portName && conn.portName !== '*' && child.ports.has(conn.portName)) {
+        add(conn.nameRange, 'hdlPort');
+      }
+    }
+    for (const over of inst.paramOverrides) {
+      if (!over.byPosition && over.nameRange && over.name && child.params.has(over.name)) {
+        add(over.nameRange, 'hdlParameter');
+      }
+    }
   }
 }
 

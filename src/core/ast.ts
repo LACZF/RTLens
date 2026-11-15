@@ -304,6 +304,8 @@ export interface InstanceSite {
 
 export interface ParamOverride {
   name?: string;
+  /** The `name` identifier range of `.name(expr)`; absent for a positional override. */
+  nameRange?: Range;
   expr: ConstExpr;
   byPosition: boolean;
   range: Range;
