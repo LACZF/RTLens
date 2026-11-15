@@ -531,12 +531,12 @@
       },
       {
         "id": "hdlParameter",
-        "superType": "variable",
+        "superType": "parameter",
         "description": "variable.parameter.verilog"
       },
       {
         "id": "hdlFunction",
-        "superType": "variable",
+        "superType": "function",
         "description": "entity.name.function.verilog"
       },
       {
@@ -551,7 +551,7 @@
       },
       {
         "id": "hdlSystemId",
-        "superType": "variable",
+        "superType": "function",
         "description": "support.constant.system.verilog"
       }
     ],
@@ -622,6 +622,52 @@
           "comment": [
             "comment",
             "punctuation.definition.comment"
+          ]
+        }
+      },
+      {
+        "scopes": {
+          "hdlModule": [
+            "entity.name.type",
+            "entity.name.type.module.verilog"
+          ],
+          "hdlInstance": [
+            "variable.other.readwrite",
+            "entity.name.variable",
+            "entity.name.label.module.verilog"
+          ],
+          "hdlPort": [
+            "variable.other.readwrite",
+            "entity.name.variable",
+            "variable.other.port.verilog"
+          ],
+          "hdlSignal": [
+            "variable.other.readwrite",
+            "entity.name.variable",
+            "variable.other.verilog"
+          ],
+          "hdlParameter": [
+            "variable.parameter",
+            "variable.other.readwrite",
+            "entity.name.variable"
+          ],
+          "hdlFunction": [
+            "entity.name.function"
+          ],
+          "hdlGenvar": [
+            "variable.other.readwrite",
+            "entity.name.variable",
+            "variable.other.verilog"
+          ],
+          "hdlType": [
+            "entity.name.type",
+            "support.type",
+            "support.type.verilog"
+          ],
+          "hdlSystemId": [
+            "support.function",
+            "support.function.system.verilog",
+            "entity.name.function"
           ]
         }
       }
