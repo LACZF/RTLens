@@ -520,6 +520,56 @@
             "settings": {
               "foreground": "#6A9955"
             }
+          },
+          {
+            "scope": [
+              "variable.other.verilog",
+              "variable.other.port.verilog",
+              "variable.other.escaped.verilog",
+              "variable.other.macro.verilog",
+              "variable.other.preprocessor.verilog",
+              "entity.other.attribute-name.verilog"
+            ],
+            "settings": {
+              "foreground": "#9CDCFE"
+            }
+          },
+          {
+            "scope": [
+              "entity.name.type.verilog",
+              "entity.name.type.module.verilog",
+              "support.type.verilog"
+            ],
+            "settings": {
+              "foreground": "#4EC9B0"
+            }
+          },
+          {
+            "scope": [
+              "entity.name.function.verilog",
+              "entity.name.function.preprocessor.verilog",
+              "support.function.system.verilog"
+            ],
+            "settings": {
+              "foreground": "#DCDCAA"
+            }
+          },
+          {
+            "scope": [
+              "entity.name.label.verilog",
+              "entity.name.label.module.verilog"
+            ],
+            "settings": {
+              "foreground": "#C8C8C8"
+            }
+          },
+          {
+            "scope": [
+              "constant.other.enum-member.verilog"
+            ],
+            "settings": {
+              "foreground": "#4FC1FF"
+            }
           }
         ],
         "[*Light*]": {
@@ -533,8 +583,84 @@
               "settings": {
                 "foreground": "#008000"
               }
+            },
+            {
+              "scope": [
+                "variable.other.verilog",
+                "variable.other.port.verilog",
+                "variable.other.escaped.verilog",
+                "variable.other.macro.verilog",
+                "variable.other.preprocessor.verilog",
+                "entity.other.attribute-name.verilog"
+              ],
+              "settings": {
+                "foreground": "#001080"
+              }
+            },
+            {
+              "scope": [
+                "entity.name.type.verilog",
+                "entity.name.type.module.verilog",
+                "support.type.verilog"
+              ],
+              "settings": {
+                "foreground": "#267F99"
+              }
+            },
+            {
+              "scope": [
+                "entity.name.function.verilog",
+                "entity.name.function.preprocessor.verilog",
+                "support.function.system.verilog"
+              ],
+              "settings": {
+                "foreground": "#795E26"
+              }
+            },
+            {
+              "scope": [
+                "entity.name.label.verilog",
+                "entity.name.label.module.verilog"
+              ],
+              "settings": {
+                "foreground": "#000000"
+              }
+            },
+            {
+              "scope": [
+                "constant.other.enum-member.verilog"
+              ],
+              "settings": {
+                "foreground": "#0070C1"
+              }
             }
           ]
+        }
+      },
+      "editor.semanticTokenColorCustomizations": {
+        "rules": {
+          "hdlModule": { "foreground": "#4EC9B0" },
+          "hdlInstance": { "foreground": "#9CDCFE" },
+          "hdlPort": { "foreground": "#9CDCFE" },
+          "hdlSignal": { "foreground": "#9CDCFE" },
+          "hdlParameter": { "foreground": "#9CDCFE" },
+          "hdlFunction": { "foreground": "#DCDCAA" },
+          "hdlGenvar": { "foreground": "#9CDCFE" },
+          "hdlType": { "foreground": "#4EC9B0" },
+          "hdlSystemId": { "foreground": "#DCDCAA" }
+        },
+        "[*Light*]": {
+          "rules": {
+            "hdlModule": { "foreground": "#267F99" },
+            "hdlInstance": { "foreground": "#001080" },
+            "hdlPort": { "foreground": "#001080" },
+            "hdlSignal": { "foreground": "#001080" },
+            "hdlParameter": { "foreground": "#001080" },
+            "hdlFunction": { "foreground": "#795E26" },
+            "hdlGenvar": { "foreground": "#001080" },
+            "hdlType": { "foreground": "#267F99" },
+            "hdlSystemId": { "foreground": "#795E26" }
+          }
         }
       }
     },

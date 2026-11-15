@@ -52,14 +52,20 @@ function isGreen(hex: string | undefined): boolean {
   return green > red + 16 && green > blue + 16;
 }
 
+function commentRules(rules: TextMateRule[]): TextMateRule[] {
+  return rules.filter((rule) =>
+    (Array.isArray(rule.scope) ? rule.scope : [rule.scope]).every((scope) => scope.startsWith('comment.')),
+  );
+}
+
 function expectCommentOnlyGreen(rules: TextMateRule[], where: string): void {
   const scopes = commentScopes();
   assert.ok(scopes.length >= 3, 'grammar declares the three comment kinds');
-  const coloured = scopesOf(rules);
+  const coloured = scopesOf(commentRules(rules));
   for (const scope of scopes) {
     assert.ok(coloured.includes(scope), `${where}: ${scope} has a colour rule`);
   }
-  for (const rule of rules) {
+  for (const rule of commentRules(rules)) {
     assert.ok(isGreen(rule.settings.foreground), `${where}: ${rule.settings.foreground} is green`);
     for (const scope of Array.isArray(rule.scope) ? rule.scope : [rule.scope]) {
       assert.match(scope, /^comment\..+\.verilog$/, `${where}: ${scope} stays inside comments`);
