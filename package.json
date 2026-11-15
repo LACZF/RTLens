@@ -508,6 +508,36 @@
         "when": "editorTextFocus"
       }
     ],
+    "configurationDefaults": {
+      "editor.tokenColorCustomizations": {
+        "textMateRules": [
+          {
+            "scope": [
+              "comment.line.double-slash.verilog",
+              "comment.block.verilog",
+              "comment.block.documentation.verilog"
+            ],
+            "settings": {
+              "foreground": "#6A9955"
+            }
+          }
+        ],
+        "[*Light*]": {
+          "textMateRules": [
+            {
+              "scope": [
+                "comment.line.double-slash.verilog",
+                "comment.block.verilog",
+                "comment.block.documentation.verilog"
+              ],
+              "settings": {
+                "foreground": "#008000"
+              }
+            }
+          ]
+        }
+      }
+    },
     "semanticTokenTypes": [
       {
         "id": "hdlModule",
